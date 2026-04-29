@@ -10,6 +10,9 @@ y = np.sin(x)
 # Create the Dash app
 app = dash.Dash(__name__)
 
+# Expose the Flask server for gunicorn
+server = app.server
+
 # Define the layout
 app.layout = html.Div([
     html.H1("Plotly Dash Example"),
