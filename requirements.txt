@@ -2,3 +2,8 @@ dash
 plotly
 numpy
 gunicorn
+h5py
+fsspec
+
+requests
+aiohttp
