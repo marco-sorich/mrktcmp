@@ -1,7 +1,7 @@
 import os
 
 import dash
-from dash import html, dcc
+from dash import html, dcc, Input, Output, callback
 import plotly.graph_objects as go
 import numpy as np
 import h5py
@@ -29,30 +29,38 @@ else:
     except Exception as e:
         warning_message = f"❌ Error loading data."
 
-# Create sample data
-x = np.linspace(0, 10, 100)
-y = np.sin(x)
-
 # Create the Dash app
 app = dash.Dash(__name__)
 
 # Expose the Flask server for gunicorn
 server = app.server
 
+
+
+
 # Define the layout
 app.layout = html.Div([
     html.H1("Plotly Dash Example"),
     html.P(warning_message, style={'color': 'red' if 'Warning' in warning_message or 'Error' in warning_message else 'green'}),
     html.Div([
-        dcc.Graph(
-            id='example-graph',
-            figure=go.Figure(
-                data=[go.Scatter(x=x, y=y, mode='lines', name='sin(x)')],
-                layout=go.Layout(title='Simple Sine Wave')
-            )
-        )
+        dcc.RadioItems(id='market-type')
     ])
 ])
+
+
+
+
+@callback(
+    Output('market-type', 'options'),
+    Input('market-type', 'value')
+)
+def update_market_type_options(value):
+    if 'data' in locals():
+        markets = list(data.keys())
+        return [{'label': market, 'value': market} for market in markets]
+    else:
+        return []
+
 
 if __name__ == '__main__':
     app.run(debug=True)
