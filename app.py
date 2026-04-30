@@ -55,11 +55,8 @@ app.layout = html.Div([
     Input('market-type', 'value')
 )
 def update_market_type_options(value):
-    if 'data' in locals():
-        markets = list(data.keys())
-        return [{'label': market, 'value': market} for market in markets]
-    else:
-        return []
+    markets = list(data.keys())
+    return markets
 
 
 if __name__ == '__main__':
