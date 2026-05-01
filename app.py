@@ -23,8 +23,7 @@ if not url or url.strip() == "":
 else:
     try:
         with fsspec.open(url, "rb") as f:
-            # data = h5py.File(f, "r")
-            # markets = list(hdf.keys())
+            data = h5py.File(f, "r")
             warning_message = f"✅ Data loaded."
     except Exception as e:
         warning_message = f"❌ Error loading data."
@@ -55,8 +54,7 @@ app.layout = html.Div([
     Input('market-type', 'value')
 )
 def update_market_type_options(value):
-    #markets = list(data.keys())
-    markets = ["ETFs", "Futures", "Indices", "Stocks"]  # Placeholder for actual market types from data
+    markets = list(data.keys())
     return markets
 
 
