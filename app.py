@@ -25,6 +25,9 @@ else:
         with fsspec.open(url, "rb") as f:
             data = h5py.File(f, "r")
             assetsClasses = list(data.keys())
+            letters = {}
+            for assetClass in assetsClasses:
+                letters[assetClass] = list(data[assetClass].keys())
             warning_message = f"✅ Data loaded."
     except Exception as e:
         warning_message = f"❌ Error loading data."
@@ -43,7 +46,8 @@ app.layout = html.Div([
     html.H1("Plotly Dash Example"),
     html.P(warning_message, style={'color': 'red' if 'Warning' in warning_message or 'Error' in warning_message else 'green'}),
     html.Div([
-        dcc.RadioItems(id='assetclasses-type')
+        dcc.RadioItems(assetsClasses, id='assetclasses-type'),
+        dcc.RadioItems(id='letter-type')
     ])
 ])
 
@@ -51,11 +55,11 @@ app.layout = html.Div([
 
 
 @callback(
-    Output('assetclasses-type', 'options'),
+    Output('letter-type', 'options'),
     Input('assetclasses-type', 'value')
 )
-def update_assetclasses_type_options(value):
-    return assetsClasses
+def update_letter_type_options(value):
+    return letters[value]
 
 
 if __name__ == '__main__':
