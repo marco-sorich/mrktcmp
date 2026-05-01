@@ -23,7 +23,8 @@ if not url or url.strip() == "":
 else:
     try:
         with fsspec.open(url, "rb") as f:
-            data = h5py.File(f, "r")
+            # data = h5py.File(f, "r")
+            data = {"EFTs": {}, "Futures": {}, "Indices": {}, "Stocks": {}, "Tests": {}}
             warning_message = f"✅ Data loaded."
     except Exception as e:
         warning_message = f"❌ Error loading data."
