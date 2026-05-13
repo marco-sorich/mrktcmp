@@ -1,0 +1,25 @@
+{
+	"name": "mrktcmp",
+	"build": {
+		"dockerfile": "Dockerfile"
+	},
+	"workspaceFolder": "/workspace",
+	"remoteUser": "vscode",
+	"containerUser": "vscode",
+	"features": {
+		"ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {}
+	},
+	"runArgs": [
+		"--cap-drop=ALL",
+		"--security-opt=no-new-privileges"
+	],
+  	"mounts": [
+		"source=claude-code-config,target=/home/vscode/.claude,type=volume",
+		"source=${localWorkspaceFolder},target=/workspace,type=bind",
+  		"source=${localEnv:HOME}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,consistency=cached"
+	],
+	"postCreateCommand": {
+		//"fix-ownership": "sudo chown -R vscode:vscode /home/vscode/.claude",
+		"pip-install": "pip install --break-system-packages -r requirements.txt"
+	}
+}

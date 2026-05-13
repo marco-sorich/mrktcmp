@@ -78,6 +78,10 @@ logs/
 Thumbs.db
 desktop.ini
 
+# devcontainer
+devcontainer-lock.json
+
 # Project specific
 .env
 config.local.py
+cache/
