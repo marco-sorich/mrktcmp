@@ -4,7 +4,7 @@
         {
             "label": "Start Gunicorn",
             "type": "shell",
-            "command": "gunicorn -b 0.0.0.0:8050 --reload app:server",
+            "command": "PYTHONPATH=/workspace gunicorn -b 0.0.0.0:8050 --reload src.app:server",
             "isBackground": true,
             "group": { "kind": "build", "isDefault": true },
             "problemMatcher": [],
