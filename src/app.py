@@ -65,13 +65,17 @@ app.layout = html.Div([
 
 @callback(
     Output('asset-type', 'options'),
+    Output('asset-type', 'disabled'),
     Input('assetclasses-type', 'value'),
     Input('asset-type', 'search_value'),
-    State('asset-type', 'value')
+    State('asset-type', 'value'),
+    running=[
+        (Output('asset-type', 'disabled'), True, False)
+    ]
 )
 def update_asset_type_options(asset_class, search_value, current_value):
     if not asset_class or df is None:
-        return []
+        return [], True
     filtered = df[df['asset_class'] == asset_class]
     if search_value:
         mask = (
@@ -90,7 +94,7 @@ def update_asset_type_options(asset_class, search_value, current_value):
         if not sel.empty:
             row = sel.iloc[0]
             options.append({'label': f"{row['symbol']} — {row['name']} ({row['interval']})", 'value': current_value})
-    return options
+    return options, False
 
 
 @callback(
