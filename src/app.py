@@ -28,6 +28,7 @@ else:
                              "first_date":"string",
                              "last_date":"string",
                              "filename":"string"})
+        df.sort_values(['asset_class', 'symbol', 'exchange'], inplace=True, ignore_index=True)
         assetsClasses = df['asset_class'].unique().tolist()
         warning_message = "✅ Data loaded."
     except Exception as e:
@@ -47,15 +48,15 @@ app.layout = html.Div([
     html.H1("Plotly Dash Example"),
     html.P(warning_message, style={'color': 'red' if 'Warning' in warning_message or 'Error' in warning_message else 'green'}),
     html.Div([
-        dcc.RadioItems(assetsClasses, id='assetclasses-type'),
+        dcc.RadioItems(assetsClasses, id='assetclasses-type', inline=True),
         dcc.Dropdown(id='asset-type', placeholder='Type to search…')
     ]),
-    html.H2(id='asset-headline'),
+    html.Div(id='asset-headline'),
     dag.AgGrid(
         id='ohlcv-grid',
         columnDefs=[],
         rowData=[],
-        style={'height': '400px'}
+        style={'height': '200px'}
     ),
     dcc.Graph(id='price-chart')
 ])
@@ -110,7 +111,10 @@ def update_chart(filename):
         return empty
     try:
         row = df[df['filename'] == filename].iloc[0]
-        headline = f"{row['name']} — {row['exchange']} — {row['country']}"
+        headline = [
+            html.H2(row['name'], style={'marginBottom': '2px'}),
+            html.P(f"{row['exchange']} — {row['country']}", style={'marginTop': '0', 'color': 'gray'})
+        ]
 
         ohlcv = pd.read_parquet(f"{base_url}/{filename}")
 
