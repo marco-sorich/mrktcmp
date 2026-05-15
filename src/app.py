@@ -4,6 +4,7 @@ import dash
 from dash import html, dcc, Input, Output, State, callback
 import dash_ag_grid as dag
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import numpy as np
 import pandas as pd
 
@@ -118,20 +119,33 @@ def update_chart(filename):
 
         ohlcv = pd.read_parquet(f"{base_url}/{filename}")
 
-        fig = go.Figure(data=[go.Candlestick(
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                            row_heights=[0.75, 0.25], vertical_spacing=0.02)
+        fig.add_trace(go.Candlestick(
             x=ohlcv.index,
             open=ohlcv['Open'],
             high=ohlcv['High'],
             low=ohlcv['Low'],
-            close=ohlcv['Close']
-        )])
-        fig.update_layout(xaxis_rangeslider_visible=False)
+            close=ohlcv['Close'],
+            name='Price'
+        ), row=1, col=1)
+        fig.add_trace(go.Bar(
+            x=ohlcv.index,
+            y=ohlcv['Volume'],
+            name='Volume',
+        ), row=2, col=1)
+        fig.update_xaxes(rangeslider_visible=False)
+        fig.update_layout(showlegend=False)
 
         grid_df = ohlcv.reset_index()
         grid_df.rename(columns={grid_df.columns[0]: 'Date'}, inplace=True)
         grid_df['Date'] = grid_df['Date'].astype(str)
 
-        col_defs = [{'field': col} for col in grid_df.columns]
+        col_defs = [
+            {'field': col, 'valueFormatter': {'function': 'new Date(params.value).toLocaleString()'}}
+            if col == 'Date' else {'field': col}
+            for col in grid_df.columns
+        ]
         row_data = grid_df.to_dict('records')
 
         return fig, row_data, col_defs, headline
