@@ -4,31 +4,31 @@ import dash
 from dash import html, dcc, Input, Output, callback
 import plotly.graph_objects as go
 import numpy as np
-import h5py
-import fsspec
+import pandas as pd
 
-url = os.getenv("DATA_URL")
+base_url = os.getenv("BASE_URL")
 
-# Structure of data file (HDF5 format)
-# * ETFs
-#   * A..Z
-#      * MSCI etc.
-# * Futures
-# * Indices
-# * Stocks
+assetsClasses = []
+df = None
 
-# Check if URL is provided and show warning if empty
-if not url or url.strip() == "":
-    warning_message = "⚠️ Warning: DATA_URL environment variable is not set."
+if not base_url or base_url.strip() == "":
+    warning_message = "⚠️ Warning: BASE_URL environment variable is not set."
 else:
     try:
-        with fsspec.open(url, "rb") as f:
-            data = h5py.File(f, "r")
-            assetsClasses = list(data.keys())
-            letters = {}
-            for assetClass in assetsClasses:
-                letters[assetClass] = list(data[assetClass].keys())
-            warning_message = f"✅ Data loaded."
+        df = pd.read_csv(f"{base_url}/master.csv",
+                         dtype={
+                             "asset_class":"string",
+                             "symbol":"string",
+                             "interval":"string",
+                             "name":"string",
+                             "exchange":"string",
+                             "country":"string",
+                             "category":"string",
+                             "first_date":"string",
+                             "last_date":"string",
+                             "filename":"string"})
+        assetsClasses = df['asset_class'].unique().tolist()
+        warning_message = "✅ Data loaded."
     except Exception as e:
         warning_message = f"❌ Error loading data."
 
@@ -47,7 +47,7 @@ app.layout = html.Div([
     html.P(warning_message, style={'color': 'red' if 'Warning' in warning_message or 'Error' in warning_message else 'green'}),
     html.Div([
         dcc.RadioItems(assetsClasses, id='assetclasses-type'),
-        dcc.RadioItems(id='letter-type')
+        dcc.Dropdown(id='asset-type')
     ])
 ])
 
@@ -55,11 +55,13 @@ app.layout = html.Div([
 
 
 @callback(
-    Output('letter-type', 'options'),
+    Output('asset-type', 'options'),
     Input('assetclasses-type', 'value')
 )
-def update_letter_type_options(value):
-    return letters[value]
+def update_asset_type_options(value):
+    if not value or df is None:
+        return []
+    return df[df['asset_class'] == value]['symbol'].tolist()
 
 
 if __name__ == '__main__':
