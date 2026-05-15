@@ -1,7 +1,8 @@
 import os
 
 import dash
-from dash import html, dcc, Input, Output, callback
+from dash import html, dcc, Input, Output, State, callback
+import dash_ag_grid as dag
 import plotly.graph_objects as go
 import numpy as np
 import pandas as pd
@@ -47,8 +48,16 @@ app.layout = html.Div([
     html.P(warning_message, style={'color': 'red' if 'Warning' in warning_message or 'Error' in warning_message else 'green'}),
     html.Div([
         dcc.RadioItems(assetsClasses, id='assetclasses-type'),
-        dcc.Dropdown(id='asset-type')
-    ])
+        dcc.Dropdown(id='asset-type', placeholder='Type to search…')
+    ]),
+    html.H2(id='asset-headline'),
+    dag.AgGrid(
+        id='ohlcv-grid',
+        columnDefs=[],
+        rowData=[],
+        style={'height': '400px'}
+    ),
+    dcc.Graph(id='price-chart')
 ])
 
 
@@ -56,12 +65,70 @@ app.layout = html.Div([
 
 @callback(
     Output('asset-type', 'options'),
-    Input('assetclasses-type', 'value')
+    Input('assetclasses-type', 'value'),
+    Input('asset-type', 'search_value'),
+    State('asset-type', 'value')
 )
-def update_asset_type_options(value):
-    if not value or df is None:
+def update_asset_type_options(asset_class, search_value, current_value):
+    if not asset_class or df is None:
         return []
-    return df[df['asset_class'] == value]['symbol'].tolist()
+    filtered = df[df['asset_class'] == asset_class]
+    if search_value:
+        mask = (
+            filtered['symbol'].str.contains(search_value, case=False, na=False) |
+            filtered['name'].str.contains(search_value, case=False, na=False)
+        )
+        filtered = filtered[mask]
+    else:
+        filtered = filtered.head(50)
+    options = [
+        {'label': f"{row['symbol']} — {row['name']} ({row['interval']})", 'value': row['filename']}
+        for _, row in filtered.iterrows()
+    ]
+    if current_value and not any(o['value'] == current_value for o in options):
+        sel = df[df['filename'] == current_value]
+        if not sel.empty:
+            row = sel.iloc[0]
+            options.append({'label': f"{row['symbol']} — {row['name']} ({row['interval']})", 'value': current_value})
+    return options
+
+
+@callback(
+    Output('price-chart', 'figure'),
+    Output('ohlcv-grid', 'rowData'),
+    Output('ohlcv-grid', 'columnDefs'),
+    Output('asset-headline', 'children'),
+    Input('asset-type', 'value')
+)
+def update_chart(filename):
+    empty = go.Figure(), [], [], ""
+    if not filename or not base_url or df is None:
+        return empty
+    try:
+        row = df[df['filename'] == filename].iloc[0]
+        headline = f"{row['name']} — {row['exchange']} — {row['country']}"
+
+        ohlcv = pd.read_parquet(f"{base_url}/{filename}")
+
+        fig = go.Figure(data=[go.Candlestick(
+            x=ohlcv.index,
+            open=ohlcv['Open'],
+            high=ohlcv['High'],
+            low=ohlcv['Low'],
+            close=ohlcv['Close']
+        )])
+        fig.update_layout(xaxis_rangeslider_visible=False)
+
+        grid_df = ohlcv.reset_index()
+        grid_df.rename(columns={grid_df.columns[0]: 'Date'}, inplace=True)
+        grid_df['Date'] = grid_df['Date'].astype(str)
+
+        col_defs = [{'field': col} for col in grid_df.columns]
+        row_data = grid_df.to_dict('records')
+
+        return fig, row_data, col_defs, headline
+    except Exception:
+        return empty
 
 
 if __name__ == '__main__':

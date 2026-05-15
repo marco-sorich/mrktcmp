@@ -4,3 +4,5 @@ numpy
 pandas
 gunicorn
 requests
+pyarrow
+dash-ag-grid
