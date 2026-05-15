@@ -32,7 +32,6 @@ env/
 .env.local
 
 # IDE - VSCode
-.vscode/
 *.code-workspace
 
 # IDE - Other

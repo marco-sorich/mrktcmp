@@ -1,0 +1,9 @@
+{
+    "remote.autoForwardPortsFallback": 0,
+    "tasks.buttons": [
+        {
+            "label": "▶ Gunicorn",
+            "task": "Start Gunicorn"
+        }
+    ]
+}

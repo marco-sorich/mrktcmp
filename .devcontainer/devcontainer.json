@@ -21,5 +21,22 @@
 	"postCreateCommand": {
 		//"fix-ownership": "sudo chown -R vscode:vscode /home/vscode/.claude",
 		"pip-install": "pip install --break-system-packages -r requirements.txt"
+	},
+	"remoteEnv": {
+		"DATA_URL": "${localEnv:DATA_URL}"
+	},
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"actboy168.tasks"
+			]
+		}
+	},
+	"forwardPorts": [8050],
+	"portsAttributes": {
+		"8050": {
+			"label": "Dash App",
+			"onAutoForward": "openPreview"
+		}
 	}
 }
