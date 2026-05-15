@@ -13,7 +13,7 @@ This is a simple example of a web page built with Plotly and Dash.
 
 Run the app with:
 ```
-python app.py
+gunicorn src.app:server
 ```
 
 The app will start a local server. Open your browser and go to `http://127.0.0.1:8050/` to view the page.
