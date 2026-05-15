@@ -129,23 +129,26 @@ def update_chart(filename):
             close=ohlcv['Close'],
             name='Price'
         ), row=1, col=1)
-        fig.add_trace(go.Bar(
+        fig.add_trace(go.Scatter(
             x=ohlcv.index,
             y=ohlcv['Volume'],
             name='Volume',
+            fill='tozeroy',
+            line=dict(width=1)
         ), row=2, col=1)
         fig.update_xaxes(rangeslider_visible=False)
         fig.update_layout(showlegend=False)
 
         grid_df = ohlcv.reset_index()
         grid_df.rename(columns={grid_df.columns[0]: 'Date'}, inplace=True)
-        grid_df['Date'] = grid_df['Date'].astype(str)
+        grid_df['Date'] = pd.to_datetime(grid_df['Date']).dt.strftime('%d-%b-%Y')
+        for col in ('Open', 'High', 'Low', 'Close'):
+            if col in grid_df.columns:
+                grid_df[col] = grid_df[col].map('{:,.2f}'.format)
+        if 'Volume' in grid_df.columns:
+            grid_df['Volume'] = grid_df['Volume'].map('{:,}'.format)
 
-        col_defs = [
-            {'field': col, 'valueFormatter': {'function': 'new Date(params.value).toLocaleString()'}}
-            if col == 'Date' else {'field': col}
-            for col in grid_df.columns
-        ]
+        col_defs = [{'field': col} for col in grid_df.columns]
         row_data = grid_df.to_dict('records')
 
         return fig, row_data, col_defs, headline
