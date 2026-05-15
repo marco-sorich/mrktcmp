@@ -80,11 +80,24 @@ def update_asset_type_options(asset_class, search_value, current_value):
         return [], True
     filtered = df[df['asset_class'] == asset_class]
     if search_value:
-        mask = (
-            filtered['symbol'].str.contains(search_value, case=False, na=False) |
-            filtered['name'].str.contains(search_value, case=False, na=False)
+        sl = search_value.lower()
+        sym = filtered['symbol'].str.lower()
+        name = filtered['name'].str.lower()
+        score = np.select(
+            [sym == sl,
+             sym.str.startswith(sl, na=False),
+             name.str.startswith(sl, na=False),
+             sym.str.contains(sl, na=False),
+             name.str.contains(sl, na=False)],
+            [0, 1, 2, 3, 4],
+            default=99
         )
-        filtered = filtered[mask].head(10)
+        mask = score < 99
+        filtered = (filtered[mask]
+                    .assign(_score=score[mask])
+                    .sort_values('_score')
+                    .drop(columns='_score')
+                    .head(10))
     else:
         filtered = filtered.head(10)
     options = [
