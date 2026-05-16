@@ -19,29 +19,27 @@ else:
     try:
         df = pd.read_csv(f"{base_url}/master.csv",
                          dtype={
-                             "asset_class":"string",
-                             "symbol":"string",
-                             "interval":"string",
-                             "name":"string",
-                             "exchange":"string",
-                             "country":"string",
-                             "category":"string",
-                             "first_date":"string",
-                             "last_date":"string",
-                             "filename":"string"})
+                             "asset_class": "string",
+                             "symbol": "string",
+                             "interval": "string",
+                             "name": "string",
+                             "exchange": "string",
+                             "country": "string",
+                             "category": "string",
+                             "first_date": "string",
+                             "last_date": "string",
+                             "filename": "string"})
         df.sort_values(['asset_class', 'symbol', 'exchange'], inplace=True, ignore_index=True)
         assetsClasses = df['asset_class'].unique().tolist()
         warning_message = "✅ Data loaded."
-    except Exception as e:
-        warning_message = f"❌ Error loading data."
+    except Exception:
+        warning_message = "❌ Error loading data."
 
 # Create the Dash app
 app = dash.Dash(__name__)
 
 # Expose the Flask server for gunicorn
 server = app.server
-
-
 
 
 # Define the layout
@@ -61,8 +59,6 @@ app.layout = html.Div([
     ),
     dcc.Graph(id='price-chart')
 ])
-
-
 
 
 @callback(
