@@ -44,7 +44,7 @@ server = app.server
 
 # Define the layout
 app.layout = html.Div([
-    html.H1("Plotly Dash Example"),
+    html.H1("mrktcmp _ markets compare"),
     html.P(warning_message, style={'color': 'red' if 'Warning' in warning_message or 'Error' in warning_message else 'green'}),
     html.Div([
         dcc.RadioItems(assetsClasses, id='assetclasses-type', inline=True),
