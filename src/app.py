@@ -27,7 +27,7 @@ assetsClasses = []
 df = None
 
 if not base_url or base_url.strip() == "":
-    log.error("BASE_URL environment variable is not set.")
+    log.critical("BASE_URL environment variable is not set.")
 else:
     try:
         df = pd.read_csv(f"{base_url}/master.csv",
