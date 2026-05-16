@@ -121,43 +121,43 @@ class TestUpdateAssetTypeOptions:
         values = [o["value"] for o in options]
         assert "nonexistent.parquet" not in values
 
-    def test_results_capped_at_ten(self):
+    def test_results_capped_at_thirty(self):
         large_df = pd.DataFrame(
             {
-                "asset_class": ["stocks"] * 15,
-                "symbol": [f"SYM{i}" for i in range(15)],
-                "interval": ["1d"] * 15,
-                "name": [f"Company {i}" for i in range(15)],
-                "exchange": ["NYSE"] * 15,
-                "country": ["US"] * 15,
-                "category": ["Tech"] * 15,
-                "first_date": ["2020-01-01"] * 15,
-                "last_date": ["2024-01-01"] * 15,
-                "filename": [f"sym{i}.parquet" for i in range(15)],
+                "asset_class": ["stocks"] * 40,
+                "symbol": [f"SYM{i}" for i in range(40)],
+                "interval": ["1d"] * 40,
+                "name": [f"Company {i}" for i in range(40)],
+                "exchange": ["NYSE"] * 40,
+                "country": ["US"] * 40,
+                "category": ["Tech"] * 40,
+                "first_date": ["2020-01-01"] * 40,
+                "last_date": ["2024-01-01"] * 40,
+                "filename": [f"sym{i}.parquet" for i in range(40)],
             }
         )
         with patch.object(app_module, "df", large_df):
             options, _ = update_asset_type_options("stocks", None, None)
-        assert len(options) == 10
+        assert len(options) == 30
 
-    def test_search_results_capped_at_ten(self):
+    def test_search_results_capped_at_thirty(self):
         large_df = pd.DataFrame(
             {
-                "asset_class": ["stocks"] * 15,
-                "symbol": [f"ABC{i}" for i in range(15)],
-                "interval": ["1d"] * 15,
-                "name": [f"Company {i}" for i in range(15)],
-                "exchange": ["NYSE"] * 15,
-                "country": ["US"] * 15,
-                "category": ["Tech"] * 15,
-                "first_date": ["2020-01-01"] * 15,
-                "last_date": ["2024-01-01"] * 15,
-                "filename": [f"sym{i}.parquet" for i in range(15)],
+                "asset_class": ["stocks"] * 40,
+                "symbol": [f"ABC{i}" for i in range(40)],
+                "interval": ["1d"] * 40,
+                "name": [f"Company {i}" for i in range(40)],
+                "exchange": ["NYSE"] * 40,
+                "country": ["US"] * 40,
+                "category": ["Tech"] * 40,
+                "first_date": ["2020-01-01"] * 40,
+                "last_date": ["2024-01-01"] * 40,
+                "filename": [f"sym{i}.parquet" for i in range(40)],
             }
         )
         with patch.object(app_module, "df", large_df):
             options, _ = update_asset_type_options("stocks", "ABC", None)
-        assert len(options) == 10
+        assert len(options) == 30
 
 
 # ---------------------------------------------------------------------------

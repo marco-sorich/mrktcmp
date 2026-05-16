@@ -84,9 +84,9 @@ def update_asset_type_options(asset_class, search_value, current_value):
             filtered['symbol'].str.contains(search_value, case=False, na=False) |
             filtered['name'].str.contains(search_value, case=False, na=False)
         )
-        filtered = filtered[mask].head(10)
+        filtered = filtered[mask].head(30)
     else:
-        filtered = filtered.head(10)
+        filtered = filtered.head(30)
     options = [
         {'label': f"{row['symbol']} — {row['name']} ({row['interval']})", 'value': row['filename']}
         for _, row in filtered.iterrows()
