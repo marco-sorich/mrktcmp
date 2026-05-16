@@ -169,45 +169,33 @@ class TestUpdateChart:
     def test_no_filename_returns_empty(self):
         with patch.object(app_module, "df", SAMPLE_DF), \
              patch.object(app_module, "base_url", BASE_URL):
-            fig, row_data, col_defs, headline = update_chart(None)
-        assert row_data == []
-        assert col_defs == []
+            fig, headline = update_chart(None)
         assert headline == ""
 
     def test_no_base_url_returns_empty(self):
         with patch.object(app_module, "df", SAMPLE_DF), \
              patch.object(app_module, "base_url", None):
-            fig, row_data, col_defs, headline = update_chart("aapl.parquet")
-        assert row_data == []
-        assert col_defs == []
+            fig, headline = update_chart("aapl.parquet")
         assert headline == ""
 
     def test_df_none_returns_empty(self):
         with patch.object(app_module, "df", None), \
              patch.object(app_module, "base_url", BASE_URL):
-            fig, row_data, col_defs, headline = update_chart("aapl.parquet")
-        assert row_data == []
-        assert col_defs == []
+            fig, headline = update_chart("aapl.parquet")
         assert headline == ""
-
-    def test_empty_filename_returns_empty(self):
-        with patch.object(app_module, "df", SAMPLE_DF), \
-             patch.object(app_module, "base_url", BASE_URL):
-            fig, row_data, col_defs, headline = update_chart("")
-        assert row_data == []
 
     def test_valid_input_returns_figure(self):
         with patch.object(app_module, "df", SAMPLE_DF), \
              patch.object(app_module, "base_url", BASE_URL), \
              patch("src.app.pd.read_parquet", return_value=SAMPLE_OHLCV):
-            fig, row_data, col_defs, headline = update_chart("aapl.parquet")
+            fig, headline = update_chart("aapl.parquet")
         assert isinstance(fig, go.Figure)
 
     def test_chart_contains_candlestick_trace(self):
         with patch.object(app_module, "df", SAMPLE_DF), \
              patch.object(app_module, "base_url", BASE_URL), \
              patch("src.app.pd.read_parquet", return_value=SAMPLE_OHLCV):
-            fig, _, _, _ = update_chart("aapl.parquet")
+            fig, _ = update_chart("aapl.parquet")
         trace_types = [type(t).__name__ for t in fig.data]
         assert "Candlestick" in trace_types
 
@@ -215,63 +203,22 @@ class TestUpdateChart:
         with patch.object(app_module, "df", SAMPLE_DF), \
              patch.object(app_module, "base_url", BASE_URL), \
              patch("src.app.pd.read_parquet", return_value=SAMPLE_OHLCV):
-            fig, _, _, _ = update_chart("aapl.parquet")
+            fig, _ = update_chart("aapl.parquet")
         trace_types = [type(t).__name__ for t in fig.data]
         assert "Scatter" in trace_types
-
-    def test_row_data_length_matches_ohlcv(self):
-        with patch.object(app_module, "df", SAMPLE_DF), \
-             patch.object(app_module, "base_url", BASE_URL), \
-             patch("src.app.pd.read_parquet", return_value=SAMPLE_OHLCV):
-            _, row_data, _, _ = update_chart("aapl.parquet")
-        assert len(row_data) == len(SAMPLE_OHLCV)
-
-    def test_col_defs_include_all_ohlcv_columns(self):
-        with patch.object(app_module, "df", SAMPLE_DF), \
-             patch.object(app_module, "base_url", BASE_URL), \
-             patch("src.app.pd.read_parquet", return_value=SAMPLE_OHLCV):
-            _, _, col_defs, _ = update_chart("aapl.parquet")
-        fields = [c["field"] for c in col_defs]
-        assert "Date" in fields
-        for col in ("Open", "High", "Low", "Close", "Volume"):
-            assert col in fields
-
-    def test_date_formatted_as_dd_mon_yyyy(self):
-        with patch.object(app_module, "df", SAMPLE_DF), \
-             patch.object(app_module, "base_url", BASE_URL), \
-             patch("src.app.pd.read_parquet", return_value=SAMPLE_OHLCV):
-            _, row_data, _, _ = update_chart("aapl.parquet")
-        assert row_data[0]["Date"] == "01-Jan-2024"
-
-    def test_prices_formatted_to_two_decimals(self):
-        with patch.object(app_module, "df", SAMPLE_DF), \
-             patch.object(app_module, "base_url", BASE_URL), \
-             patch("src.app.pd.read_parquet", return_value=SAMPLE_OHLCV):
-            _, row_data, _, _ = update_chart("aapl.parquet")
-        for col in ("Open", "High", "Low", "Close"):
-            val = row_data[0][col]
-            assert "." in val
-            assert len(val.split(".")[1]) == 2
-
-    def test_volume_formatted_with_commas(self):
-        with patch.object(app_module, "df", SAMPLE_DF), \
-             patch.object(app_module, "base_url", BASE_URL), \
-             patch("src.app.pd.read_parquet", return_value=SAMPLE_OHLCV):
-            _, row_data, _, _ = update_chart("aapl.parquet")
-        assert row_data[0]["Volume"] == "1,000,000"
 
     def test_headline_shows_asset_name(self):
         with patch.object(app_module, "df", SAMPLE_DF), \
              patch.object(app_module, "base_url", BASE_URL), \
              patch("src.app.pd.read_parquet", return_value=SAMPLE_OHLCV):
-            _, _, _, headline = update_chart("aapl.parquet")
+            _, headline = update_chart("aapl.parquet")
         assert any("Apple Inc" in str(c) for c in headline)
 
     def test_headline_shows_exchange_and_country(self):
         with patch.object(app_module, "df", SAMPLE_DF), \
              patch.object(app_module, "base_url", BASE_URL), \
              patch("src.app.pd.read_parquet", return_value=SAMPLE_OHLCV):
-            _, _, _, headline = update_chart("aapl.parquet")
+            _, headline = update_chart("aapl.parquet")
         combined = " ".join(str(c) for c in headline)
         assert "NASDAQ" in combined
         assert "US" in combined
@@ -280,18 +227,14 @@ class TestUpdateChart:
         with patch.object(app_module, "df", SAMPLE_DF), \
              patch.object(app_module, "base_url", BASE_URL), \
              patch("src.app.pd.read_parquet", side_effect=Exception("network error")):
-            fig, row_data, col_defs, headline = update_chart("aapl.parquet")
-        assert row_data == []
-        assert col_defs == []
+            fig, headline = update_chart("aapl.parquet")
         assert headline == ""
 
     def test_unknown_filename_returns_empty(self):
         with patch.object(app_module, "df", SAMPLE_DF), \
              patch.object(app_module, "base_url", BASE_URL):
             # filename not in df → .iloc[0] raises IndexError → caught → empty
-            fig, row_data, col_defs, headline = update_chart("nonexistent.parquet")
-        assert row_data == []
-        assert col_defs == []
+            fig, headline = update_chart("nonexistent.parquet")
         assert headline == ""
 
 
@@ -307,10 +250,6 @@ class TestAppStructure:
 
     def test_layout_is_not_none(self):
         assert app_module.app.layout is not None
-
-    def test_warning_message_set_when_no_base_url(self):
-        # Module was imported without BASE_URL, so warning_message should reflect that
-        assert "Warning" in app_module.warning_message
 
     def test_df_is_none_when_no_base_url(self):
         assert app_module.df is None

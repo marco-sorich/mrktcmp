@@ -1,6 +1,19 @@
+import logging
 import os
+import sys
 
 import dash
+
+_stdout_handler = logging.StreamHandler(sys.stdout)
+_stdout_handler.setLevel(logging.DEBUG)
+_stdout_handler.addFilter(lambda r: r.levelno < logging.WARNING)
+
+_stderr_handler = logging.StreamHandler(sys.stderr)
+_stderr_handler.setLevel(logging.WARNING)
+
+logging.basicConfig(level=logging.DEBUG, handlers=[_stdout_handler, _stderr_handler])
+log = logging.getLogger(__name__)
+
 from dash import html, dcc, Input, Output, State, callback
 import dash_ag_grid as dag
 import plotly.graph_objects as go
@@ -14,7 +27,7 @@ assetsClasses = []
 df = None
 
 if not base_url or base_url.strip() == "":
-    warning_message = "⚠️ Warning: BASE_URL environment variable is not set."
+    log.error("BASE_URL environment variable is not set.")
 else:
     try:
         df = pd.read_csv(f"{base_url}/master.csv",
@@ -31,9 +44,9 @@ else:
                              "filename": "string"})
         df.sort_values(['asset_class', 'symbol', 'exchange'], inplace=True, ignore_index=True)
         assetsClasses = df['asset_class'].unique().tolist()
-        warning_message = "✅ Data loaded."
+        log.info("Data loaded.")
     except Exception:
-        warning_message = "❌ Error loading data."
+        log.exception("Failed to load master.csv from BASE_URL")
 
 # Create the Dash app
 app = dash.Dash(__name__)
@@ -45,18 +58,11 @@ server = app.server
 # Define the layout
 app.layout = html.Div([
     html.H1("mrktcmp _ markets compare"),
-    html.P(warning_message, style={'color': 'red' if 'Warning' in warning_message or 'Error' in warning_message else 'green'}),
     html.Div([
         dcc.RadioItems(assetsClasses, id='assetclasses-type', inline=True),
         dcc.Dropdown(id='asset-type', placeholder='Type to search…')
     ]),
     html.Div(id='asset-headline'),
-    dag.AgGrid(
-        id='ohlcv-grid',
-        columnDefs=[],
-        rowData=[],
-        style={'height': '200px'}
-    ),
     dcc.Graph(id='price-chart')
 ])
 
@@ -105,18 +111,17 @@ def update_asset_type_options(asset_class, search_value, current_value):
         if not sel.empty:
             row = sel.iloc[0]
             options.append({'label': f"{row['symbol']} — {row['name']} ({row['interval']})", 'value': current_value})
+    log.info("Asset type selected: %s", asset_class)
     return options, False
 
 
 @callback(
     Output('price-chart', 'figure'),
-    Output('ohlcv-grid', 'rowData'),
-    Output('ohlcv-grid', 'columnDefs'),
     Output('asset-headline', 'children'),
     Input('asset-type', 'value')
 )
 def update_chart(filename):
-    empty = go.Figure(), [], [], ""
+    empty = go.Figure(), ""
     if not filename or not base_url or df is None:
         return empty
     try:
@@ -157,11 +162,11 @@ def update_chart(filename):
         if 'Volume' in grid_df.columns:
             grid_df['Volume'] = grid_df['Volume'].map('{:,}'.format)
 
-        col_defs = [{'field': col} for col in grid_df.columns]
-        row_data = grid_df.to_dict('records')
+        log.info("Data loaded from %s", filename)
 
-        return fig, row_data, col_defs, headline
+        return fig, headline
     except Exception:
+        log.exception("Failed to load chart data for %s", filename)
         return empty
 
 
