@@ -92,7 +92,12 @@ def update_asset_type_options(asset_class, search_value, current_value):
             [0, 1, 2, 3, 4],
             default=99
         )
-        filtered = filtered[mask].head(30)
+        mask = score < 99
+        filtered = (filtered[mask]
+                    .assign(_score=score[mask])
+                    .sort_values('_score')
+                    .drop(columns='_score')
+                    .head(30))
     else:
         filtered = filtered.head(30)
     options = [
