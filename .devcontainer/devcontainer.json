@@ -23,8 +23,9 @@
 		"pip-install": "pip install --break-system-packages -r requirements.txt"
 	},
 	"remoteEnv": {
-		"DATA_URL": "${localEnv:DATA_URL}"
-		"BASE_URL": "${localEnv:BASE_URL}"
+		"DATA_URL": "${localEnv:DATA_URL}",
+		"BASE_URL": "${localEnv:BASE_URL}",
+		"DASH_DEBUG": "true"
 	},
 	"customizations": {
 		"vscode": {
