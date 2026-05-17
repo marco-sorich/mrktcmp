@@ -6,6 +6,12 @@ import time
 
 import dash
 
+from dash import html, dcc, Input, Output, State, callback
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import numpy as np
+import pandas as pd
+
 start_time = time.time()
 
 _log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.DEBUG)
@@ -20,12 +26,6 @@ _stderr_handler.setLevel(logging.WARNING)
 logging.basicConfig(level=_log_level, handlers=[_stdout_handler, _stderr_handler])
 log = logging.getLogger(__name__)
 
-from dash import html, dcc, Input, Output, State, callback
-import dash_ag_grid as dag
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import numpy as np
-import pandas as pd
 
 base_url = os.getenv("BASE_URL")
 
