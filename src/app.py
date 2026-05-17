@@ -6,7 +6,9 @@ import time
 
 import dash
 
-from dash import html, dcc, Input, Output, State, callback
+import io
+
+from dash import html, dcc, Input, Output, State, callback, Patch, no_update
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import numpy as np
@@ -60,7 +62,8 @@ app.layout = html.Div([
         dcc.Dropdown(id='asset-type', placeholder='Type to search…')
     ]),
     html.Div(id='asset-headline'),
-    dcc.Graph(id='price-chart')
+    dcc.Graph(id='price-chart'),
+    dcc.Store(id='ohlcv-data'),
 ])
 
 
@@ -142,11 +145,12 @@ def update_asset_search(search_value, asset_class, current_value):
 @callback(
     Output('price-chart', 'figure'),
     Output('asset-headline', 'children'),
+    Output('ohlcv-data', 'data'),
     Input('asset-type', 'value')
 )
 @log_time
 def update_chart(filename):
-    empty = go.Figure(), ""
+    empty = go.Figure(), "", None
     if not filename or not base_url or df is None:
         return empty
     try:
@@ -189,11 +193,48 @@ def update_chart(filename):
             grid_df['Volume'] = grid_df['Volume'].map('{:,}'.format)
 
         log.info("Data loaded from %s", filename)
-
-        return fig, headline
+        store = ohlcv[['High', 'Low', 'Volume']].to_json(date_format='iso', orient='split')
+        return fig, headline, store
     except Exception:
         log.exception("Failed to load chart data for %s", filename)
         return empty
+
+
+@callback(
+    Output('price-chart', 'figure', allow_duplicate=True),
+    Input('price-chart', 'relayoutData'),
+    State('ohlcv-data', 'data'),
+    prevent_initial_call=True
+)
+@log_time
+def sync_yaxis_on_xzoom(relayout_data, ohlcv_json):
+    if not relayout_data or ohlcv_json is None:
+        return no_update
+    if relayout_data.get('xaxis.autorange') or relayout_data.get('autosize'):
+        patch = Patch()
+        patch['layout']['yaxis']['autorange'] = True
+        patch['layout']['yaxis2']['autorange'] = True
+        return patch
+    x0 = relayout_data.get('xaxis.range[0]')
+    x1 = relayout_data.get('xaxis.range[1]')
+    if x0 is None or x1 is None:
+        return no_update
+    ohlcv = pd.read_json(io.StringIO(ohlcv_json), orient='split', convert_axes=True)
+    x0_ts, x1_ts = pd.Timestamp(x0), pd.Timestamp(x1)
+    if ohlcv.index.tz is not None and x0_ts.tz is None:
+        x0_ts = x0_ts.tz_localize('UTC').tz_convert(ohlcv.index.tz)
+        x1_ts = x1_ts.tz_localize('UTC').tz_convert(ohlcv.index.tz)
+    visible = ohlcv[(ohlcv.index >= x0_ts) & (ohlcv.index <= x1_ts)]
+    if visible.empty:
+        return no_update
+    low, high = visible['Low'].min(), visible['High'].max()
+    margin = (high - low) * 0.02
+    patch = Patch()
+    patch['layout']['yaxis']['autorange'] = False
+    patch['layout']['yaxis']['range'] = [low - margin, high + margin]
+    patch['layout']['yaxis2']['autorange'] = False
+    patch['layout']['yaxis2']['range'] = [0, visible['Volume'].max() * 1.1]
+    return patch
 
 
 if __name__ == '__main__':
