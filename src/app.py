@@ -46,7 +46,7 @@ else:
         log.exception("Failed to load master.csv from BASE_URL")
 
 # Create the Dash app
-app = dash.Dash(__name__)
+app = dash.Dash(__name__, meta_tags=[{"name": "viewport", "content": "width=device-width, initial-scale=1"}])
 
 log.debug(f'Initialization time: {(time.time() - start_time)*1000:,.2f}ms')
 
@@ -62,9 +62,9 @@ app.layout = html.Div([
         dcc.Dropdown(id='asset-type', placeholder='Type to search…')
     ]),
     html.Div(id='asset-headline'),
-    dcc.Graph(id='price-chart'),
+    dcc.Graph(id='price-chart', style={'width': '100%'}),
     dcc.Store(id='ohlcv-data'),
-])
+], style={'maxWidth': '100%', 'padding': '0 8px', 'boxSizing': 'border-box'})
 
 
 def log_time(func):
@@ -181,7 +181,7 @@ def update_chart(filename):
             line=dict(width=1)
         ), row=2, col=1)
         fig.update_xaxes(rangeslider_visible=False)
-        fig.update_layout(showlegend=False)
+        fig.update_layout(showlegend=False, margin=dict(l=8, r=8, t=8, b=8))
 
         grid_df = ohlcv.reset_index()
         grid_df.rename(columns={grid_df.columns[0]: 'Date'}, inplace=True)
