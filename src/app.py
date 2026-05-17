@@ -8,7 +8,7 @@ import dash
 
 start_time = time.time()
 
-_log_level = getattr(logging, os.getenv("LOG_LEVEL", "DEBUG").upper(), logging.DEBUG)
+_log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.DEBUG)
 
 _stdout_handler = logging.StreamHandler(sys.stdout)
 _stdout_handler.setLevel(_log_level)
@@ -46,7 +46,7 @@ else:
 # Create the Dash app
 app = dash.Dash(__name__)
 
-log.info(f'Initialization time: {(time.time() - start_time)*1000:,.2f}ms')
+log.debug(f'Initialization time: {(time.time() - start_time)*1000:,.2f}ms')
 
 # Expose the Flask server for gunicorn
 server = app.server
@@ -69,7 +69,7 @@ def log_time(func):
     def wrapper(*args, **kwargs):
         t0 = time.time()
         result = func(*args, **kwargs)
-        log.info(f'{func.__name__} callback time: {(time.time() - t0)*1000:,.2f}ms')
+        log.debug(f'{func.__name__} callback time: {(time.time() - t0)*1000:,.2f}ms')
         return result
     return wrapper
 
