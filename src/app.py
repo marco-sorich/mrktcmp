@@ -157,6 +157,7 @@ def update_chart(filename):
         ]
 
         ohlcv = pd.read_parquet(f"{base_url}/{filename}")
+        ohlcv = ohlcv[ohlcv.index >= pd.Timestamp.now(tz=ohlcv.index.tz) - pd.DateOffset(years=10)]
 
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                             row_heights=[0.75, 0.25], vertical_spacing=0.02)
@@ -168,7 +169,7 @@ def update_chart(filename):
             close=ohlcv['Close'],
             name='Price'
         ), row=1, col=1)
-        fig.add_trace(go.Scatter(
+        fig.add_trace(go.Scattergl(
             x=ohlcv.index,
             y=ohlcv['Volume'],
             name='Volume',
