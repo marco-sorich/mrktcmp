@@ -8,14 +8,16 @@ import dash
 
 start_time = time.time()
 
+_log_level = getattr(logging, os.getenv("LOG_LEVEL", "DEBUG").upper(), logging.DEBUG)
+
 _stdout_handler = logging.StreamHandler(sys.stdout)
-_stdout_handler.setLevel(logging.DEBUG)
+_stdout_handler.setLevel(_log_level)
 _stdout_handler.addFilter(lambda r: r.levelno < logging.WARNING)
 
 _stderr_handler = logging.StreamHandler(sys.stderr)
 _stderr_handler.setLevel(logging.WARNING)
 
-logging.basicConfig(level=logging.DEBUG, handlers=[_stdout_handler, _stderr_handler])
+logging.basicConfig(level=_log_level, handlers=[_stdout_handler, _stderr_handler])
 log = logging.getLogger(__name__)
 
 from dash import html, dcc, Input, Output, State, callback
