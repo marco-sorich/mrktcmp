@@ -1,8 +1,12 @@
+import functools
 import logging
 import os
 import sys
+import time
 
 import dash
+
+start_time = time.time()
 
 _stdout_handler = logging.StreamHandler(sys.stdout)
 _stdout_handler.setLevel(logging.DEBUG)
@@ -30,18 +34,7 @@ if not base_url or base_url.strip() == "":
     log.critical("BASE_URL environment variable is not set.")
 else:
     try:
-        df = pd.read_csv(f"{base_url}/master.csv",
-                         dtype={
-                             "asset_class": "string",
-                             "symbol": "string",
-                             "interval": "string",
-                             "name": "string",
-                             "exchange": "string",
-                             "country": "string",
-                             "category": "string",
-                             "first_date": "string",
-                             "last_date": "string",
-                             "filename": "string"})
+        df = pd.read_parquet(f"{base_url}/master.parquet")
         df.sort_values(['asset_class', 'symbol', 'exchange'], inplace=True, ignore_index=True)
         assetsClasses = df['asset_class'].unique().tolist()
         log.info("Data loaded.")
@@ -50,6 +43,8 @@ else:
 
 # Create the Dash app
 app = dash.Dash(__name__)
+
+log.info(f'Initialization time: {(time.time() - start_time)*1000:,.2f}ms')
 
 # Expose the Flask server for gunicorn
 server = app.server
@@ -67,19 +62,47 @@ app.layout = html.Div([
 ])
 
 
+def log_time(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        t0 = time.time()
+        result = func(*args, **kwargs)
+        log.info(f'{func.__name__} callback time: {(time.time() - t0)*1000:,.2f}ms')
+        return result
+    return wrapper
+
+
 @callback(
     Output('asset-type', 'options'),
     Output('asset-type', 'disabled'),
     Input('assetclasses-type', 'value'),
-    Input('asset-type', 'search_value'),
-    State('asset-type', 'value'),
-    running=[
-        (Output('asset-type', 'disabled'), True, False)
-    ]
+    running=[(Output('asset-type', 'disabled'), True, False)]
 )
-def update_asset_type_options(asset_class, search_value, current_value):
+@log_time
+def update_asset_class(asset_class):
+    options, disabled = [], True
+    if asset_class and df is not None:
+        filtered = df[df['asset_class'] == asset_class].head(30)
+        options = [
+            {'label': f"{row['symbol']} — {row['name']} ({row['interval']})", 'value': row['filename']}
+            for _, row in filtered.iterrows()
+        ]
+        disabled = False
+        log.info("Asset class selected: %s", asset_class)
+    return options, disabled
+
+
+@callback(
+    Output('asset-type', 'options', allow_duplicate=True),
+    Input('asset-type', 'search_value'),
+    State('assetclasses-type', 'value'),
+    State('asset-type', 'value'),
+    prevent_initial_call=True
+)
+@log_time
+def update_asset_search(search_value, asset_class, current_value):
     if not asset_class or df is None:
-        return [], True
+        return []
     filtered = df[df['asset_class'] == asset_class]
     if search_value:
         sl = search_value.lower()
@@ -111,8 +134,7 @@ def update_asset_type_options(asset_class, search_value, current_value):
         if not sel.empty:
             row = sel.iloc[0]
             options.append({'label': f"{row['symbol']} — {row['name']} ({row['interval']})", 'value': current_value})
-    log.info("Asset type selected: %s", asset_class)
-    return options, False
+    return options
 
 
 @callback(
@@ -120,6 +142,7 @@ def update_asset_type_options(asset_class, search_value, current_value):
     Output('asset-headline', 'children'),
     Input('asset-type', 'value')
 )
+@log_time
 def update_chart(filename):
     empty = go.Figure(), ""
     if not filename or not base_url or df is None:

@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 os.environ.pop("BASE_URL", None)
 
 import src.app as app_module
-from src.app import update_asset_type_options, update_chart
+from src.app import update_asset_class, update_asset_search, update_chart
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -45,26 +45,26 @@ BASE_URL = "http://example.com"
 
 
 # ---------------------------------------------------------------------------
-# update_asset_type_options
+# update_asset_class
 # ---------------------------------------------------------------------------
 
 
-class TestUpdateAssetTypeOptions:
+class TestUpdateAssetClass:
     def test_no_asset_class_returns_disabled_empty(self):
         with patch.object(app_module, "df", SAMPLE_DF):
-            options, disabled = update_asset_type_options(None, None, None)
+            options, disabled = update_asset_class(None)
         assert options == []
         assert disabled is True
 
     def test_df_none_returns_disabled_empty(self):
         with patch.object(app_module, "df", None):
-            options, disabled = update_asset_type_options("stocks", None, None)
+            options, disabled = update_asset_class("stocks")
         assert options == []
         assert disabled is True
 
     def test_filters_by_asset_class(self):
         with patch.object(app_module, "df", SAMPLE_DF):
-            options, disabled = update_asset_type_options("stocks", None, None)
+            options, disabled = update_asset_class("stocks")
         assert disabled is False
         values = [o["value"] for o in options]
         assert "aapl.parquet" in values
@@ -73,53 +73,15 @@ class TestUpdateAssetTypeOptions:
 
     def test_crypto_class_returns_only_crypto(self):
         with patch.object(app_module, "df", SAMPLE_DF):
-            options, disabled = update_asset_type_options("crypto", None, None)
+            options, disabled = update_asset_class("crypto")
         assert disabled is False
         assert len(options) == 1
         assert options[0]["value"] == "btc.parquet"
 
-    def test_search_by_symbol_case_insensitive(self):
-        with patch.object(app_module, "df", SAMPLE_DF):
-            options, _ = update_asset_type_options("stocks", "aapl", None)
-        assert len(options) == 1
-        assert options[0]["value"] == "aapl.parquet"
-
-    def test_search_by_name_partial_match(self):
-        with patch.object(app_module, "df", SAMPLE_DF):
-            options, _ = update_asset_type_options("stocks", "alphabet", None)
-        assert len(options) == 1
-        assert options[0]["value"] == "googl.parquet"
-
-    def test_search_with_no_matches_returns_empty_options(self):
-        with patch.object(app_module, "df", SAMPLE_DF):
-            options, disabled = update_asset_type_options("stocks", "ZZZZZZ", None)
-        assert options == []
-        assert disabled is False
-
     def test_option_label_format(self):
         with patch.object(app_module, "df", SAMPLE_DF):
-            options, _ = update_asset_type_options("crypto", None, None)
+            options, _ = update_asset_class("crypto")
         assert options[0]["label"] == "BTC — Bitcoin (1d)"
-
-    def test_current_value_appended_when_not_in_search_results(self):
-        with patch.object(app_module, "df", SAMPLE_DF):
-            # search narrows to GOOGL, but current selection is AAPL
-            options, _ = update_asset_type_options("stocks", "GOOGL", "aapl.parquet")
-        values = [o["value"] for o in options]
-        assert "aapl.parquet" in values
-        assert "googl.parquet" in values
-
-    def test_current_value_not_duplicated_when_already_visible(self):
-        with patch.object(app_module, "df", SAMPLE_DF):
-            options, _ = update_asset_type_options("stocks", None, "aapl.parquet")
-        values = [o["value"] for o in options]
-        assert values.count("aapl.parquet") == 1
-
-    def test_unknown_current_value_not_appended(self):
-        with patch.object(app_module, "df", SAMPLE_DF):
-            options, _ = update_asset_type_options("stocks", "GOOGL", "nonexistent.parquet")
-        values = [o["value"] for o in options]
-        assert "nonexistent.parquet" not in values
 
     def test_results_capped_at_thirty(self):
         large_df = pd.DataFrame(
@@ -137,8 +99,69 @@ class TestUpdateAssetTypeOptions:
             }
         )
         with patch.object(app_module, "df", large_df):
-            options, _ = update_asset_type_options("stocks", None, None)
+            options, _ = update_asset_class("stocks")
         assert len(options) == 30
+
+
+# ---------------------------------------------------------------------------
+# update_asset_search
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateAssetSearch:
+    def test_no_asset_class_returns_empty(self):
+        with patch.object(app_module, "df", SAMPLE_DF):
+            options = update_asset_search(None, None, None)
+        assert options == []
+
+    def test_df_none_returns_empty(self):
+        with patch.object(app_module, "df", None):
+            options = update_asset_search(None, "stocks", None)
+        assert options == []
+
+    def test_no_search_returns_top_results_for_class(self):
+        with patch.object(app_module, "df", SAMPLE_DF):
+            options = update_asset_search(None, "stocks", None)
+        values = [o["value"] for o in options]
+        assert "aapl.parquet" in values
+        assert "googl.parquet" in values
+        assert "btc.parquet" not in values
+
+    def test_search_by_symbol_case_insensitive(self):
+        with patch.object(app_module, "df", SAMPLE_DF):
+            options = update_asset_search("aapl", "stocks", None)
+        assert len(options) == 1
+        assert options[0]["value"] == "aapl.parquet"
+
+    def test_search_by_name_partial_match(self):
+        with patch.object(app_module, "df", SAMPLE_DF):
+            options = update_asset_search("alphabet", "stocks", None)
+        assert len(options) == 1
+        assert options[0]["value"] == "googl.parquet"
+
+    def test_search_with_no_matches_returns_empty(self):
+        with patch.object(app_module, "df", SAMPLE_DF):
+            options = update_asset_search("ZZZZZZ", "stocks", None)
+        assert options == []
+
+    def test_current_value_appended_when_not_in_search_results(self):
+        with patch.object(app_module, "df", SAMPLE_DF):
+            options = update_asset_search("GOOGL", "stocks", "aapl.parquet")
+        values = [o["value"] for o in options]
+        assert "aapl.parquet" in values
+        assert "googl.parquet" in values
+
+    def test_current_value_not_duplicated_when_already_visible(self):
+        with patch.object(app_module, "df", SAMPLE_DF):
+            options = update_asset_search(None, "stocks", "aapl.parquet")
+        values = [o["value"] for o in options]
+        assert values.count("aapl.parquet") == 1
+
+    def test_unknown_current_value_not_appended(self):
+        with patch.object(app_module, "df", SAMPLE_DF):
+            options = update_asset_search("GOOGL", "stocks", "nonexistent.parquet")
+        values = [o["value"] for o in options]
+        assert "nonexistent.parquet" not in values
 
     def test_search_results_capped_at_thirty(self):
         large_df = pd.DataFrame(
@@ -156,7 +179,7 @@ class TestUpdateAssetTypeOptions:
             }
         )
         with patch.object(app_module, "df", large_df):
-            options, _ = update_asset_type_options("stocks", "ABC", None)
+            options = update_asset_search("ABC", "stocks", None)
         assert len(options) == 30
 
 
