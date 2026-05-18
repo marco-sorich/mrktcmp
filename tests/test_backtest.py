@@ -1,0 +1,256 @@
+import os
+import pytest
+import numpy as np
+import pandas as pd
+from unittest.mock import patch
+
+os.environ.pop("BASE_URL", None)
+
+from src.backtest import (  # noqa: E402
+    load_monthly_closes,
+    simulate_dca,
+    compute_metrics,
+    run_backtest,
+)
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+SAMPLE_META = pd.DataFrame({
+    'asset_class': ['stocks', 'crypto'],
+    'symbol': ['AAPL', 'BTC'],
+    'name': ['Apple Inc', 'Bitcoin'],
+    'filename': ['aapl.parquet', 'btc.parquet'],
+})
+
+BASE_URL = "http://example.com"
+
+_MONTHLY_IDX = pd.date_range('2020-01-31', periods=24, freq='ME', tz='UTC')
+
+
+def _daily_ohlcv(price, n_days=400, tz='UTC'):
+    """Build a minimal daily OHLCV DataFrame with a constant close price."""
+    idx = pd.date_range('2020-01-01', periods=n_days, freq='D', tz=tz)
+    return pd.DataFrame(
+        {'Open': price, 'High': price, 'Low': price, 'Close': price, 'Volume': 1000},
+        index=idx,
+    )
+
+
+def _monthly_portfolio(values):
+    return pd.Series(values, index=_MONTHLY_IDX[:len(values)])
+
+
+# ---------------------------------------------------------------------------
+# load_monthly_closes
+# ---------------------------------------------------------------------------
+
+class TestLoadMonthlyCloses:
+    def test_empty_filenames_returns_empty_dataframe(self):
+        result = load_monthly_closes(BASE_URL, [], SAMPLE_META)
+        assert result.empty
+
+    def test_unknown_filename_skipped_returns_empty(self):
+        with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
+            result = load_monthly_closes(BASE_URL, ['unknown.parquet'], SAMPLE_META)
+        assert result.empty
+
+    def test_single_asset_column_named_by_symbol(self):
+        with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
+            result = load_monthly_closes(BASE_URL, ['aapl.parquet'], SAMPLE_META)
+        assert 'AAPL' in result.columns
+
+    def test_daily_data_resampled_to_monthly(self):
+        with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0, n_days=365)):
+            result = load_monthly_closes(BASE_URL, ['aapl.parquet'], SAMPLE_META)
+        assert len(result) <= 13
+
+    def test_timezone_naive_index_gets_utc_localization(self):
+        with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0, tz=None)):
+            result = load_monthly_closes(BASE_URL, ['aapl.parquet'], SAMPLE_META)
+        assert result.index.tz is not None
+
+    def test_timezone_aware_index_preserved(self):
+        with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0, tz='America/New_York')):
+            result = load_monthly_closes(BASE_URL, ['aapl.parquet'], SAMPLE_META)
+        assert result.index.tz is not None
+
+    def test_parquet_error_is_swallowed_returns_empty(self):
+        with patch('src.backtest.pd.read_parquet', side_effect=OSError("not found")):
+            result = load_monthly_closes(BASE_URL, ['aapl.parquet'], SAMPLE_META)
+        assert result.empty
+
+    def test_multiple_assets_combined_into_one_dataframe(self):
+        with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
+            result = load_monthly_closes(BASE_URL, ['aapl.parquet', 'btc.parquet'], SAMPLE_META)
+        assert 'AAPL' in result.columns
+        assert 'BTC' in result.columns
+
+    def test_monthly_close_is_last_price_of_month(self):
+        idx = pd.date_range('2022-01-01', '2022-01-31', freq='D', tz='UTC')
+        prices = [100.0] * 30 + [999.0]
+        ohlcv = pd.DataFrame(
+            {'Open': prices, 'High': prices, 'Low': prices, 'Close': prices, 'Volume': 1},
+            index=idx,
+        )
+        with patch('src.backtest.pd.read_parquet', return_value=ohlcv):
+            result = load_monthly_closes(BASE_URL, ['aapl.parquet'], SAMPLE_META)
+        assert result['AAPL'].iloc[0] == pytest.approx(999.0)
+
+
+# ---------------------------------------------------------------------------
+# simulate_dca
+# ---------------------------------------------------------------------------
+
+class TestSimulateDca:
+    def test_empty_dataframe_returns_empty_series_and_zero_invested(self):
+        portfolio, total = simulate_dca(pd.DataFrame())
+        assert portfolio.empty
+        assert total == 0.0
+
+    def test_single_asset_total_invested_equals_monthly_times_periods(self):
+        df = pd.DataFrame({'AAPL': [100.0] * 12}, index=_MONTHLY_IDX[:12])
+        _, total = simulate_dca(df, monthly_investment=1000.0)
+        assert total == pytest.approx(12 * 1000.0)
+
+    def test_single_asset_flat_price_first_month_value(self):
+        df = pd.DataFrame({'AAPL': [100.0] * 3}, index=_MONTHLY_IDX[:3])
+        portfolio, _ = simulate_dca(df, monthly_investment=1000.0)
+        assert portfolio.iloc[0] == pytest.approx(1000.0)
+
+    def test_single_asset_flat_price_value_grows_linearly(self):
+        df = pd.DataFrame({'AAPL': [100.0] * 4}, index=_MONTHLY_IDX[:4])
+        portfolio, _ = simulate_dca(df, monthly_investment=1000.0)
+        # After n months at price 100 with 1000/month: n * 10 shares * 100 = n * 1000
+        for i, expected in enumerate([1000.0, 2000.0, 3000.0, 4000.0]):
+            assert portfolio.iloc[i] == pytest.approx(expected)
+
+    def test_two_assets_investment_split_equally_single_month(self):
+        df = pd.DataFrame(
+            {'AAPL': [100.0], 'BTC': [200.0]},
+            index=_MONTHLY_IDX[:1],
+        )
+        portfolio, total = simulate_dca(df, monthly_investment=1000.0)
+        # 500 in AAPL (5 shares) + 500 in BTC (2.5 shares) = 500 + 500 = 1000
+        assert total == pytest.approx(1000.0)
+        assert portfolio.iloc[0] == pytest.approx(1000.0)
+
+    def test_nan_asset_excluded_from_monthly_buy(self):
+        df = pd.DataFrame(
+            {'AAPL': [100.0, 100.0], 'BTC': [np.nan, 200.0]},
+            index=_MONTHLY_IDX[:2],
+        )
+        portfolio, total = simulate_dca(df, monthly_investment=1000.0)
+        # Month 1: only AAPL → invest full 1000 in AAPL
+        # Month 2: both → invest 500 each; AAPL holdings = 10 + 5 = 15 shares
+        assert total == pytest.approx(2000.0)
+        assert portfolio.iloc[0] == pytest.approx(1000.0)
+
+    def test_output_index_matches_input_index(self):
+        idx = _MONTHLY_IDX[:6]
+        df = pd.DataFrame({'AAPL': [100.0] * 6}, index=idx)
+        portfolio, _ = simulate_dca(df)
+        assert list(portfolio.index) == list(idx)
+
+    def test_rising_prices_produce_profit(self):
+        prices = [100.0 * (1.05 ** i) for i in range(12)]
+        df = pd.DataFrame({'AAPL': prices}, index=_MONTHLY_IDX[:12])
+        portfolio, total = simulate_dca(df, monthly_investment=1000.0)
+        assert portfolio.iloc[-1] > total
+
+
+# ---------------------------------------------------------------------------
+# compute_metrics
+# ---------------------------------------------------------------------------
+
+class TestComputeMetrics:
+    _EXPECTED_KEYS = {
+        'Gesamtertrag', 'CAGR', 'Sharpe Ratio', 'Max. Drawdown',
+        'Volatilität (p.a.)', 'Calmar Ratio', 'Investiert', 'Endwert',
+        'Gewinn/Verlust', 'Bester Monat', 'Schlechtester Monat',
+    }
+
+    def test_empty_series_returns_empty_dict(self):
+        assert compute_metrics(pd.Series([], dtype=float), 1000.0) == {}
+
+    def test_series_shorter_than_three_returns_empty_dict(self):
+        assert compute_metrics(pd.Series([1000.0, 2000.0]), 1000.0) == {}
+
+    def test_zero_invested_returns_empty_dict(self):
+        assert compute_metrics(_monthly_portfolio([1000.0] * 12), 0.0) == {}
+
+    def test_returns_exactly_the_expected_keys(self):
+        metrics = compute_metrics(_monthly_portfolio([float(i * 1000) for i in range(1, 25)]), 12000.0)
+        assert set(metrics.keys()) == self._EXPECTED_KEYS
+
+    def test_all_values_are_strings(self):
+        metrics = compute_metrics(_monthly_portfolio([float(i * 1000) for i in range(1, 25)]), 12000.0)
+        assert all(isinstance(v, str) for v in metrics.values())
+
+    def test_profit_shows_plus_sign_in_gesamtertrag(self):
+        # Final value >> invested
+        portfolio = _monthly_portfolio([1000.0 * (i + 10) for i in range(12)])
+        metrics = compute_metrics(portfolio, 6000.0)
+        assert metrics['Gesamtertrag'].startswith('+')
+
+    def test_loss_shows_minus_sign_in_gesamtertrag(self):
+        portfolio = _monthly_portfolio([max(500.0 - i * 40, 1.0) for i in range(12)])
+        metrics = compute_metrics(portfolio, 6000.0)
+        assert metrics['Gesamtertrag'].startswith('-')
+
+    def test_monotonically_rising_portfolio_has_zero_drawdown(self):
+        portfolio = _monthly_portfolio([float(i + 1) * 1000 for i in range(24)])
+        metrics = compute_metrics(portfolio, 12000.0)
+        assert metrics['Max. Drawdown'] == '0.0%'
+
+    def test_investiert_is_parseable_as_number(self):
+        portfolio = _monthly_portfolio([float(i + 1) * 1000 for i in range(12)])
+        metrics = compute_metrics(portfolio, 6000.0)
+        parsed = float(metrics['Investiert'].replace(',', ''))
+        assert parsed == pytest.approx(6000.0)
+
+
+# ---------------------------------------------------------------------------
+# run_backtest (integration)
+# ---------------------------------------------------------------------------
+
+class TestRunBacktest:
+    def test_empty_filenames_returns_none_none(self):
+        p, m = run_backtest(BASE_URL, [], 5, SAMPLE_META)
+        assert p is None and m is None
+
+    def test_no_base_url_returns_none_none(self):
+        p, m = run_backtest(None, ['aapl.parquet'], 5, SAMPLE_META)
+        assert p is None and m is None
+
+    def test_successful_run_returns_portfolio_and_metrics_dict(self):
+        with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0, n_days=2000)):
+            p, m = run_backtest(BASE_URL, ['aapl.parquet'], 3, SAMPLE_META)
+        assert p is not None
+        assert isinstance(m, dict)
+        assert 'CAGR' in m
+
+    def test_years_filter_caps_portfolio_length(self):
+        # Build 4 years of daily data ending today so the window is predictable
+        now = pd.Timestamp.now(tz='UTC')
+        idx = pd.date_range(now - pd.DateOffset(years=4), now, freq='D')
+        ohlcv = pd.DataFrame(
+            {'Open': 100.0, 'High': 100.0, 'Low': 100.0, 'Close': 100.0, 'Volume': 1},
+            index=idx,
+        )
+        with patch('src.backtest.pd.read_parquet', return_value=ohlcv):
+            p, _ = run_backtest(BASE_URL, ['aapl.parquet'], 2, SAMPLE_META)
+        assert p is not None
+        assert len(p) <= 26  # 2 years ≈ 24 months, allow 2 for edge rounding
+
+    def test_data_entirely_outside_window_returns_none_none(self):
+        # All data is from year 2000, but we request last 1 year
+        very_old = pd.date_range('2000-01-01', periods=365, freq='D', tz='UTC')
+        ohlcv = pd.DataFrame(
+            {'Open': 100.0, 'High': 100.0, 'Low': 100.0, 'Close': 100.0, 'Volume': 1},
+            index=very_old,
+        )
+        with patch('src.backtest.pd.read_parquet', return_value=ohlcv):
+            p, m = run_backtest(BASE_URL, ['aapl.parquet'], 1, SAMPLE_META)
+        assert p is None and m is None
