@@ -19,8 +19,10 @@ def load_monthly_closes(base_url, filenames, df_meta):
             symbol = meta.iloc[0]['symbol']
             ohlcv = pd.read_parquet(f"{base_url}/{filename}")
             close = ohlcv['Close']
+            # Normalise to UTC so all series share a common timezone for alignment.
             if close.index.tz is None:
                 close.index = close.index.tz_localize('UTC')
+            # 'ME' = month-end; .last() takes the final closing price of each month.
             monthly = close.resample('ME').last().dropna()
             if not monthly.empty:
                 series[symbol] = monthly
@@ -30,6 +32,7 @@ def load_monthly_closes(base_url, filenames, df_meta):
     if not series:
         return pd.DataFrame()
 
+    # DataFrame constructor outer-joins all series; months with no price become NaN.
     return pd.DataFrame(series)
 
 
@@ -44,13 +47,16 @@ def simulate_dca(price_df, monthly_investment=MONTHLY_INVESTMENT):
     total_invested = 0.0
 
     for _, prices in price_df.iterrows():
+        # Exclude NaN and zero prices; a zero price indicates a halted or delisted asset.
         available = {c: p for c, p in prices.items() if pd.notna(p) and p > 0}
         if available:
             per_asset = monthly_investment / len(available)
             total_invested += monthly_investment
             for col, price in available.items():
-                holdings[col] += per_asset / price
+                holdings[col] += per_asset / price  # convert € to units: €500 / €100 = 5 shares
 
+        # Value only counts assets that have a price this month; held units of others are
+        # preserved unchanged and will contribute again once their price reappears.
         value = sum(
             holdings[c] * prices[c]
             for c in price_df.columns
@@ -68,18 +74,18 @@ def compute_metrics(portfolio, total_invested):
 
     final_value = portfolio.iloc[-1]
     total_return = (final_value - total_invested) / total_invested
-    monthly_returns = portfolio.pct_change().dropna()
-    n_years = len(portfolio) / 12
+    monthly_returns = portfolio.pct_change().dropna()  # first row is NaN; drop it
+    n_years = len(portfolio) / 12  # portfolio has one entry per month
 
     cagr = (final_value / total_invested) ** (1 / n_years) - 1 if n_years > 0 else 0.0
-    vol = monthly_returns.std() * np.sqrt(12)
+    vol = monthly_returns.std() * np.sqrt(12)   # annualise monthly std
     sharpe = (
         (monthly_returns.mean() / monthly_returns.std()) * np.sqrt(12)
-        if monthly_returns.std() > 0 else 0.0
+        if monthly_returns.std() > 0 else 0.0   # guard against flat (zero-vol) portfolio
     )
     rolling_max = portfolio.expanding().max()
-    max_dd = ((portfolio - rolling_max) / rolling_max).min()
-    calmar = cagr / abs(max_dd) if max_dd < 0 else 0.0
+    max_dd = ((portfolio - rolling_max) / rolling_max).min()  # negative by convention
+    calmar = cagr / abs(max_dd) if max_dd < 0 else 0.0  # max_dd == 0 for monotonically rising portfolio
 
     return {
         'Total Return': f"{total_return * 100:+.1f}%",
@@ -109,12 +115,16 @@ def run_backtest(base_url, filenames, years, df_meta):
     if price_df.empty:
         return None, None
 
+    # Anchor to the last available data point, not now(), so stale feeds still
+    # deliver the full requested window instead of silently truncating it.
     cutoff = price_df.index.max() - pd.DateOffset(years=years)
     price_df = price_df[price_df.index >= cutoff].dropna(how='all', axis=1)
 
     if price_df.empty:
         return None, None
 
+    # Fill short gaps (e.g. exchange holidays, delayed feeds); limit=3 prevents
+    # masking genuine long absences such as newly listed or suspended assets.
     price_df = price_df.ffill(limit=3)
     portfolio, total_invested = simulate_dca(price_df)
     return portfolio, compute_metrics(portfolio, total_invested)

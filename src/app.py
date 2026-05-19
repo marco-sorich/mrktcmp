@@ -14,6 +14,7 @@ from plotly.subplots import make_subplots
 import numpy as np
 import pandas as pd
 
+# Ensure backtest.py is importable both when run directly and via gunicorn.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from backtest import run_backtest  # noqa: E402
 
@@ -23,6 +24,8 @@ _log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.DE
 
 _stdout_handler = logging.StreamHandler(sys.stdout)
 _stdout_handler.setLevel(_log_level)
+# Route only INFO/DEBUG to stdout; WARNING and above go to stderr so process
+# supervisors (e.g. gunicorn, systemd) can treat error output separately.
 _stdout_handler.addFilter(lambda r: r.levelno < logging.WARNING)
 
 _stderr_handler = logging.StreamHandler(sys.stderr)
@@ -239,6 +242,8 @@ def update_asset_search(search_value, asset_class, current_value):
         sl = search_value.lower()
         sym = filtered['symbol'].str.lower()
         name = filtered['name'].str.lower()
+        # Vectorised scoring keeps the loop off Python; priority: exact symbol (0) →
+        # symbol prefix (1) → name prefix (2) → symbol contains (3) → name contains (4).
         score = np.select(
             [sym == sl,
              sym.str.startswith(sl, na=False),
@@ -260,6 +265,8 @@ def update_asset_search(search_value, asset_class, current_value):
         {'label': f"{row['symbol']} — {row['name']} ({row['interval']})", 'value': row['filename']}
         for _, row in filtered.iterrows()
     ]
+    # Preserve the currently selected asset even when it falls outside the search
+    # results so the dropdown does not silently lose its value on each keystroke.
     if current_value and not any(o['value'] == current_value for o in options):
         sel = df[df['filename'] == current_value]
         if not sel.empty:
@@ -319,6 +326,7 @@ def update_chart(filename):
             grid_df['Volume'] = grid_df['Volume'].map('{:,}'.format)
 
         log.info("Data loaded from %s", filename)
+        # Store only High/Low/Volume; Close is already encoded in the Candlestick trace.
         store = ohlcv[['High', 'Low', 'Volume']].to_json(date_format='iso', orient='split')
         return fig, headline, store
     except Exception:
@@ -501,10 +509,12 @@ def _manage_basket(basket_id, remove_clicks, selected_asset, basket_data):
         return no_update, no_update
 
     triggered_id = ctx.triggered_id
+    # .get('value', 0) or 0 handles None, which Dash emits for newly rendered components.
     triggered_value = ctx.triggered[0].get('value', 0) or 0
     basket = list(basket_data or [])
 
     if isinstance(triggered_id, dict) and triggered_id.get('type') == f'bt-remove-{basket_id}':
+        # Newly rendered remove buttons fire the ALL pattern with n_clicks=0; skip those.
         if triggered_value > 0:
             filename = triggered_id['index']
             basket = [item for item in basket if item['filename'] != filename]
@@ -572,6 +582,7 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, years):
             line=dict(color='#c0392b', width=2),
         ))
 
+    # Baskets may cover different date ranges; title reflects the longer one.
     months_shown = max(
         len(portfolio_a) if portfolio_a is not None else 0,
         len(portfolio_b) if portfolio_b is not None else 0,
