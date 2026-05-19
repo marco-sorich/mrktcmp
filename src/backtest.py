@@ -109,8 +109,7 @@ def run_backtest(base_url, filenames, years, df_meta):
     if price_df.empty:
         return None, None
 
-    tz = price_df.index.tz
-    cutoff = pd.Timestamp.now(tz=tz) - pd.DateOffset(years=years)
+    cutoff = price_df.index.max() - pd.DateOffset(years=years)
     price_df = price_df[price_df.index >= cutoff].dropna(how='all', axis=1)
 
     if price_df.empty:

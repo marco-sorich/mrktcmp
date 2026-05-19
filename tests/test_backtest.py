@@ -232,7 +232,7 @@ class TestRunBacktest:
         assert 'CAGR' in m
 
     def test_years_filter_caps_portfolio_length(self):
-        # Build 4 years of daily data ending today so the window is predictable
+        # 4 years of data; request 2 years → at most ~24 months returned
         now = pd.Timestamp.now(tz='UTC')
         idx = pd.date_range(now - pd.DateOffset(years=4), now, freq='D')
         ohlcv = pd.DataFrame(
@@ -244,13 +244,32 @@ class TestRunBacktest:
         assert p is not None
         assert len(p) <= 26  # 2 years ≈ 24 months, allow 2 for edge rounding
 
-    def test_data_entirely_outside_window_returns_none_none(self):
-        # All data is from year 2000, but we request last 1 year
-        very_old = pd.date_range('2000-01-01', periods=365, freq='D', tz='UTC')
+    def test_stale_data_still_delivers_requested_years(self):
+        # Data ends 1 year before today; requesting 3 years must still yield ~3 years,
+        # not 2 (which the old now-based cutoff would produce).
+        now = pd.Timestamp.now(tz='UTC')
+        data_end = now - pd.DateOffset(years=1)
+        idx = pd.date_range(data_end - pd.DateOffset(years=5), data_end, freq='D')
         ohlcv = pd.DataFrame(
             {'Open': 100.0, 'High': 100.0, 'Low': 100.0, 'Close': 100.0, 'Volume': 1},
-            index=very_old,
+            index=idx,
         )
         with patch('src.backtest.pd.read_parquet', return_value=ohlcv):
-            p, m = run_backtest(BASE_URL, ['aapl.parquet'], 1, SAMPLE_META)
-        assert p is None and m is None
+            p, _ = run_backtest(BASE_URL, ['aapl.parquet'], 3, SAMPLE_META)
+        assert p is not None
+        # Must be ≥ 35 months (≈ 3 years); the old bug gave only ~24 (2 years)
+        assert len(p) >= 35
+
+    def test_requested_years_exceeds_data_returns_all_available(self):
+        # Only 2 years of data available; requesting 5 years must return all 2 years,
+        # not zero (cutoff is anchored to data_end, never to now).
+        now = pd.Timestamp.now(tz='UTC')
+        idx = pd.date_range(now - pd.DateOffset(years=2), now, freq='D')
+        ohlcv = pd.DataFrame(
+            {'Open': 100.0, 'High': 100.0, 'Low': 100.0, 'Close': 100.0, 'Volume': 1},
+            index=idx,
+        )
+        with patch('src.backtest.pd.read_parquet', return_value=ohlcv):
+            p, _ = run_backtest(BASE_URL, ['aapl.parquet'], 5, SAMPLE_META)
+        assert p is not None
+        assert len(p) >= 23  # all ~24 months of available data returned
