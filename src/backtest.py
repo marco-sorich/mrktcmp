@@ -256,23 +256,112 @@ def compute_metrics(portfolio, total_invested):
     }
 
 
-def run_backtest(base_url, filenames, years, df_meta):
+def _get_monthly_range(base_url, filename, df_meta):
+    """Return the earliest and latest month-end dates for a single asset.
+
+    Loads only the 'Close' column to minimise data transfer, then resamples
+    to monthly to match the cadence used by load_monthly_closes.
+
+    Parameters
+    ----------
+    base_url : str       – root URL/path for the parquet files.
+    filename : str       – parquet filename for this asset.
+    df_meta  : DataFrame – master metadata table.
+
+    Returns
+    -------
+    (start, end) as pandas Timestamps, or (None, None) on any failure.
+    """
+    # Validate that the filename exists in the catalogue before loading.
+    meta = df_meta[df_meta['filename'] == filename]
+    if meta.empty:
+        return None, None
+    try:
+        # columns=['Close'] tells pyarrow to read only the Close column from
+        # the Parquet file, skipping Open/High/Low/Volume. This is much faster
+        # than loading the full OHLCV dataset when we only need date bounds.
+        ohlcv = pd.read_parquet(f"{base_url}/{filename}", columns=['Close'])
+        close = ohlcv['Close']
+        if close.index.tz is None:
+            close.index = close.index.tz_localize('UTC')
+        # Resample to month-end, same logic as load_monthly_closes, so that
+        # the range we report matches the rows the simulation will actually use.
+        monthly = close.resample('ME').last().dropna()
+        if monthly.empty:
+            return None, None
+        return monthly.index.min(), monthly.index.max()
+    except Exception:
+        log.exception("Failed to get date range for %s", filename)
+        return None, None
+
+
+def get_common_date_range(base_url, filenames_a, filenames_b, df_meta):
+    """Find the monthly date range common to every asset in both baskets.
+
+    The common (overlapping) range is [max(all_starts), min(all_ends)].
+    If the two extremes do not overlap (max_start >= min_end), returns
+    (None, None) to indicate no usable shared history.
+
+    Parameters
+    ----------
+    base_url   : str       – root URL/path for the parquet files.
+    filenames_a: list      – parquet filenames for basket A (may be empty).
+    filenames_b: list      – parquet filenames for basket B (may be empty).
+    df_meta    : DataFrame – master metadata table.
+
+    Returns
+    -------
+    (start, end) as UTC month-end Timestamps, or (None, None) if there is no
+    overlap or no assets were provided.
+    """
+    # Combine both baskets' filenames into one list. 'or []' guards against
+    # None (e.g. when a basket store has never been written).
+    all_filenames = list(filenames_a or []) + list(filenames_b or [])
+    if not all_filenames or not base_url:
+        return None, None
+
+    starts, ends = [], []
+    for filename in all_filenames:
+        s, e = _get_monthly_range(base_url, filename, df_meta)
+        if s is not None:
+            starts.append(s)
+            ends.append(e)
+
+    if not starts:
+        return None, None
+
+    # Intersection logic:
+    #   common_start = the LATEST of all individual start dates (all assets
+    #                  must be active → take the most-recently-launched one).
+    #   common_end   = the EARLIEST of all individual end dates (all assets
+    #                  must still be active → take the one that ended first).
+    common_start = max(starts)
+    common_end = min(ends)
+
+    # If the latest start is not before the earliest end, there is no overlap.
+    if common_start >= common_end:
+        return None, None
+
+    return common_start, common_end
+
+
+def run_backtest(base_url, filenames, start_date, end_date, df_meta):
     """Orchestrate a full DCA backtest for a single basket of assets.
 
     Steps:
       1. Load monthly close prices for every asset in the basket.
-      2. Cut the price history to the requested number of years, measured
-         backwards from the last available data point (not from today).
+      2. Restrict to the caller-specified [start_date, end_date] window.
       3. Forward-fill small price gaps.
       4. Run the DCA simulation.
       5. Compute and return performance metrics.
 
     Parameters
     ----------
-    base_url  : str      – root URL/path for the parquet data files.
-    filenames : list     – parquet filenames for every asset in the basket.
-    years     : int      – how many years of history to simulate.
-    df_meta   : DataFrame– master metadata table (symbol, name, filename …).
+    base_url   : str       – root URL/path for the parquet data files.
+    filenames  : list      – parquet filenames for every asset in the basket.
+    start_date : Timestamp – first month-end date to include (inclusive).
+    end_date   : Timestamp – last month-end date to include (inclusive).
+    df_meta    : DataFrame – master metadata table (symbol, name, filename …).
 
     Returns
     -------
@@ -287,16 +376,13 @@ def run_backtest(base_url, filenames, years, df_meta):
     if price_df.empty:
         return None, None
 
-    # Anchor the cutoff to the last available data point rather than to the
-    # current clock time. If the data feed is stale (e.g. updated monthly),
-    # using 'now' would silently shorten the simulated window by however long
-    # the feed lag is. Using data_end keeps the full requested period intact.
-    cutoff = price_df.index.max() - pd.DateOffset(years=years)
-
-    # Keep only rows at or after the cutoff date.
-    # dropna(how='all', axis=1) removes any asset column whose entire window
-    # is NaN (i.e. the asset did not exist during the requested period at all).
-    price_df = price_df[price_df.index >= cutoff].dropna(how='all', axis=1)
+    # Keep only rows within the requested date window [start_date, end_date].
+    # Both bounds are inclusive (>=, <=) so the user's chosen start/end months
+    # are always included in the simulation.
+    # dropna(how='all', axis=1) removes any asset column that is entirely NaN
+    # within the window (the asset did not exist during this period at all).
+    mask = (price_df.index >= start_date) & (price_df.index <= end_date)
+    price_df = price_df[mask].dropna(how='all', axis=1)
 
     if price_df.empty:
         return None, None

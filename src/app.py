@@ -111,7 +111,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # noqa: E402 – PEP 8 / flake8 require all imports at the top of the file.
 # This import must come after the sys.path.insert above, so we suppress the
 # "module level import not at top of file" lint warning with the noqa comment.
-from backtest import run_backtest  # noqa: E402
+from backtest import run_backtest, get_common_date_range  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Startup timer – lets us log how long initialisation takes
@@ -527,23 +527,38 @@ app.layout = html.Div([
 
             # Year slider – lets the user choose how many years to simulate.
             html.Div([
-                html.Label('Period (years):', style={'fontWeight': 'bold', 'marginRight': '8px'}),
+                html.Label('Analysis period:', style={'fontWeight': 'bold', 'marginBottom': '4px'}),
 
-                # dcc.Slider renders a horizontal drag slider.
-                # min / max / step – the numeric range and increment.
-                # value – the initial position.
-                # marks – labels to show at specific tick positions; here we
-                #         use a dict comprehension {i: str(i) for i in [...]}
-                #         to create one mark per listed year.
-                # tooltip – shows the current value below the thumb while
-                #           dragging. always_visible: True keeps it visible
-                #           even when not hovering.
-                dcc.Slider(
-                    id='bt-years',
-                    min=1, max=30, step=1, value=5,
-                    marks={i: f'{i}' for i in [1, 2, 3, 5, 10, 15, 20, 25, 30]},
-                    tooltip={'placement': 'bottom', 'always_visible': True},
+                # dcc.RangeSlider has two draggable handles so the user can
+                # select both a start and an end date.
+                # min / max / value are integers (indices into the date list
+                # stored in bt-date-store). They are set dynamically by the
+                # update_date_range_slider callback when assets are added.
+                # allowCross=False prevents the left handle from passing the
+                # right handle and vice-versa (keeps the range always valid).
+                # disabled=True at startup because no baskets are filled yet.
+                dcc.RangeSlider(
+                    id='bt-date-range',
+                    min=0, max=1, step=1, value=[0, 1],
+                    marks={},
+                    allowCross=False,
+                    disabled=True,
                 ),
+
+                # Human-readable date range display, e.g. "Jan 2020 – Dec 2024".
+                # Updated by update_date_range_slider (on basket change) and
+                # update_date_display (on every slider drag).
+                html.Div(
+                    id='bt-date-display',
+                    children='Add assets to a basket to see the available date range.',
+                    style={'color': '#666', 'fontSize': '13px', 'marginTop': '6px'},
+                ),
+
+                # Invisible store holding the ordered list of monthly date
+                # strings (ISO format) that correspond to slider positions.
+                # Position 0 → date_store[0], position N-1 → date_store[-1].
+                dcc.Store(id='bt-date-store', data=[]),
+
             ], style={'marginTop': '20px', 'marginBottom': '8px'}),
 
             # Run button – clicking this fires the run_backtest_callback.
@@ -1173,6 +1188,147 @@ def _manage_basket(basket_id, remove_clicks, selected_asset, basket_data):
 
 
 # ---------------------------------------------------------------------------
+# Helper: build slider marks from an ordered list of monthly dates
+# ---------------------------------------------------------------------------
+
+def _build_slider_marks(date_range):
+    """Return a {position: label} dict for the RangeSlider.
+
+    The density of labels adapts to the length of the date range so the
+    slider is never over-crowded:
+      ≤ 12 months  → every month labelled.
+      13–36 months → every 3 months (quarterly).
+      > 36 months  → every 12 months (yearly).
+
+    The first and last positions are always labelled so the user can always
+    read the absolute boundaries of the available data.
+
+    Parameters
+    ----------
+    date_range : DatetimeIndex – ordered monthly dates (from pd.date_range).
+
+    Returns
+    -------
+    dict mapping integer slider position → short date string ('%b %y').
+    """
+    n = len(date_range)
+    # Choose how many months to skip between each visible mark.
+    step = 1 if n <= 12 else 3 if n <= 36 else 12
+    marks = {}
+    for i, d in enumerate(date_range):
+        # Label this position if it falls on a step boundary.
+        if i % step == 0:
+            marks[i] = d.strftime('%b %y')  # e.g. 'Jan 20'
+    # Always include the final position so the right boundary is readable.
+    marks[n - 1] = date_range[-1].strftime('%b %y')
+    return marks
+
+
+# ---------------------------------------------------------------------------
+# Callback: update the date-range slider when baskets change
+# ---------------------------------------------------------------------------
+
+@callback(
+    # Seven outputs: slider configuration (5) + date store + display text.
+    Output('bt-date-range', 'min'),
+    Output('bt-date-range', 'max'),
+    Output('bt-date-range', 'value'),
+    Output('bt-date-range', 'marks'),
+    Output('bt-date-range', 'disabled'),
+    Output('bt-date-store', 'data'),
+    Output('bt-date-display', 'children'),
+    # Fires whenever either basket's contents change.
+    Input('bt-basket-store-a', 'data'),
+    Input('bt-basket-store-b', 'data'),
+)
+@log_time
+def update_date_range_slider(basket_a, basket_b):
+    """Recompute the available date range whenever the basket contents change.
+
+    Loads just the 'Close' column from each asset's parquet file to find the
+    monthly date bounds, then intersects all ranges to find the overlap that
+    is common to every selected asset.  Updates the RangeSlider bounds and
+    marks to reflect this common window, and stores the ordered list of dates
+    so the run callback can look up exact Timestamps from slider positions.
+    """
+    # Convenience tuple to return when the slider should be disabled.
+    # min=0, max=1, value=[0,1] gives the slider a valid (non-zero-width)
+    # range even when disabled; an empty range would cause a Dash warning.
+    _disabled = (0, 1, [0, 1], {}, True, [], '')
+
+    # Extract filename lists from each basket (or empty lists if unset).
+    filenames_a = [item['filename'] for item in (basket_a or [])]
+    filenames_b = [item['filename'] for item in (basket_b or [])]
+
+    # Nothing to compute if both baskets are empty.
+    if not filenames_a and not filenames_b:
+        return (*_disabled[:6],
+                'Add assets to a basket to see the available date range.')
+
+    if not base_url or df is None:
+        return (*_disabled[:6], 'No data source configured.')
+
+    # Compute the intersection of all asset date ranges across both baskets.
+    # get_common_date_range returns (None, None) when there is no overlap.
+    common_start, common_end = get_common_date_range(
+        base_url, filenames_a, filenames_b, df
+    )
+
+    if common_start is None:
+        return (*_disabled[:6],
+                'No overlapping date range found across the selected assets.')
+
+    # Build the ordered list of month-end dates within the common window.
+    # pd.date_range with freq='ME' generates one date per calendar month-end.
+    date_range = pd.date_range(common_start, common_end, freq='ME')
+    n = len(date_range)
+
+    # Serialise dates as ISO strings so they can be stored in dcc.Store (which
+    # holds JSON). pd.Timestamp.isoformat() produces e.g. '2020-01-31T00:00:00+00:00'.
+    date_store = [d.isoformat() for d in date_range]
+
+    marks = _build_slider_marks(date_range)
+
+    # Show the full common range as the initial selection.
+    d0 = date_range[0].strftime('%b %Y')
+    d1 = date_range[-1].strftime('%b %Y')
+    display = f'Available: {d0} – {d1}  ({n} months)'
+
+    # Return: min, max, value (full range), marks, not-disabled, date store, display.
+    return 0, n - 1, [0, n - 1], marks, False, date_store, display
+
+
+# ---------------------------------------------------------------------------
+# Callback: update the date display text as the user drags the slider
+# ---------------------------------------------------------------------------
+
+@callback(
+    # allow_duplicate=True: both this callback and update_date_range_slider
+    # write to 'bt-date-display'. Dash requires explicit permission for that.
+    Output('bt-date-display', 'children', allow_duplicate=True),
+    Input('bt-date-range', 'value'),
+    State('bt-date-store', 'data'),
+    prevent_initial_call=True,
+)
+@log_time
+def update_date_display(slider_value, date_store):
+    """Refresh the human-readable date label whenever the slider moves.
+
+    The slider reports integer indices; we look them up in the date_store list
+    to get the actual Timestamps and format them for display.
+    """
+    # Guard against the slider firing before the date store has been populated.
+    if not slider_value or not date_store:
+        return no_update
+    i0, i1 = slider_value[0], slider_value[1]
+    # Parse ISO strings back to Timestamps for formatting.
+    d0 = pd.Timestamp(date_store[i0]).strftime('%b %Y')
+    d1 = pd.Timestamp(date_store[i1]).strftime('%b %Y')
+    n_months = i1 - i0 + 1
+    return f'Selected: {d0} – {d1}  ({n_months} months)'
+
+
+# ---------------------------------------------------------------------------
 # Callback: run the DCA backtest and render results
 # ---------------------------------------------------------------------------
 
@@ -1184,19 +1340,23 @@ def _manage_basket(basket_id, remove_clicks, selected_asset, basket_data):
     Input('bt-run', 'n_clicks'),       # fires when the Run button is clicked
     State('bt-basket-store-a', 'data'),  # basket A contents (read, not trigger)
     State('bt-basket-store-b', 'data'),  # basket B contents
-    State('bt-years', 'value'),          # number of years selected on slider
+    # slider_value is [start_index, end_index] into the date_store list.
+    State('bt-date-range', 'value'),
+    # date_store is a list of ISO-format date strings, one per slider step.
+    State('bt-date-store', 'data'),
     prevent_initial_call=True  # do not run at page load (no data yet)
 )
 @log_time
-def run_backtest_callback(n_clicks, basket_a, basket_b, years):
+def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store):
     """Execute the DCA simulation for both baskets and update the UI.
 
     The backtest engine (backtest.run_backtest) simulates investing a fixed
     amount every month, then computes performance metrics. Here we:
-    1. Validate that at least one basket has assets.
-    2. Run the backtest for each non-empty basket.
-    3. Plot both portfolios on a single chart.
-    4. Build the metrics comparison table.
+    1. Validate that at least one basket has assets and dates are available.
+    2. Convert slider indices to actual Timestamps.
+    3. Run the backtest for each non-empty basket.
+    4. Plot both portfolios on a single chart.
+    5. Build the metrics comparison table.
     """
     # Prepare reusable figure / style constants so returns are concise.
     empty_chart = go.Figure()
@@ -1210,6 +1370,18 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, years):
     if not base_url or df is None:
         return empty_chart, hidden, '', 'No data source available.'
 
+    # Guard: the date slider must have been populated by update_date_range_slider
+    # before the user can run. If it has not (e.g. all files failed to load),
+    # we cannot resolve the slider positions to actual Timestamps.
+    if not date_store or not slider_value or len(date_store) < 2:
+        return empty_chart, hidden, '', 'No date range available. Add assets first.'
+
+    # Convert the slider's integer positions back to pandas Timestamps.
+    # slider_value is [i0, i1]; date_store[i0] is an ISO string like
+    # '2020-01-31T00:00:00+00:00'. pd.Timestamp() parses it correctly.
+    start_date = pd.Timestamp(date_store[slider_value[0]])
+    end_date = pd.Timestamp(date_store[slider_value[1]])
+
     # Extract filenames from each basket's list of asset dicts.
     # A list comprehension iterates through basket_a (or []) if it is None.
     filenames_a = [item['filename'] for item in (basket_a or [])]
@@ -1219,8 +1391,14 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, years):
     # basket has no assets (saves an unnecessary function call).
     # run_backtest returns (portfolio_series, metrics_dict) on success, or
     # (None, None) if no data was available.
-    portfolio_a, metrics_a = run_backtest(base_url, filenames_a, years, df) if filenames_a else (None, None)
-    portfolio_b, metrics_b = run_backtest(base_url, filenames_b, years, df) if filenames_b else (None, None)
+    portfolio_a, metrics_a = (
+        run_backtest(base_url, filenames_a, start_date, end_date, df)
+        if filenames_a else (None, None)
+    )
+    portfolio_b, metrics_b = (
+        run_backtest(base_url, filenames_b, start_date, end_date, df)
+        if filenames_b else (None, None)
+    )
 
     # If both backtests failed (e.g. all parquet files missing), abort.
     if portfolio_a is None and portfolio_b is None:
@@ -1254,11 +1432,11 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, years):
         len(portfolio_a) if portfolio_a is not None else 0,
         len(portfolio_b) if portfolio_b is not None else 0,
     )
-    # Convert months back to fractional years for the human-readable title.
-    actual_years = months_shown / 12
 
+    d0_label = start_date.strftime('%b %Y')
+    d1_label = end_date.strftime('%b %Y')
     fig.update_layout(
-        title=f'Portfolio Value ({actual_years:.1f} years, {months_shown} months, 1,000 €/month)',
+        title=f'Portfolio Value  {d0_label} – {d1_label}  ({months_shown} months, 1,000 €/month)',
         xaxis_title='Date',
         yaxis_title='Portfolio Value (€)',
         # hovermode='x unified': when you hover anywhere on the chart, a
@@ -1273,7 +1451,7 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, years):
 
     # Build the side-by-side metrics table and assemble the status message.
     metrics_div = _metrics_table(metrics_a, metrics_b)
-    status = f'Backtest complete – {actual_years:.1f} years simulated.'
+    status = f'Backtest complete – {d0_label} to {d1_label} ({months_shown} months).'
 
     log.info("Backtest completed: %d months, A=%s, B=%s",
              months_shown, len(filenames_a), len(filenames_b))
