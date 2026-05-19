@@ -1,14 +1,19 @@
 import os
-import pytest
 import pandas as pd
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 import plotly.graph_objects as go
 
 # Ensure no BASE_URL during import so df=None and no network calls are made
 os.environ.pop("BASE_URL", None)
 
-import src.app as app_module
-from src.app import update_asset_class, update_asset_search, update_chart
+from dash import no_update  # noqa: E402
+
+import src.app as app_module  # noqa: E402
+from src.app import (  # noqa: E402
+    update_asset_class, update_asset_search, update_chart,
+    _bt_assetclass_options, _bt_asset_search, _manage_basket,
+    run_backtest_callback, _render_basket_list, _metrics_table,
+)
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -322,3 +327,286 @@ class TestAppStructure:
 
     def test_asset_classes_empty_when_no_base_url(self):
         assert app_module.assetsClasses == []
+
+
+# ---------------------------------------------------------------------------
+# Backtesting – helpers
+# ---------------------------------------------------------------------------
+
+def _make_ctx(triggered_id, triggered_value=1):
+    """Build a minimal mock of dash.callback_context."""
+    ctx = MagicMock()
+    ctx.triggered = [{'prop_id': 'test.n_clicks', 'value': triggered_value}]
+    ctx.triggered_id = triggered_id
+    return ctx
+
+
+BASKET_ITEM_AAPL = {'filename': 'aapl.parquet', 'symbol': 'AAPL', 'name': 'Apple Inc'}
+BASKET_ITEM_GOOGL = {'filename': 'googl.parquet', 'symbol': 'GOOGL', 'name': 'Alphabet Inc'}
+
+
+# ---------------------------------------------------------------------------
+# _bt_assetclass_options
+# ---------------------------------------------------------------------------
+
+class TestBtAssetclassOptions:
+    def test_no_asset_class_returns_empty_and_disabled(self):
+        with patch.object(app_module, 'df', SAMPLE_DF):
+            opts, disabled = _bt_assetclass_options(None)
+        assert opts == []
+        assert disabled is True
+
+    def test_df_none_returns_empty_and_disabled(self):
+        with patch.object(app_module, 'df', None):
+            opts, disabled = _bt_assetclass_options('stocks')
+        assert opts == []
+        assert disabled is True
+
+    def test_valid_class_returns_options_and_enabled(self):
+        with patch.object(app_module, 'df', SAMPLE_DF):
+            opts, disabled = _bt_assetclass_options('stocks')
+        assert disabled is False
+        values = [o['value'] for o in opts]
+        assert 'aapl.parquet' in values
+        assert 'btc.parquet' not in values
+
+    def test_results_capped_at_thirty(self):
+        large_df = pd.DataFrame({
+            'asset_class': ['stocks'] * 40,
+            'symbol': [f'SYM{i}' for i in range(40)],
+            'interval': ['1d'] * 40,
+            'name': [f'Company {i}' for i in range(40)],
+            'exchange': ['NYSE'] * 40,
+            'country': ['US'] * 40,
+            'category': ['Tech'] * 40,
+            'first_date': ['2020-01-01'] * 40,
+            'last_date': ['2024-01-01'] * 40,
+            'filename': [f'sym{i}.parquet' for i in range(40)],
+        })
+        with patch.object(app_module, 'df', large_df):
+            opts, _ = _bt_assetclass_options('stocks')
+        assert len(opts) == 30
+
+
+# ---------------------------------------------------------------------------
+# _bt_asset_search
+# ---------------------------------------------------------------------------
+
+class TestBtAssetSearch:
+    def test_no_asset_class_returns_empty(self):
+        with patch.object(app_module, 'df', SAMPLE_DF):
+            assert _bt_asset_search(None, None, None) == []
+
+    def test_df_none_returns_empty(self):
+        with patch.object(app_module, 'df', None):
+            assert _bt_asset_search('AAPL', 'stocks', None) == []
+
+    def test_search_by_symbol_exact_match(self):
+        with patch.object(app_module, 'df', SAMPLE_DF):
+            opts = _bt_asset_search('aapl', 'stocks', None)
+        assert len(opts) == 1
+        assert opts[0]['value'] == 'aapl.parquet'
+
+    def test_search_by_name_partial_match(self):
+        with patch.object(app_module, 'df', SAMPLE_DF):
+            opts = _bt_asset_search('alphabet', 'stocks', None)
+        assert len(opts) == 1
+        assert opts[0]['value'] == 'googl.parquet'
+
+    def test_current_value_appended_when_not_in_results(self):
+        with patch.object(app_module, 'df', SAMPLE_DF):
+            opts = _bt_asset_search('GOOGL', 'stocks', 'aapl.parquet')
+        values = [o['value'] for o in opts]
+        assert 'aapl.parquet' in values
+        assert 'googl.parquet' in values
+
+    def test_current_value_not_duplicated(self):
+        with patch.object(app_module, 'df', SAMPLE_DF):
+            opts = _bt_asset_search(None, 'stocks', 'aapl.parquet')
+        assert [o['value'] for o in opts].count('aapl.parquet') == 1
+
+    def test_no_matches_returns_empty(self):
+        with patch.object(app_module, 'df', SAMPLE_DF):
+            assert _bt_asset_search('ZZZZZZ', 'stocks', None) == []
+
+
+# ---------------------------------------------------------------------------
+# _manage_basket
+# ---------------------------------------------------------------------------
+
+class TestManageBasket:
+    def test_add_asset_to_empty_basket(self):
+        ctx = _make_ctx('bt-add-a')
+        with patch('dash.callback_context', ctx), patch.object(app_module, 'df', SAMPLE_DF):
+            basket, _ = _manage_basket('a', [], 'aapl.parquet', [])
+        assert len(basket) == 1
+        assert basket[0]['filename'] == 'aapl.parquet'
+        assert basket[0]['symbol'] == 'AAPL'
+
+    def test_duplicate_asset_is_not_added_twice(self):
+        ctx = _make_ctx('bt-add-a')
+        with patch('dash.callback_context', ctx), patch.object(app_module, 'df', SAMPLE_DF):
+            basket, _ = _manage_basket('a', [], 'aapl.parquet', [BASKET_ITEM_AAPL])
+        assert len(basket) == 1
+
+    def test_add_with_no_selected_asset_returns_no_update(self):
+        ctx = _make_ctx('bt-add-a')
+        with patch('dash.callback_context', ctx), patch.object(app_module, 'df', SAMPLE_DF):
+            result = _manage_basket('a', [], None, [BASKET_ITEM_AAPL])
+        assert result == (no_update, no_update)
+
+    def test_remove_existing_asset_from_basket(self):
+        triggered = {'type': 'bt-remove-a', 'index': 'aapl.parquet'}
+        ctx = _make_ctx(triggered, triggered_value=1)
+        with patch('dash.callback_context', ctx):
+            basket, _ = _manage_basket('a', [1], None, [BASKET_ITEM_AAPL, BASKET_ITEM_GOOGL])
+        filenames = [item['filename'] for item in basket]
+        assert 'aapl.parquet' not in filenames
+        assert 'googl.parquet' in filenames
+
+    def test_remove_with_zero_n_clicks_is_ignored(self):
+        triggered = {'type': 'bt-remove-a', 'index': 'aapl.parquet'}
+        ctx = _make_ctx(triggered, triggered_value=0)
+        with patch('dash.callback_context', ctx):
+            basket, _ = _manage_basket('a', [0], None, [BASKET_ITEM_AAPL])
+        assert len(basket) == 1
+
+    def test_unrelated_trigger_returns_no_update(self):
+        ctx = _make_ctx('some-other-button')
+        with patch('dash.callback_context', ctx):
+            result = _manage_basket('a', [], None, [])
+        assert result == (no_update, no_update)
+
+    def test_no_triggered_context_returns_no_update(self):
+        ctx = MagicMock()
+        ctx.triggered = []
+        ctx.triggered_id = None
+        with patch('dash.callback_context', ctx):
+            result = _manage_basket('a', [], None, [])
+        assert result == (no_update, no_update)
+
+
+# ---------------------------------------------------------------------------
+# run_backtest_callback
+# ---------------------------------------------------------------------------
+
+_PORTFOLIO_STUB = pd.Series(
+    [1000.0 * (i + 1) for i in range(24)],
+    index=pd.date_range('2022-01-31', periods=24, freq='ME', tz='UTC'),
+)
+_METRICS_STUB = {'Total Return': '+50.0%', 'CAGR': '10.0%'}
+
+BASKET_A = [BASKET_ITEM_AAPL]
+BASKET_B = [BASKET_ITEM_GOOGL]
+
+
+class TestRunBacktestCallback:
+    def test_both_baskets_empty_returns_status_message(self):
+        _, style, _, status = run_backtest_callback(1, [], [], 5)
+        assert 'basket' in status
+        assert style['display'] == 'none'
+
+    def test_no_base_url_returns_error_status(self):
+        with patch.object(app_module, 'base_url', None), \
+             patch.object(app_module, 'df', SAMPLE_DF):
+            _, style, _, status = run_backtest_callback(1, BASKET_A, [], 5)
+        assert 'data source' in status
+        assert style['display'] == 'none'
+
+    def test_no_data_returned_shows_error_status(self):
+        with patch.object(app_module, 'base_url', 'http://x'), \
+             patch.object(app_module, 'df', SAMPLE_DF), \
+             patch.object(app_module, 'run_backtest', return_value=(None, None)):
+            _, style, _, status = run_backtest_callback(1, BASKET_A, BASKET_B, 5)
+        assert style['display'] == 'none'
+        assert 'No data' in status
+
+    def test_successful_run_makes_chart_visible(self):
+        with patch.object(app_module, 'base_url', 'http://x'), \
+             patch.object(app_module, 'df', SAMPLE_DF), \
+             patch.object(app_module, 'run_backtest', return_value=(_PORTFOLIO_STUB, _METRICS_STUB)):
+            _, style, _, _ = run_backtest_callback(1, BASKET_A, BASKET_B, 5)
+        assert style['display'] == 'block'
+
+    def test_successful_run_returns_plotly_figure(self):
+        with patch.object(app_module, 'base_url', 'http://x'), \
+             patch.object(app_module, 'df', SAMPLE_DF), \
+             patch.object(app_module, 'run_backtest', return_value=(_PORTFOLIO_STUB, _METRICS_STUB)):
+            fig, _, _, _ = run_backtest_callback(1, BASKET_A, BASKET_B, 5)
+        assert isinstance(fig, go.Figure)
+
+    def test_only_basket_a_filled_also_succeeds(self):
+        with patch.object(app_module, 'base_url', 'http://x'), \
+             patch.object(app_module, 'df', SAMPLE_DF), \
+             patch.object(app_module, 'run_backtest', return_value=(_PORTFOLIO_STUB, _METRICS_STUB)):
+            fig, style, _, status = run_backtest_callback(1, BASKET_A, [], 5)
+        assert style['display'] == 'block'
+        assert 'complete' in status
+
+
+# ---------------------------------------------------------------------------
+# _render_basket_list
+# ---------------------------------------------------------------------------
+
+class TestRenderBasketList:
+    def test_empty_basket_returns_paragraph(self):
+        from dash import html
+        result = _render_basket_list([], 'a')
+        assert isinstance(result, html.P)
+
+    def test_basket_with_items_returns_div(self):
+        from dash import html
+        result = _render_basket_list([BASKET_ITEM_AAPL], 'a')
+        assert isinstance(result, html.Div)
+
+    def test_remove_button_id_contains_filename(self):
+        result = _render_basket_list([BASKET_ITEM_AAPL], 'a')
+        buttons = [
+            c for row in result.children
+            for c in row.children
+            if hasattr(c, 'id') and isinstance(c.id, dict)
+        ]
+        assert any(b['index'] == 'aapl.parquet' for b in (btn.id for btn in buttons))
+
+    def test_symbol_and_name_appear_in_output(self):
+        result = _render_basket_list([BASKET_ITEM_AAPL], 'a')
+        rendered = str(result)
+        assert 'AAPL' in rendered
+        assert 'Apple Inc' in rendered
+
+
+# ---------------------------------------------------------------------------
+# _metrics_table
+# ---------------------------------------------------------------------------
+
+class TestMetricsTable:
+    def test_both_none_returns_paragraph(self):
+        from dash import html
+        result = _metrics_table(None, None)
+        assert isinstance(result, html.P)
+
+    def test_returns_table_with_header_row(self):
+        from dash import html
+        metrics = {'Total Return': '+10.0%', 'CAGR': '5.0%'}
+        result = _metrics_table(metrics, None)
+        assert isinstance(result, html.Table)
+        header = result.children[0]
+        texts = [th.children for th in header.children]
+        assert 'Metric' in texts
+        assert 'Basket A' in texts
+        assert 'Basket B' in texts
+
+    def test_metrics_values_appear_in_rows(self):
+        metrics_a = {'Total Return': '+10.0%'}
+        metrics_b = {'Total Return': '-5.0%'}
+        result = _metrics_table(metrics_a, metrics_b)
+        rendered = str(result)
+        assert '+10.0%' in rendered
+        assert '-5.0%' in rendered
+
+    def test_missing_metric_shows_em_dash(self):
+        metrics_a = {'Total Return': '+10.0%', 'CAGR': '5.0%'}
+        metrics_b = None
+        result = _metrics_table(metrics_a, metrics_b)
+        rendered = str(result)
+        assert '—' in rendered
