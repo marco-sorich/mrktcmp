@@ -166,9 +166,9 @@ class TestSimulateDca:
 
 class TestComputeMetrics:
     _EXPECTED_KEYS = {
-        'Gesamtertrag', 'CAGR', 'Sharpe Ratio', 'Max. Drawdown',
-        'Volatilität (p.a.)', 'Calmar Ratio', 'Investiert', 'Endwert',
-        'Gewinn/Verlust', 'Bester Monat', 'Schlechtester Monat',
+        'Total Return', 'CAGR', 'Sharpe Ratio', 'Max. Drawdown',
+        'Volatility (p.a.)', 'Calmar Ratio', 'Invested', 'End Value',
+        'Profit/Loss', 'Best Month', 'Worst Month',
     }
 
     def test_empty_series_returns_empty_dict(self):
@@ -192,12 +192,12 @@ class TestComputeMetrics:
         # Final value >> invested
         portfolio = _monthly_portfolio([1000.0 * (i + 10) for i in range(12)])
         metrics = compute_metrics(portfolio, 6000.0)
-        assert metrics['Gesamtertrag'].startswith('+')
+        assert metrics['Total Return'].startswith('+')
 
     def test_loss_shows_minus_sign_in_gesamtertrag(self):
         portfolio = _monthly_portfolio([max(500.0 - i * 40, 1.0) for i in range(12)])
         metrics = compute_metrics(portfolio, 6000.0)
-        assert metrics['Gesamtertrag'].startswith('-')
+        assert metrics['Total Return'].startswith('-')
 
     def test_monotonically_rising_portfolio_has_zero_drawdown(self):
         portfolio = _monthly_portfolio([float(i + 1) * 1000 for i in range(24)])
@@ -207,7 +207,7 @@ class TestComputeMetrics:
     def test_investiert_is_parseable_as_number(self):
         portfolio = _monthly_portfolio([float(i + 1) * 1000 for i in range(12)])
         metrics = compute_metrics(portfolio, 6000.0)
-        parsed = float(metrics['Investiert'].replace(',', ''))
+        parsed = float(metrics['Invested'].replace(',', ''))
         assert parsed == pytest.approx(6000.0)
 
 

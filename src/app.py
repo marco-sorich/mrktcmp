@@ -72,7 +72,7 @@ _METRIC_TABLE_STYLE = {'borderCollapse': 'collapse', 'width': '100%', 'fontSize'
 def _basket_ui(basket_id):
     label = 'A' if basket_id == 'a' else 'B'
     return html.Div([
-        html.H3(f'Korb {label}', style={'marginBottom': '8px'}),
+        html.H3(f'Basket {label}', style={'marginBottom': '8px'}),
         dcc.RadioItems(
             assetsClasses,
             id=f'bt-assetclass-{basket_id}',
@@ -82,7 +82,7 @@ def _basket_ui(basket_id):
         html.Div([
             dcc.Dropdown(
                 id=f'bt-asset-{basket_id}',
-                placeholder='Asset suchen…',
+                placeholder='Search asset…',
                 disabled=True,
                 style={'flex': 1},
             ),
@@ -100,7 +100,7 @@ def _basket_ui(basket_id):
 
 def _render_basket_list(basket_data, basket_id):
     if not basket_data:
-        return html.P('Keine Assets', style={'color': '#aaa', 'fontStyle': 'italic', 'margin': '4px 0'})
+        return html.P('No assets', style={'color': '#aaa', 'fontStyle': 'italic', 'margin': '4px 0'})
     return html.Div([
         html.Div([
             html.Span(f"{item['symbol']} — {item['name']}", style={'overflow': 'hidden', 'textOverflow': 'ellipsis'}),
@@ -117,13 +117,13 @@ def _render_basket_list(basket_data, basket_id):
 
 def _metrics_table(metrics_a, metrics_b):
     if not metrics_a and not metrics_b:
-        return html.P('Keine Ergebnisse.', style={'color': '#aaa'})
+        return html.P('No results.', style={'color': '#aaa'})
     keys = list((metrics_a or metrics_b).keys())
     rows = [
         html.Tr([
-            html.Th('Kennzahl', style={'textAlign': 'left', 'padding': '4px 8px', 'background': '#f0f0f0'}),
-            html.Th('Korb A', style={'textAlign': 'right', 'padding': '4px 8px', 'background': '#e8f0fe'}),
-            html.Th('Korb B', style={'textAlign': 'right', 'padding': '4px 8px', 'background': '#fce8e6'}),
+            html.Th('Metric', style={'textAlign': 'left', 'padding': '4px 8px', 'background': '#f0f0f0'}),
+            html.Th('Basket A', style={'textAlign': 'right', 'padding': '4px 8px', 'background': '#e8f0fe'}),
+            html.Th('Basket B', style={'textAlign': 'right', 'padding': '4px 8px', 'background': '#fce8e6'}),
         ])
     ] + [
         html.Tr([
@@ -145,7 +145,7 @@ app.layout = html.Div([
     html.H1("mrktcmp _ markets compare"),
     dcc.Tabs(id='main-tabs', value='tab-chart', children=[
 
-        dcc.Tab(label='Marktdaten', value='tab-chart', children=[
+        dcc.Tab(label='Market Data', value='tab-chart', children=[
             html.Div([
                 dcc.RadioItems(assetsClasses, id='assetclasses-type', inline=True),
                 dcc.Dropdown(id='asset-type', placeholder='Type to search…')
@@ -163,7 +163,7 @@ app.layout = html.Div([
             ], style={'display': 'flex', 'gap': '8px', 'marginTop': '12px'}),
 
             html.Div([
-                html.Label('Zeitraum (Jahre):', style={'fontWeight': 'bold', 'marginRight': '8px'}),
+                html.Label('Period (years):', style={'fontWeight': 'bold', 'marginRight': '8px'}),
                 dcc.Slider(
                     id='bt-years',
                     min=1, max=30, step=1, value=5,
@@ -173,7 +173,7 @@ app.layout = html.Div([
             ], style={'marginTop': '20px', 'marginBottom': '8px'}),
 
             html.Button(
-                '▶ Backtesting starten',
+                '▶ Start Backtest',
                 id='bt-run',
                 n_clicks=0,
                 style={'padding': '8px 20px', 'fontSize': '14px', 'cursor': 'pointer',
@@ -200,7 +200,7 @@ def log_time(func):
 
 
 # ---------------------------------------------------------------------------
-# Existing Marktdaten callbacks
+# Existing Market Data callbacks
 # ---------------------------------------------------------------------------
 
 @callback(
@@ -542,10 +542,10 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, years):
     visible = {'width': '100%', 'display': 'block'}
 
     if not basket_a and not basket_b:
-        return empty_chart, hidden, '', 'Bitte mindestens einen Korb befüllen.'
+        return empty_chart, hidden, '', 'Please fill at least one basket.'
 
     if not base_url or df is None:
-        return empty_chart, hidden, '', 'Keine Datenquelle verfügbar.'
+        return empty_chart, hidden, '', 'No data source available.'
 
     filenames_a = [item['filename'] for item in (basket_a or [])]
     filenames_b = [item['filename'] for item in (basket_b or [])]
@@ -554,21 +554,21 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, years):
     portfolio_b, metrics_b = run_backtest(base_url, filenames_b, years, df) if filenames_b else (None, None)
 
     if portfolio_a is None and portfolio_b is None:
-        return empty_chart, hidden, '', 'Keine Daten für den gewählten Zeitraum verfügbar.'
+        return empty_chart, hidden, '', 'No data available for the selected period.'
 
     fig = go.Figure()
     if portfolio_a is not None:
         fig.add_trace(go.Scatter(
             x=portfolio_a.index,
             y=portfolio_a.round(2),
-            name='Korb A',
+            name='Basket A',
             line=dict(color='#1a56db', width=2),
         ))
     if portfolio_b is not None:
         fig.add_trace(go.Scatter(
             x=portfolio_b.index,
             y=portfolio_b.round(2),
-            name='Korb B',
+            name='Basket B',
             line=dict(color='#c0392b', width=2),
         ))
 
@@ -579,16 +579,16 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, years):
     actual_years = months_shown / 12
 
     fig.update_layout(
-        title=f'Portfoliowert ({actual_years:.1f} Jahre, {months_shown} Monate, 1.000 €/Monat)',
-        xaxis_title='Datum',
-        yaxis_title='Portfoliowert (€)',
+        title=f'Portfolio Value ({actual_years:.1f} years, {months_shown} months, 1,000 €/month)',
+        xaxis_title='Date',
+        yaxis_title='Portfolio Value (€)',
         hovermode='x unified',
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
         margin=dict(l=8, r=8, t=48, b=8),
     )
 
     metrics_div = _metrics_table(metrics_a, metrics_b)
-    status = f'Backtesting abgeschlossen – {actual_years:.1f} Jahre simuliert.'
+    status = f'Backtest complete – {actual_years:.1f} years simulated.'
     log.info("Backtest completed: %d months, A=%s, B=%s",
              months_shown, len(filenames_a), len(filenames_b))
     return fig, visible, metrics_div, status

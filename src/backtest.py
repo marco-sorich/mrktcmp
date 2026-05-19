@@ -82,17 +82,17 @@ def compute_metrics(portfolio, total_invested):
     calmar = cagr / abs(max_dd) if max_dd < 0 else 0.0
 
     return {
-        'Gesamtertrag': f"{total_return * 100:+.1f}%",
+        'Total Return': f"{total_return * 100:+.1f}%",
         'CAGR': f"{cagr * 100:.1f}%",
         'Sharpe Ratio': f"{sharpe:.2f}",
         'Max. Drawdown': f"{max_dd * 100:.1f}%",
-        'Volatilität (p.a.)': f"{vol * 100:.1f}%",
+        'Volatility (p.a.)': f"{vol * 100:.1f}%",
         'Calmar Ratio': f"{calmar:.2f}",
-        'Investiert': f"{total_invested:,.0f}",
-        'Endwert': f"{final_value:,.0f}",
-        'Gewinn/Verlust': f"{final_value - total_invested:+,.0f}",
-        'Bester Monat': f"{monthly_returns.max() * 100:+.1f}%",
-        'Schlechtester Monat': f"{monthly_returns.min() * 100:+.1f}%",
+        'Invested': f"{total_invested:,.0f}",
+        'End Value': f"{final_value:,.0f}",
+        'Profit/Loss': f"{final_value - total_invested:+,.0f}",
+        'Best Month': f"{monthly_returns.max() * 100:+.1f}%",
+        'Worst Month': f"{monthly_returns.min() * 100:+.1f}%",
     }
 
 

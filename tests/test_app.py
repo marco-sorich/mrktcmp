@@ -494,7 +494,7 @@ _PORTFOLIO_STUB = pd.Series(
     [1000.0 * (i + 1) for i in range(24)],
     index=pd.date_range('2022-01-31', periods=24, freq='ME', tz='UTC'),
 )
-_METRICS_STUB = {'Gesamtertrag': '+50.0%', 'CAGR': '10.0%'}
+_METRICS_STUB = {'Total Return': '+50.0%', 'CAGR': '10.0%'}
 
 BASKET_A = [BASKET_ITEM_AAPL]
 BASKET_B = [BASKET_ITEM_GOOGL]
@@ -503,14 +503,14 @@ BASKET_B = [BASKET_ITEM_GOOGL]
 class TestRunBacktestCallback:
     def test_both_baskets_empty_returns_status_message(self):
         _, style, _, status = run_backtest_callback(1, [], [], 5)
-        assert 'befüllen' in status
+        assert 'basket' in status
         assert style['display'] == 'none'
 
     def test_no_base_url_returns_error_status(self):
         with patch.object(app_module, 'base_url', None), \
              patch.object(app_module, 'df', SAMPLE_DF):
             _, style, _, status = run_backtest_callback(1, BASKET_A, [], 5)
-        assert 'Datenquelle' in status
+        assert 'data source' in status
         assert style['display'] == 'none'
 
     def test_no_data_returned_shows_error_status(self):
@@ -519,7 +519,7 @@ class TestRunBacktestCallback:
              patch.object(app_module, 'run_backtest', return_value=(None, None)):
             _, style, _, status = run_backtest_callback(1, BASKET_A, BASKET_B, 5)
         assert style['display'] == 'none'
-        assert 'Keine Daten' in status
+        assert 'No data' in status
 
     def test_successful_run_makes_chart_visible(self):
         with patch.object(app_module, 'base_url', 'http://x'), \
@@ -541,7 +541,7 @@ class TestRunBacktestCallback:
              patch.object(app_module, 'run_backtest', return_value=(_PORTFOLIO_STUB, _METRICS_STUB)):
             fig, style, _, status = run_backtest_callback(1, BASKET_A, [], 5)
         assert style['display'] == 'block'
-        assert 'abgeschlossen' in status
+        assert 'complete' in status
 
 
 # ---------------------------------------------------------------------------
@@ -587,25 +587,25 @@ class TestMetricsTable:
 
     def test_returns_table_with_header_row(self):
         from dash import html
-        metrics = {'Gesamtertrag': '+10.0%', 'CAGR': '5.0%'}
+        metrics = {'Total Return': '+10.0%', 'CAGR': '5.0%'}
         result = _metrics_table(metrics, None)
         assert isinstance(result, html.Table)
         header = result.children[0]
         texts = [th.children for th in header.children]
-        assert 'Kennzahl' in texts
-        assert 'Korb A' in texts
-        assert 'Korb B' in texts
+        assert 'Metric' in texts
+        assert 'Basket A' in texts
+        assert 'Basket B' in texts
 
     def test_metrics_values_appear_in_rows(self):
-        metrics_a = {'Gesamtertrag': '+10.0%'}
-        metrics_b = {'Gesamtertrag': '-5.0%'}
+        metrics_a = {'Total Return': '+10.0%'}
+        metrics_b = {'Total Return': '-5.0%'}
         result = _metrics_table(metrics_a, metrics_b)
         rendered = str(result)
         assert '+10.0%' in rendered
         assert '-5.0%' in rendered
 
     def test_missing_metric_shows_em_dash(self):
-        metrics_a = {'Gesamtertrag': '+10.0%', 'CAGR': '5.0%'}
+        metrics_a = {'Total Return': '+10.0%', 'CAGR': '5.0%'}
         metrics_b = None
         result = _metrics_table(metrics_a, metrics_b)
         rendered = str(result)
