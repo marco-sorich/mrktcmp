@@ -3,12 +3,15 @@ import pandas as pd
 from unittest.mock import patch, MagicMock
 import plotly.graph_objects as go
 
-# Ensure no BASE_URL during import so df=None and no network calls are made
+# Ensure no BASE_URL during import so df=None and no network calls are made.
+# load_dotenv is also patched so that the .env file (which may contain BASE_URL)
+# is not loaded when the module is first imported.
 os.environ.pop("BASE_URL", None)
 
 from dash import no_update  # noqa: E402
 
-import src.app as app_module  # noqa: E402
+with patch("dotenv.load_dotenv"):
+    import src.app as app_module  # noqa: E402
 from src.app import (  # noqa: E402
     update_asset_class, update_asset_search, update_chart,
     _bt_assetclass_options, _bt_asset_search, _manage_basket,

@@ -6,3 +6,4 @@ gunicorn
 requests
 pyarrow
 dash-ag-grid
+python-dotenv

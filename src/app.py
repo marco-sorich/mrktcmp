@@ -50,6 +50,9 @@ import time
 # Third-party imports
 # ---------------------------------------------------------------------------
 
+# dotenv to embed secret from environment
+from dotenv import load_dotenv, dotenv_values
+
 # dash: the main Dash package. Importing it here gives us dash.Dash (the app
 # class), dash.callback_context (info about which Input fired), and utilities
 # like no_update and Patch (described later).
@@ -122,6 +125,14 @@ from backtest import run_backtest, get_common_date_range  # noqa: E402
 start_time = time.time()
 
 # ---------------------------------------------------------------------------
+# Load variables from .env into environment
+# ---------------------------------------------------------------------------
+
+# loading variables from .env file
+load_dotenv(override=True)
+
+
+# ---------------------------------------------------------------------------
 # Logging configuration
 # ---------------------------------------------------------------------------
 
@@ -162,6 +173,7 @@ logging.basicConfig(level=_log_level, handlers=[_stdout_handler, _stderr_handler
 # to identify which module produced each log message.
 log = logging.getLogger(__name__)
 
+
 # ---------------------------------------------------------------------------
 # Load master asset catalogue from BASE_URL
 # ---------------------------------------------------------------------------
@@ -201,11 +213,11 @@ else:
         # .tolist() converts it from a numpy array to a plain Python list,
         # which is what Dash RadioItems / Dropdown options expect.
         assetsClasses = df['asset_class'].unique().tolist()
-        log.info("Data loaded.")
+        log.info(f"Data loaded. AssetClasses: {assetsClasses}")
     except Exception:
         # log.exception automatically includes the full traceback so we can
         # diagnose the problem without adding extra debug code.
-        log.exception("Failed to load master.csv from BASE_URL")
+        log.exception("Failed to load master.parquet from BASE_URL")
 
 # ---------------------------------------------------------------------------
 # Create the Dash application
