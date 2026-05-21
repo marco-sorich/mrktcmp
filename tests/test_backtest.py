@@ -11,6 +11,8 @@ from src.backtest import (  # noqa: E402
     simulate_dca,
     compute_metrics,
     run_backtest,
+    get_common_date_range,
+    _get_monthly_range,
 )
 
 # ---------------------------------------------------------------------------
@@ -216,60 +218,139 @@ class TestComputeMetrics:
 # ---------------------------------------------------------------------------
 
 class TestRunBacktest:
+    # Shared date bounds used across tests – cover 3 years of monthly data.
+    _START = pd.Timestamp('2021-01-31', tz='UTC')
+    _END = pd.Timestamp('2023-12-31', tz='UTC')
+
     def test_empty_filenames_returns_none_none(self):
-        p, m = run_backtest(BASE_URL, [], 5, SAMPLE_META)
+        p, m = run_backtest(BASE_URL, [], self._START, self._END, SAMPLE_META)
         assert p is None and m is None
 
     def test_no_base_url_returns_none_none(self):
-        p, m = run_backtest(None, ['aapl.parquet'], 5, SAMPLE_META)
+        p, m = run_backtest(None, ['aapl.parquet'], self._START, self._END, SAMPLE_META)
         assert p is None and m is None
 
     def test_successful_run_returns_portfolio_and_metrics_dict(self):
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0, n_days=2000)):
-            p, m = run_backtest(BASE_URL, ['aapl.parquet'], 3, SAMPLE_META)
+            p, m = run_backtest(BASE_URL, ['aapl.parquet'], self._START, self._END, SAMPLE_META)
         assert p is not None
         assert isinstance(m, dict)
         assert 'CAGR' in m
 
-    def test_years_filter_caps_portfolio_length(self):
-        # 4 years of data; request 2 years → at most ~24 months returned
+    def test_date_window_filters_portfolio_length(self):
+        # 5 years of daily data; request only 2 years → ~24 months returned.
         now = pd.Timestamp.now(tz='UTC')
-        idx = pd.date_range(now - pd.DateOffset(years=4), now, freq='D')
+        idx = pd.date_range(now - pd.DateOffset(years=5), now, freq='D')
         ohlcv = pd.DataFrame(
             {'Open': 100.0, 'High': 100.0, 'Low': 100.0, 'Close': 100.0, 'Volume': 1},
             index=idx,
         )
+        start = now - pd.DateOffset(years=2)
         with patch('src.backtest.pd.read_parquet', return_value=ohlcv):
-            p, _ = run_backtest(BASE_URL, ['aapl.parquet'], 2, SAMPLE_META)
+            p, _ = run_backtest(BASE_URL, ['aapl.parquet'], start, now, SAMPLE_META)
         assert p is not None
         assert len(p) <= 26  # 2 years ≈ 24 months, allow 2 for edge rounding
 
-    def test_stale_data_still_delivers_requested_years(self):
-        # Data ends 1 year before today; requesting 3 years must still yield ~3 years,
-        # not 2 (which the old now-based cutoff would produce).
-        now = pd.Timestamp.now(tz='UTC')
-        data_end = now - pd.DateOffset(years=1)
-        idx = pd.date_range(data_end - pd.DateOffset(years=5), data_end, freq='D')
-        ohlcv = pd.DataFrame(
-            {'Open': 100.0, 'High': 100.0, 'Low': 100.0, 'Close': 100.0, 'Volume': 1},
-            index=idx,
-        )
-        with patch('src.backtest.pd.read_parquet', return_value=ohlcv):
-            p, _ = run_backtest(BASE_URL, ['aapl.parquet'], 3, SAMPLE_META)
-        assert p is not None
-        # Must be ≥ 35 months (≈ 3 years); the old bug gave only ~24 (2 years)
-        assert len(p) >= 35
+    def test_start_after_end_returns_none_none(self):
+        # Invalid range: start > end → empty DataFrame → (None, None).
+        with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0, n_days=2000)):
+            p, m = run_backtest(
+                BASE_URL, ['aapl.parquet'],
+                self._END, self._START,   # intentionally reversed
+                SAMPLE_META,
+            )
+        assert p is None and m is None
 
-    def test_requested_years_exceeds_data_returns_all_available(self):
-        # Only 2 years of data available; requesting 5 years must return all 2 years,
-        # not zero (cutoff is anchored to data_end, never to now).
+    def test_both_bounds_respected(self):
+        # Data spans 5 years; request the middle year → only ~12 months.
         now = pd.Timestamp.now(tz='UTC')
-        idx = pd.date_range(now - pd.DateOffset(years=2), now, freq='D')
+        idx = pd.date_range(now - pd.DateOffset(years=5), now, freq='D')
         ohlcv = pd.DataFrame(
             {'Open': 100.0, 'High': 100.0, 'Low': 100.0, 'Close': 100.0, 'Volume': 1},
             index=idx,
         )
+        start = now - pd.DateOffset(years=3)
+        end = now - pd.DateOffset(years=2)
         with patch('src.backtest.pd.read_parquet', return_value=ohlcv):
-            p, _ = run_backtest(BASE_URL, ['aapl.parquet'], 5, SAMPLE_META)
+            p, _ = run_backtest(BASE_URL, ['aapl.parquet'], start, end, SAMPLE_META)
         assert p is not None
-        assert len(p) >= 23  # all ~24 months of available data returned
+        assert 10 <= len(p) <= 14   # roughly 12 months
+
+
+# ---------------------------------------------------------------------------
+# _get_monthly_range
+# ---------------------------------------------------------------------------
+
+class TestGetMonthlyRange:
+    def test_unknown_filename_returns_none_none(self):
+        s, e = _get_monthly_range(BASE_URL, 'unknown.parquet', SAMPLE_META)
+        assert s is None and e is None
+
+    def test_returns_start_and_end_timestamps(self):
+        with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0, n_days=400)):
+            s, e = _get_monthly_range(BASE_URL, 'aapl.parquet', SAMPLE_META)
+        assert s is not None
+        assert e is not None
+        assert s <= e
+
+    def test_parquet_error_returns_none_none(self):
+        with patch('src.backtest.pd.read_parquet', side_effect=OSError('fail')):
+            s, e = _get_monthly_range(BASE_URL, 'aapl.parquet', SAMPLE_META)
+        assert s is None and e is None
+
+
+# ---------------------------------------------------------------------------
+# get_common_date_range
+# ---------------------------------------------------------------------------
+
+class TestGetCommonDateRange:
+    def test_both_empty_returns_none_none(self):
+        s, e = get_common_date_range(BASE_URL, [], [], SAMPLE_META)
+        assert s is None and e is None
+
+    def test_no_base_url_returns_none_none(self):
+        s, e = get_common_date_range(None, ['aapl.parquet'], [], SAMPLE_META)
+        assert s is None and e is None
+
+    def test_single_basket_returns_that_assets_range(self):
+        with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0, n_days=730)):
+            s, e = get_common_date_range(BASE_URL, ['aapl.parquet'], [], SAMPLE_META)
+        assert s is not None and e is not None
+        assert s <= e
+
+    def test_non_overlapping_ranges_return_none_none(self):
+        # Asset A: Jan 2020 – Dec 2020 (only).
+        # Asset B: Jan 2022 – Dec 2022 (only).
+        # They have no shared months → (None, None).
+        idx_a = pd.date_range('2020-01-01', '2020-12-31', freq='D', tz='UTC')
+        idx_b = pd.date_range('2022-01-01', '2022-12-31', freq='D', tz='UTC')
+        ohlcv_a = pd.DataFrame({'Close': 1.0}, index=idx_a)
+        ohlcv_b = pd.DataFrame({'Close': 1.0}, index=idx_b)
+
+        def _mock_read(path, columns=None):
+            return ohlcv_a if 'aapl' in path else ohlcv_b
+
+        with patch('src.backtest.pd.read_parquet', side_effect=_mock_read):
+            s, e = get_common_date_range(
+                BASE_URL, ['aapl.parquet'], ['btc.parquet'], SAMPLE_META
+            )
+        assert s is None and e is None
+
+    def test_overlapping_ranges_return_intersection(self):
+        # Asset A starts Jan 2020, Asset B starts Jul 2020.
+        # Both end Dec 2021. Intersection = Jul 2020 – Dec 2021.
+        idx_a = pd.date_range('2020-01-01', '2021-12-31', freq='D', tz='UTC')
+        idx_b = pd.date_range('2020-07-01', '2021-12-31', freq='D', tz='UTC')
+        ohlcv_a = pd.DataFrame({'Close': 1.0}, index=idx_a)
+        ohlcv_b = pd.DataFrame({'Close': 1.0}, index=idx_b)
+
+        def _mock_read(path, columns=None):
+            return ohlcv_a if 'aapl' in path else ohlcv_b
+
+        with patch('src.backtest.pd.read_parquet', side_effect=_mock_read):
+            s, e = get_common_date_range(
+                BASE_URL, ['aapl.parquet'], ['btc.parquet'], SAMPLE_META
+            )
+        assert s is not None
+        # Common start must be >= Jul 2020
+        assert s >= pd.Timestamp('2020-07-01', tz='UTC')

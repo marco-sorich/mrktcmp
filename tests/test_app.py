@@ -13,6 +13,7 @@ from src.app import (  # noqa: E402
     update_asset_class, update_asset_search, update_chart,
     _bt_assetclass_options, _bt_asset_search, _manage_basket,
     run_backtest_callback, _render_basket_list, _metrics_table,
+    update_date_range_slider, update_date_display, _build_slider_marks,
 )
 
 # ---------------------------------------------------------------------------
@@ -499,25 +500,37 @@ _METRICS_STUB = {'Total Return': '+50.0%', 'CAGR': '10.0%'}
 BASKET_A = [BASKET_ITEM_AAPL]
 BASKET_B = [BASKET_ITEM_GOOGL]
 
+# Shared date store / slider fixtures used by run_backtest_callback tests.
+_TEST_DATES = pd.date_range('2022-01-31', periods=24, freq='ME', tz='UTC')
+_DATE_STORE = [d.isoformat() for d in _TEST_DATES]
+_SLIDER_VAL = [0, 23]   # full range (index 0 … 23)
+
 
 class TestRunBacktestCallback:
     def test_both_baskets_empty_returns_status_message(self):
-        _, style, _, status = run_backtest_callback(1, [], [], 5)
+        _, style, _, status = run_backtest_callback(1, [], [], _SLIDER_VAL, _DATE_STORE)
         assert 'basket' in status
         assert style['display'] == 'none'
 
     def test_no_base_url_returns_error_status(self):
         with patch.object(app_module, 'base_url', None), \
              patch.object(app_module, 'df', SAMPLE_DF):
-            _, style, _, status = run_backtest_callback(1, BASKET_A, [], 5)
+            _, style, _, status = run_backtest_callback(1, BASKET_A, [], _SLIDER_VAL, _DATE_STORE)
         assert 'data source' in status
+        assert style['display'] == 'none'
+
+    def test_empty_date_store_returns_error_status(self):
+        with patch.object(app_module, 'base_url', 'http://x'), \
+             patch.object(app_module, 'df', SAMPLE_DF):
+            _, style, _, status = run_backtest_callback(1, BASKET_A, [], _SLIDER_VAL, [])
+        assert 'date range' in status.lower()
         assert style['display'] == 'none'
 
     def test_no_data_returned_shows_error_status(self):
         with patch.object(app_module, 'base_url', 'http://x'), \
              patch.object(app_module, 'df', SAMPLE_DF), \
              patch.object(app_module, 'run_backtest', return_value=(None, None)):
-            _, style, _, status = run_backtest_callback(1, BASKET_A, BASKET_B, 5)
+            _, style, _, status = run_backtest_callback(1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE)
         assert style['display'] == 'none'
         assert 'No data' in status
 
@@ -525,23 +538,142 @@ class TestRunBacktestCallback:
         with patch.object(app_module, 'base_url', 'http://x'), \
              patch.object(app_module, 'df', SAMPLE_DF), \
              patch.object(app_module, 'run_backtest', return_value=(_PORTFOLIO_STUB, _METRICS_STUB)):
-            _, style, _, _ = run_backtest_callback(1, BASKET_A, BASKET_B, 5)
+            _, style, _, _ = run_backtest_callback(1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE)
         assert style['display'] == 'block'
 
     def test_successful_run_returns_plotly_figure(self):
         with patch.object(app_module, 'base_url', 'http://x'), \
              patch.object(app_module, 'df', SAMPLE_DF), \
              patch.object(app_module, 'run_backtest', return_value=(_PORTFOLIO_STUB, _METRICS_STUB)):
-            fig, _, _, _ = run_backtest_callback(1, BASKET_A, BASKET_B, 5)
+            fig, _, _, _ = run_backtest_callback(1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE)
         assert isinstance(fig, go.Figure)
 
     def test_only_basket_a_filled_also_succeeds(self):
         with patch.object(app_module, 'base_url', 'http://x'), \
              patch.object(app_module, 'df', SAMPLE_DF), \
              patch.object(app_module, 'run_backtest', return_value=(_PORTFOLIO_STUB, _METRICS_STUB)):
-            fig, style, _, status = run_backtest_callback(1, BASKET_A, [], 5)
+            fig, style, _, status = run_backtest_callback(1, BASKET_A, [], _SLIDER_VAL, _DATE_STORE)
         assert style['display'] == 'block'
         assert 'complete' in status
+
+
+# ---------------------------------------------------------------------------
+# _build_slider_marks
+# ---------------------------------------------------------------------------
+
+class TestBuildSliderMarks:
+    def test_short_range_marks_every_month(self):
+        dates = pd.date_range('2024-01-31', periods=6, freq='ME', tz='UTC')
+        marks = _build_slider_marks(dates)
+        # All 6 positions should appear (step=1 for ≤12 months).
+        assert 0 in marks
+        assert 5 in marks
+
+    def test_medium_range_marks_quarterly(self):
+        dates = pd.date_range('2021-01-31', periods=24, freq='ME', tz='UTC')
+        marks = _build_slider_marks(dates)
+        # 24 months → step=3, so positions 0,3,6,… plus last (23).
+        assert 0 in marks
+        assert 3 in marks
+        assert 23 in marks
+
+    def test_long_range_marks_yearly(self):
+        dates = pd.date_range('2015-01-31', periods=120, freq='ME', tz='UTC')
+        marks = _build_slider_marks(dates)
+        # 120 months → step=12, so positions 0,12,24,…plus last.
+        assert 0 in marks
+        assert 12 in marks
+        assert 119 in marks
+
+    def test_last_position_always_present(self):
+        for periods in (3, 18, 60):
+            dates = pd.date_range('2020-01-31', periods=periods, freq='ME', tz='UTC')
+            marks = _build_slider_marks(dates)
+            assert periods - 1 in marks
+
+    def test_labels_are_strings(self):
+        dates = pd.date_range('2020-01-31', periods=12, freq='ME', tz='UTC')
+        marks = _build_slider_marks(dates)
+        assert all(isinstance(v, str) for v in marks.values())
+
+
+# ---------------------------------------------------------------------------
+# update_date_range_slider
+# ---------------------------------------------------------------------------
+
+class TestUpdateDateRangeSlider:
+    def test_both_baskets_empty_disables_slider(self):
+        *_, disabled, _store, _display = update_date_range_slider([], [])
+        assert disabled is True
+
+    def test_no_base_url_disables_slider(self):
+        with patch.object(app_module, 'base_url', None):
+            *_, disabled, _store, _display = update_date_range_slider(BASKET_A, [])
+        assert disabled is True
+
+    def test_no_overlap_disables_slider(self):
+        with patch.object(app_module, 'base_url', 'http://x'), \
+             patch.object(app_module, 'df', SAMPLE_DF), \
+             patch('src.app.get_common_date_range', return_value=(None, None)):
+            *_, disabled, _store, _display = update_date_range_slider(BASKET_A, BASKET_B)
+        assert disabled is True
+
+    def test_valid_range_enables_slider(self):
+        common_start = pd.Timestamp('2020-01-31', tz='UTC')
+        common_end = pd.Timestamp('2022-12-31', tz='UTC')
+        with patch.object(app_module, 'base_url', 'http://x'), \
+             patch.object(app_module, 'df', SAMPLE_DF), \
+             patch('src.app.get_common_date_range', return_value=(common_start, common_end)):
+            *_, disabled, _store, _display = update_date_range_slider(BASKET_A, [])
+        assert disabled is False
+
+    def test_date_store_contains_iso_strings(self):
+        common_start = pd.Timestamp('2022-01-31', tz='UTC')
+        common_end = pd.Timestamp('2022-03-31', tz='UTC')
+        with patch.object(app_module, 'base_url', 'http://x'), \
+             patch.object(app_module, 'df', SAMPLE_DF), \
+             patch('src.app.get_common_date_range', return_value=(common_start, common_end)):
+            *_, _disabled, date_store, _display = update_date_range_slider(BASKET_A, [])
+        assert len(date_store) == 3        # Jan, Feb, Mar 2022
+        pd.Timestamp(date_store[0])        # must be parseable
+
+    def test_slider_value_covers_full_range(self):
+        common_start = pd.Timestamp('2022-01-31', tz='UTC')
+        common_end = pd.Timestamp('2022-06-30', tz='UTC')
+        with patch.object(app_module, 'base_url', 'http://x'), \
+             patch.object(app_module, 'df', SAMPLE_DF), \
+             patch('src.app.get_common_date_range', return_value=(common_start, common_end)):
+            _min, _max, value, *_ = update_date_range_slider(BASKET_A, [])
+        assert value == [0, 5]   # 6 months → indices 0 … 5
+
+
+# ---------------------------------------------------------------------------
+# update_date_display
+# ---------------------------------------------------------------------------
+
+class TestUpdateDateDisplay:
+    def test_empty_slider_value_returns_no_update(self):
+        from dash import no_update as nu
+        result = update_date_display(None, _DATE_STORE)
+        assert result == nu
+
+    def test_empty_date_store_returns_no_update(self):
+        from dash import no_update as nu
+        result = update_date_display([0, 5], [])
+        assert result == nu
+
+    def test_returns_formatted_string(self):
+        result = update_date_display([0, 23], _DATE_STORE)
+        assert isinstance(result, str)
+        assert '–' in result
+
+    def test_month_count_in_output(self):
+        result = update_date_display([0, 11], _DATE_STORE)   # 12 months
+        assert '12' in result
+
+    def test_single_month_selected(self):
+        result = update_date_display([5, 5], _DATE_STORE)
+        assert '1' in result   # 1 month
 
 
 # ---------------------------------------------------------------------------
