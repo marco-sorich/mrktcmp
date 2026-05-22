@@ -659,7 +659,7 @@ def update_asset_class(asset_class):
     options, disabled = [], True
     if asset_class and df is not None:
         # Limit to 30 rows for an initial list; search refines further.
-        filtered = df[df['asset_class'] == asset_class].head(30)
+        filtered = df[df['asset_class'] == asset_class].head(200)
         # Build a list of option dicts: each has 'label' (displayed text) and
         # 'value' (the value stored when the user selects this option).
         options = [
@@ -1000,7 +1000,7 @@ def _bt_assetclass_options(asset_class):
         return [], True
 
     # Filter to the chosen class, limit to 30 rows for the initial list.
-    filtered = df[df['asset_class'] == asset_class].head(30)
+    filtered = df[df['asset_class'] == asset_class].head(200)
 
     options = [
         {'label': f"{row['symbol']} — {row['name']} ({row['interval']})", 'value': row['filename']}
