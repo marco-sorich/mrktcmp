@@ -201,33 +201,33 @@ class TestUpdateChart:
     def test_no_filename_returns_empty(self):
         with patch.object(app_module, "df", SAMPLE_DF), \
              patch.object(app_module, "base_url", BASE_URL):
-            fig, headline, _ = update_chart(None)
+            fig, headline, _ = update_chart(None, True)
         assert headline == ""
 
     def test_no_base_url_returns_empty(self):
         with patch.object(app_module, "df", SAMPLE_DF), \
              patch.object(app_module, "base_url", None):
-            fig, headline, _ = update_chart("aapl.parquet")
+            fig, headline, _ = update_chart("aapl.parquet", True)
         assert headline == ""
 
     def test_df_none_returns_empty(self):
         with patch.object(app_module, "df", None), \
              patch.object(app_module, "base_url", BASE_URL):
-            fig, headline, _ = update_chart("aapl.parquet")
+            fig, headline, _ = update_chart("aapl.parquet", True)
         assert headline == ""
 
     def test_valid_input_returns_figure(self):
         with patch.object(app_module, "df", SAMPLE_DF), \
              patch.object(app_module, "base_url", BASE_URL), \
              patch("src.app.pd.read_parquet", return_value=SAMPLE_OHLCV):
-            fig, headline, _ = update_chart("aapl.parquet")
+            fig, headline, _ = update_chart("aapl.parquet", True)
         assert isinstance(fig, go.Figure)
 
     def test_chart_contains_candlestick_trace(self):
         with patch.object(app_module, "df", SAMPLE_DF), \
              patch.object(app_module, "base_url", BASE_URL), \
              patch("src.app.pd.read_parquet", return_value=SAMPLE_OHLCV):
-            fig, *_ = update_chart("aapl.parquet")
+            fig, *_ = update_chart("aapl.parquet", True)
         trace_types = [type(t).__name__ for t in fig.data]
         assert "Candlestick" in trace_types
 
@@ -235,7 +235,7 @@ class TestUpdateChart:
         with patch.object(app_module, "df", SAMPLE_DF), \
              patch.object(app_module, "base_url", BASE_URL), \
              patch("src.app.pd.read_parquet", return_value=SAMPLE_OHLCV):
-            fig, *_ = update_chart("aapl.parquet")
+            fig, *_ = update_chart("aapl.parquet", True)
         trace_types = [type(t).__name__ for t in fig.data]
         assert "Scattergl" in trace_types
 
@@ -243,14 +243,14 @@ class TestUpdateChart:
         with patch.object(app_module, "df", SAMPLE_DF), \
              patch.object(app_module, "base_url", BASE_URL), \
              patch("src.app.pd.read_parquet", return_value=SAMPLE_OHLCV):
-            _, headline, _ = update_chart("aapl.parquet")
+            _, headline, _ = update_chart("aapl.parquet", True)
         assert any("Apple Inc" in str(c) for c in headline)
 
     def test_headline_shows_exchange_and_country(self):
         with patch.object(app_module, "df", SAMPLE_DF), \
              patch.object(app_module, "base_url", BASE_URL), \
              patch("src.app.pd.read_parquet", return_value=SAMPLE_OHLCV):
-            _, headline, _ = update_chart("aapl.parquet")
+            _, headline, _ = update_chart("aapl.parquet", True)
         combined = " ".join(str(c) for c in headline)
         assert "NASDAQ" in combined
         assert "US" in combined
@@ -259,14 +259,14 @@ class TestUpdateChart:
         with patch.object(app_module, "df", SAMPLE_DF), \
              patch.object(app_module, "base_url", BASE_URL), \
              patch("src.app.pd.read_parquet", side_effect=Exception("network error")):
-            fig, headline, _ = update_chart("aapl.parquet")
+            fig, headline, _ = update_chart("aapl.parquet", True)
         assert headline == ""
 
     def test_unknown_filename_returns_empty(self):
         with patch.object(app_module, "df", SAMPLE_DF), \
              patch.object(app_module, "base_url", BASE_URL):
             # filename not in df → .iloc[0] raises IndexError → caught → empty
-            fig, headline, _ = update_chart("nonexistent.parquet")
+            fig, headline, _ = update_chart("nonexistent.parquet", True)
         assert headline == ""
 
     def test_data_older_than_10_years_is_filtered(self):
@@ -280,7 +280,7 @@ class TestUpdateChart:
         with patch.object(app_module, "df", SAMPLE_DF), \
              patch.object(app_module, "base_url", BASE_URL), \
              patch("src.app.pd.read_parquet", return_value=mixed_ohlcv):
-            fig, *_ = update_chart("aapl.parquet")
+            fig, *_ = update_chart("aapl.parquet", True)
         assert len(fig.data[0].x) == 1
 
     def test_data_within_10_years_is_kept(self):
@@ -294,7 +294,7 @@ class TestUpdateChart:
         with patch.object(app_module, "df", SAMPLE_DF), \
              patch.object(app_module, "base_url", BASE_URL), \
              patch("src.app.pd.read_parquet", return_value=recent_ohlcv):
-            fig, *_ = update_chart("aapl.parquet")
+            fig, *_ = update_chart("aapl.parquet", True)
         assert len(fig.data[0].x) == 3
 
     def test_timezone_aware_index_does_not_error(self):
@@ -308,7 +308,7 @@ class TestUpdateChart:
         with patch.object(app_module, "df", SAMPLE_DF), \
              patch.object(app_module, "base_url", BASE_URL), \
              patch("src.app.pd.read_parquet", return_value=tz_ohlcv):
-            fig, headline, _ = update_chart("aapl.parquet")
+            fig, headline, _ = update_chart("aapl.parquet", True)
         assert isinstance(fig, go.Figure)
         assert len(fig.data[0].x) == 1
 
@@ -511,21 +511,21 @@ _SLIDER_VAL = [0, 23]   # full range (index 0 … 23)
 
 class TestRunBacktestCallback:
     def test_both_baskets_empty_returns_status_message(self):
-        _, style, _, status = run_backtest_callback(1, [], [], _SLIDER_VAL, _DATE_STORE)
+        _, style, _, status = run_backtest_callback(1, [], [], _SLIDER_VAL, _DATE_STORE, True)
         assert 'basket' in status
         assert style['display'] == 'none'
 
     def test_no_base_url_returns_error_status(self):
         with patch.object(app_module, 'base_url', None), \
              patch.object(app_module, 'df', SAMPLE_DF):
-            _, style, _, status = run_backtest_callback(1, BASKET_A, [], _SLIDER_VAL, _DATE_STORE)
+            _, style, _, status = run_backtest_callback(1, BASKET_A, [], _SLIDER_VAL, _DATE_STORE, True)
         assert 'data source' in status
         assert style['display'] == 'none'
 
     def test_empty_date_store_returns_error_status(self):
         with patch.object(app_module, 'base_url', 'http://x'), \
              patch.object(app_module, 'df', SAMPLE_DF):
-            _, style, _, status = run_backtest_callback(1, BASKET_A, [], _SLIDER_VAL, [])
+            _, style, _, status = run_backtest_callback(1, BASKET_A, [], _SLIDER_VAL, [], True)
         assert 'date range' in status.lower()
         assert style['display'] == 'none'
 
@@ -533,7 +533,7 @@ class TestRunBacktestCallback:
         with patch.object(app_module, 'base_url', 'http://x'), \
              patch.object(app_module, 'df', SAMPLE_DF), \
              patch.object(app_module, 'run_backtest', return_value=(None, None)):
-            _, style, _, status = run_backtest_callback(1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE)
+            _, style, _, status = run_backtest_callback(1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, True)
         assert style['display'] == 'none'
         assert 'No data' in status
 
@@ -541,21 +541,21 @@ class TestRunBacktestCallback:
         with patch.object(app_module, 'base_url', 'http://x'), \
              patch.object(app_module, 'df', SAMPLE_DF), \
              patch.object(app_module, 'run_backtest', return_value=(_PORTFOLIO_STUB, _METRICS_STUB)):
-            _, style, _, _ = run_backtest_callback(1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE)
+            _, style, _, _ = run_backtest_callback(1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, True)
         assert style['display'] == 'block'
 
     def test_successful_run_returns_plotly_figure(self):
         with patch.object(app_module, 'base_url', 'http://x'), \
              patch.object(app_module, 'df', SAMPLE_DF), \
              patch.object(app_module, 'run_backtest', return_value=(_PORTFOLIO_STUB, _METRICS_STUB)):
-            fig, _, _, _ = run_backtest_callback(1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE)
+            fig, _, _, _ = run_backtest_callback(1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, True)
         assert isinstance(fig, go.Figure)
 
     def test_only_basket_a_filled_also_succeeds(self):
         with patch.object(app_module, 'base_url', 'http://x'), \
              patch.object(app_module, 'df', SAMPLE_DF), \
              patch.object(app_module, 'run_backtest', return_value=(_PORTFOLIO_STUB, _METRICS_STUB)):
-            fig, style, _, status = run_backtest_callback(1, BASKET_A, [], _SLIDER_VAL, _DATE_STORE)
+            fig, style, _, status = run_backtest_callback(1, BASKET_A, [], _SLIDER_VAL, _DATE_STORE, True)
         assert style['display'] == 'block'
         assert 'complete' in status
 

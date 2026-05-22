@@ -79,6 +79,8 @@ import io
 #            ALL components whose id dict shares a given 'type' key. Used
 #            for the dynamically rendered remove-buttons in each basket.
 from dash import html, dcc, Input, Output, State, callback, Patch, no_update, ALL
+import dash_bootstrap_components as dbc
+from dash_bootstrap_templates import ThemeSwitchAIO, load_figure_template
 
 # Plotly graph objects: the low-level chart primitives. go.Figure is a
 # container; go.Candlestick, go.Scatter, go.Scattergl are trace types that
@@ -193,6 +195,14 @@ base_url = os.getenv("BASE_URL")
 assetsClasses = []
 df = None
 
+# Bootstrap theme URLs for light and dark mode
+_THEME_LIGHT = dbc.themes.FLATLY
+_THEME_DARK = dbc.themes.DARKLY
+
+# Register matching Plotly figure templates for both Bootstrap themes so
+# graphs can switch their colour palette together with the page theme.
+load_figure_template(["flatly", "darkly"])
+
 if not base_url or base_url.strip() == "":
     # Log at CRITICAL because the app cannot function without a data source.
     log.critical("BASE_URL environment variable is not set.")
@@ -228,7 +238,11 @@ else:
 # files (CSS, images) relative to this file.
 # meta_tags adds an HTML <meta> viewport tag so the page scales correctly on
 # mobile devices (otherwise the browser would zoom out to show a desktop view).
-app = dash.Dash(__name__, meta_tags=[{"name": "viewport", "content": "width=device-width, initial-scale=1"}])
+app = dash.Dash(
+    __name__,
+    external_stylesheets=[_THEME_LIGHT],
+    meta_tags=[{"name": "viewport", "content": "width=device-width, initial-scale=1"}],
+)
 
 # Enable Dash's hot-reload and debug overlay only when DASH_DEBUG=true is set
 # in the environment. In production this should be false to avoid exposing
@@ -262,7 +276,9 @@ server = app.server
 #   background / borderRadius / fontSize – cosmetic look.
 _BASKET_ITEM_STYLE = {
     'display': 'flex', 'alignItems': 'center', 'justifyContent': 'space-between',
-    'padding': '4px 8px', 'marginBottom': '2px', 'background': '#f5f5f5',
+    'padding': '4px 8px', 'marginBottom': '2px',
+    'background': 'var(--bs-secondary-bg)',
+    'border': '1px solid var(--bs-border-color)',
     'borderRadius': '4px', 'fontSize': '13px',
 }
 
@@ -273,7 +289,8 @@ _BASKET_ITEM_STYLE = {
 #   border / borderRadius / background – minimal border with rounded corners.
 _BTN_SMALL = {
     'padding': '2px 8px', 'fontSize': '12px', 'cursor': 'pointer',
-    'border': '1px solid #ccc', 'borderRadius': '3px', 'background': 'white',
+    'border': '1px solid var(--bs-border-color)', 'borderRadius': '3px',
+    'background': 'var(--bs-body-bg)', 'color': 'var(--bs-body-color)',
 }
 
 # _METRIC_TABLE_STYLE styles the performance metrics comparison table.
@@ -386,7 +403,7 @@ def _render_basket_list(basket_data, basket_id):
     """
     # If the basket is empty, show a placeholder message in light grey italic.
     if not basket_data:
-        return html.P('No assets', style={'color': '#aaa', 'fontStyle': 'italic', 'margin': '4px 0'})
+        return html.P('No assets', style={'color': 'var(--bs-secondary-color)', 'fontStyle': 'italic', 'margin': '4px 0'})
 
     # Build one row per asset using a Python list comprehension.
     # A list comprehension [ expr for item in iterable ] is a concise way to
@@ -447,7 +464,7 @@ def _metrics_table(metrics_a, metrics_b):
     # html.Tr = table row, html.Th = header cell, html.Td = data cell.
     rows = [
         html.Tr([
-            html.Th('Metric',   style={'textAlign': 'left',  'padding': '4px 8px', 'background': '#f0f0f0'}),
+            html.Th('Metric',   style={'textAlign': 'left',  'padding': '4px 8px', 'background': 'var(--bs-secondary-bg)'}),
             html.Th('Basket A', style={'textAlign': 'right', 'padding': '4px 8px', 'background': '#e8f0fe'}),
             html.Th('Basket B', style={'textAlign': 'right', 'padding': '4px 8px', 'background': '#fce8e6'}),
         ])
@@ -456,13 +473,13 @@ def _metrics_table(metrics_a, metrics_b):
         # .get(k, '—') returns the value for key k, or the em-dash '—' if
         # the basket dict is None or the key is absent (e.g. basket not run).
         html.Tr([
-            html.Td(k, style={'padding': '3px 8px', 'borderBottom': '1px solid #eee'}),
+            html.Td(k, style={'padding': '3px 8px', 'borderBottom': '1px solid var(--bs-border-color)'}),
             html.Td((metrics_a or {}).get(k, '—'),
                     style={'textAlign': 'right', 'padding': '3px 8px',
-                           'borderBottom': '1px solid #eee', 'color': '#1a56db'}),
+                           'borderBottom': '1px solid var(--bs-border-color)', 'color': '#1a56db'}),
             html.Td((metrics_b or {}).get(k, '—'),
                     style={'textAlign': 'right', 'padding': '3px 8px',
-                           'borderBottom': '1px solid #eee', 'color': '#c0392b'}),
+                           'borderBottom': '1px solid var(--bs-border-color)', 'color': '#c0392b'}),
         ])
         for k in keys
     ]
@@ -484,8 +501,19 @@ def _metrics_table(metrics_a, metrics_b):
 # declared width so content does not overflow horizontally.
 app.layout = html.Div([
 
-    # Page heading – rendered as an HTML <h1> tag.
-    html.H1("mrktcmp _ markets compare"),
+    # Header row: page title on the left, light/dark theme toggle on the right.
+    html.Div([
+        html.H1("mrktcmp _ markets compare", style={'margin': 0}),
+        ThemeSwitchAIO(
+            aio_id="theme",
+            themes=[_THEME_LIGHT, _THEME_DARK],
+            switch_props={"value": True},  # True = first theme (light)
+        ),
+    ], style={'display': 'flex', 'justifyContent': 'space-between',
+              'alignItems': 'center', 'marginBottom': '8px'}),
+
+    # Fires once on page load to auto-detect the OS light/dark preference.
+    dcc.Interval(id='theme-auto-detect', interval=100, max_intervals=1),
 
     # dcc.Tabs creates a tabbed interface.
     # id – unique ID so callbacks can read which tab is active.
@@ -568,7 +596,7 @@ app.layout = html.Div([
                 html.Div(
                     id='bt-date-display',
                     children='Add assets to a basket to see the available date range.',
-                    style={'color': '#666', 'fontSize': '13px', 'marginTop': '6px'},
+                    style={'color': 'var(--bs-secondary-color)', 'fontSize': '13px', 'marginTop': '6px'},
                 ),
 
                 # Invisible store holding the ordered list of monthly date
@@ -589,7 +617,7 @@ app.layout = html.Div([
 
             # Status line – shows messages like "Backtest complete – 5.0 years".
             # Updated by run_backtest_callback; starts empty.
-            html.Div(id='bt-status', style={'color': '#888', 'fontSize': '13px', 'marginBottom': '8px'}),
+            html.Div(id='bt-status', style={'color': 'var(--bs-secondary-color)', 'fontSize': '13px', 'marginBottom': '8px'}),
 
             # The portfolio value chart. display: none hides it until the
             # first backtest has been run; run_backtest_callback sets it to
@@ -771,10 +799,11 @@ def update_asset_search(search_value, asset_class, current_value):
     Output('price-chart', 'figure'),    # the main chart figure
     Output('asset-headline', 'children'),  # the asset name/exchange heading
     Output('ohlcv-data', 'data'),       # serialised OHLCV stored for zoom sync
-    Input('asset-type', 'value')        # fires when the user picks an asset
+    Input('asset-type', 'value'),       # fires when the user picks an asset
+    State(ThemeSwitchAIO.ids.switch("theme"), "value"),  # current theme (True=light)
 )
 @log_time
-def update_chart(filename):
+def update_chart(filename, toggle):
     """Load OHLCV data and build a candlestick + volume subplot chart."""
     # 'empty' is a convenience tuple to return when we cannot render a chart.
     empty = go.Figure(), "", None
@@ -791,7 +820,7 @@ def update_chart(filename):
         # Build the asset heading: large name + smaller exchange info.
         headline = [
             html.H2(row['name'], style={'marginBottom': '2px'}),
-            html.P(f"{row['exchange']} — {row['country']}", style={'marginTop': '0', 'color': 'gray'})
+            html.P(f"{row['exchange']} — {row['country']}", style={'marginTop': '0', 'color': 'var(--bs-secondary-color)'})
         ]
 
         # Load the OHLCV parquet file for this asset.
@@ -841,9 +870,9 @@ def update_chart(filename):
         # a volume panel below that already shows temporal context).
         fig.update_xaxes(rangeslider_visible=False)
 
-        # Remove the legend and shrink margins for a cleaner look.
-        # margin=dict(l=8, r=8, t=8, b=8) → 8px on all four sides.
-        fig.update_layout(showlegend=False, margin=dict(l=8, r=8, t=8, b=8))
+        # Apply the Bootstrap-matched Plotly template and tighten margins.
+        template = "flatly" if toggle else "darkly"
+        fig.update_layout(showlegend=False, margin=dict(l=8, r=8, t=8, b=8), template=template)
 
         # Prepare a copy of the DataFrame for potential grid display.
         # reset_index() moves the date index into a regular column.
@@ -1360,10 +1389,11 @@ def update_date_display(slider_value, date_store):
     State('bt-date-range', 'value'),
     # date_store is a list of ISO-format date strings, one per slider step.
     State('bt-date-store', 'data'),
+    State(ThemeSwitchAIO.ids.switch("theme"), "value"),  # current theme (True=light)
     prevent_initial_call=True  # do not run at page load (no data yet)
 )
 @log_time
-def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store):
+def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store, toggle):
     """Execute the DCA simulation for both baskets and update the UI.
 
     The backtest engine (backtest.run_backtest) simulates investing a fixed
@@ -1451,18 +1481,15 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
 
     d0_label = start_date.strftime('%b %Y')
     d1_label = end_date.strftime('%b %Y')
+    template = "flatly" if toggle else "darkly"
     fig.update_layout(
         title=f'Portfolio Value  {d0_label} – {d1_label}  ({months_shown} months, 1,000 €/month)',
         xaxis_title='Date',
         yaxis_title='Portfolio Value (€)',
-        # hovermode='x unified': when you hover anywhere on the chart, a
-        # single tooltip appears showing the values for ALL traces at that
-        # x position, instead of separate tooltips per trace.
         hovermode='x unified',
-        # Place the legend in a horizontal bar above the chart to save space.
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
-        # Tight margins to maximise plot area; t=48 leaves room for the title.
         margin=dict(l=8, r=8, t=48, b=8),
+        template=template,
     )
 
     # Build the side-by-side metrics table and assemble the status message.
@@ -1474,6 +1501,58 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
 
     # Return four values matching the four Output declarations above.
     return fig, visible, metrics_div, status
+
+
+# ---------------------------------------------------------------------------
+# Callbacks: re-apply the Plotly template when the theme toggle changes
+# ---------------------------------------------------------------------------
+# These use Patch so the full figure is not re-built; only the template key
+# in the layout is updated.  prevent_initial_call=True avoids a redundant
+# update before any chart has been rendered.
+
+@callback(
+    Output('price-chart', 'figure', allow_duplicate=True),
+    Input(ThemeSwitchAIO.ids.switch("theme"), "value"),
+    prevent_initial_call=True,
+)
+def update_price_chart_theme(toggle):
+    """Switch the candlestick chart's Plotly template when the theme toggles."""
+    patch = Patch()
+    patch['layout']['template'] = "flatly" if toggle else "darkly"
+    return patch
+
+
+@callback(
+    Output('bt-chart', 'figure', allow_duplicate=True),
+    Input(ThemeSwitchAIO.ids.switch("theme"), "value"),
+    prevent_initial_call=True,
+)
+def update_bt_chart_theme(toggle):
+    """Switch the backtest chart's Plotly template when the theme toggles."""
+    patch = Patch()
+    patch['layout']['template'] = "flatly" if toggle else "darkly"
+    return patch
+
+
+# ---------------------------------------------------------------------------
+# Clientside callback: auto-detect the OS light/dark preference on page load
+# ---------------------------------------------------------------------------
+# Runs once (driven by the one-shot dcc.Interval) and checks the browser's
+# prefers-color-scheme media query.  Returns True (light/FLATLY) or False
+# (dark/DARKLY) to initialise the toggle to match the user's OS setting.
+
+app.clientside_callback(
+    """
+    function(n_intervals) {
+        if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+            return false;
+        }
+        return true;
+    }
+    """,
+    Output(ThemeSwitchAIO.ids.switch("theme"), "value"),
+    Input("theme-auto-detect", "n_intervals"),
+)
 
 
 # ---------------------------------------------------------------------------
