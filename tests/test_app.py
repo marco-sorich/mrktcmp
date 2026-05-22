@@ -95,21 +95,21 @@ class TestUpdateAssetClass:
     def test_results_capped_at_thirty(self):
         large_df = pd.DataFrame(
             {
-                "asset_class": ["stocks"] * 40,
-                "symbol": [f"SYM{i}" for i in range(40)],
-                "interval": ["1d"] * 40,
-                "name": [f"Company {i}" for i in range(40)],
-                "exchange": ["NYSE"] * 40,
-                "country": ["US"] * 40,
-                "category": ["Tech"] * 40,
-                "first_date": ["2020-01-01"] * 40,
-                "last_date": ["2024-01-01"] * 40,
-                "filename": [f"sym{i}.parquet" for i in range(40)],
+                "asset_class": ["stocks"] * 300,
+                "symbol": [f"SYM{i}" for i in range(300)],
+                "interval": ["1d"] * 300,
+                "name": [f"Company {i}" for i in range(300)],
+                "exchange": ["NYSE"] * 300,
+                "country": ["US"] * 300,
+                "category": ["Tech"] * 300,
+                "first_date": ["2020-01-01"] * 300,
+                "last_date": ["2024-01-01"] * 300,
+                "filename": [f"sym{i}.parquet" for i in range(300)],
             }
         )
         with patch.object(app_module, "df", large_df):
             options, _ = update_asset_class("stocks")
-        assert len(options) == 30
+        assert len(options) == 200
 
 
 # ---------------------------------------------------------------------------
@@ -376,20 +376,20 @@ class TestBtAssetclassOptions:
 
     def test_results_capped_at_thirty(self):
         large_df = pd.DataFrame({
-            'asset_class': ['stocks'] * 40,
-            'symbol': [f'SYM{i}' for i in range(40)],
-            'interval': ['1d'] * 40,
-            'name': [f'Company {i}' for i in range(40)],
-            'exchange': ['NYSE'] * 40,
-            'country': ['US'] * 40,
-            'category': ['Tech'] * 40,
-            'first_date': ['2020-01-01'] * 40,
-            'last_date': ['2024-01-01'] * 40,
-            'filename': [f'sym{i}.parquet' for i in range(40)],
+            'asset_class': ['stocks'] * 300,
+            'symbol': [f'SYM{i}' for i in range(300)],
+            'interval': ['1d'] * 300,
+            'name': [f'Company {i}' for i in range(300)],
+            'exchange': ['NYSE'] * 300,
+            'country': ['US'] * 300,
+            'category': ['Tech'] * 300,
+            'first_date': ['2020-01-01'] * 300,
+            'last_date': ['2024-01-01'] * 300,
+            'filename': [f'sym{i}.parquet' for i in range(300)],
         })
         with patch.object(app_module, 'df', large_df):
             opts, _ = _bt_assetclass_options('stocks')
-        assert len(opts) == 30
+        assert len(opts) == 200
 
 
 # ---------------------------------------------------------------------------
