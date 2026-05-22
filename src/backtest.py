@@ -284,6 +284,8 @@ def _get_monthly_range(base_url, filename, df_meta):
         close = ohlcv['Close']
         if close.index.tz is None:
             close.index = close.index.tz_localize('UTC')
+        else:
+            close.index = close.index.tz_convert('UTC')
         # Resample to month-end, same logic as load_monthly_closes, so that
         # the range we report matches the rows the simulation will actually use.
         monthly = close.resample('ME').last().dropna()
