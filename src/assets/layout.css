@@ -1,0 +1,23 @@
+.results-container {
+    margin-top: 8px;
+}
+
+@media (min-width: 900px) {
+    .results-container {
+        display: flex;
+        flex-direction: row;
+        align-items: flex-start;
+        gap: 24px;
+    }
+
+    .bt-chart-wrapper {
+        flex: 2;
+        min-width: 0;
+    }
+
+    .bt-metrics-wrapper {
+        flex: 1;
+        min-width: 260px;
+        max-width: 380px;
+    }
+}

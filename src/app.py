@@ -591,14 +591,15 @@ app.layout = html.Div([
             # Updated by run_backtest_callback; starts empty.
             html.Div(id='bt-status', style={'color': '#888', 'fontSize': '13px', 'marginBottom': '8px'}),
 
-            # The portfolio value chart. display: none hides it until the
-            # first backtest has been run; run_backtest_callback sets it to
-            # display: block once results are available.
-            dcc.Graph(id='bt-chart', style={'width': '100%', 'display': 'none'}),
-
-            # Metrics comparison table rendered by _metrics_table().
-            # Injected by run_backtest_callback as an html.Table.
-            html.Div(id='bt-metrics', style={'marginTop': '16px'}),
+            # Chart and metrics side by side on wide screens (via layout.css),
+            # stacked on narrow screens.
+            html.Div([
+                html.Div(
+                    dcc.Graph(id='bt-chart', style={'width': '100%', 'display': 'none'}),
+                    className='bt-chart-wrapper',
+                ),
+                html.Div(id='bt-metrics', className='bt-metrics-wrapper'),
+            ], className='results-container'),
 
             # Hidden result store (currently unused but reserved for future
             # drill-down interactions, e.g. clicking a month to inspect it).
