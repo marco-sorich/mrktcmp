@@ -44,6 +44,8 @@ import sys
 # time: provides time.time() which returns the current Unix timestamp as a
 # float (seconds since 1970-01-01 00:00:00 UTC). Used here to measure how
 # long callbacks take.
+import subprocess
+
 import time
 
 # ---------------------------------------------------------------------------
@@ -172,6 +174,27 @@ logging.basicConfig(level=_log_level, handlers=[_stdout_handler, _stderr_handler
 # 'src.app' when imported as a package). Using a named logger makes it easy
 # to identify which module produced each log message.
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# App version – git tag + commit hash
+# ---------------------------------------------------------------------------
+
+def _get_version() -> str:
+    try:
+        result = subprocess.run(
+            ['git', 'describe', '--tags', '--always', '--dirty'],
+            capture_output=True, text=True,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return 'unknown'
+
+
+_APP_VERSION = _get_version()
 
 
 # ---------------------------------------------------------------------------
@@ -605,6 +628,18 @@ app.layout = html.Div([
             dcc.Store(id='bt-result-store', data={}),
         ]),
     ]),
+
+    html.Footer(
+        f"Version: {_APP_VERSION}",
+        style={
+            'marginTop': '16px',
+            'padding': '8px',
+            'borderTop': '1px solid #ccc',
+            'fontSize': '12px',
+            'color': '#888',
+            'textAlign': 'center',
+        },
+    ),
 
 ], style={'maxWidth': '100%', 'padding': '0 8px', 'boxSizing': 'border-box'})
 
