@@ -549,12 +549,17 @@ app.layout = html.Div([
                 # allowCross=False prevents the left handle from passing the
                 # right handle and vice-versa (keeps the range always valid).
                 # disabled=True at startup because no baskets are filled yet.
-                dcc.RangeSlider(
-                    id='bt-date-range',
-                    min=0, max=1, step=1, value=[0, 1],
-                    marks={},
-                    allowCross=False,
-                    disabled=True,
+                html.Div(
+                    dcc.RangeSlider(
+                        id='bt-date-range',
+                        min=0, max=1, step=1, value=[0, 1],
+                        marks={},
+                        allowCross=False,
+                        updatemode='drag',
+                        disabled=True,
+                        allow_direct_input=False,
+                    ),
+                    style={'width': '98%', 'margin': '0 auto'},
                 ),
 
                 # Human-readable date range display, e.g. "Jan 2020 – Dec 2024".
@@ -1225,14 +1230,13 @@ def _build_slider_marks(date_range):
     """
     n = len(date_range)
     # Choose how many months to skip between each visible mark.
-    step = 1 if n <= 12 else 3 if n <= 36 else 12
+    step = 1 if n <= 12 else 12 if n <= 36 else 24
+    fmt = '%b' if n <= 12 else '%Y'
     marks = {}
     for i, d in enumerate(date_range):
-        # Label this position if it falls on a step boundary.
         if i % step == 0:
-            marks[i] = d.strftime('%b %y')  # e.g. 'Jan 20'
-    # Always include the final position so the right boundary is readable.
-    marks[n - 1] = date_range[-1].strftime('%b %y')
+            marks[i] = d.strftime(fmt)
+    #marks[n - 1] = date_range[-1].strftime(fmt)
     return marks
 
 
