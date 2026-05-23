@@ -58,6 +58,9 @@ from dotenv import load_dotenv, dotenv_values
 # like no_update and Patch (described later).
 import dash
 
+# bootstrap to use themes
+import dash_bootstrap_components as dbc
+
 # io.StringIO: turns a plain string into a file-like object so libraries that
 # expect to read from a file can work with in-memory strings instead. Used
 # when deserialising OHLCV data that was JSON-encoded into a dcc.Store.
@@ -228,7 +231,11 @@ else:
 # files (CSS, images) relative to this file.
 # meta_tags adds an HTML <meta> viewport tag so the page scales correctly on
 # mobile devices (otherwise the browser would zoom out to show a desktop view).
-app = dash.Dash(__name__, meta_tags=[{"name": "viewport", "content": "width=device-width, initial-scale=1"}])
+app = dash.Dash(
+    __name__,
+    meta_tags=[{"name": "viewport", "content": "width=device-width, initial-scale=1"}],
+    external_stylesheets=[dbc.themes.BOOTSTRAP, dbc.icons.FONT_AWESOME]
+    )
 
 # Enable Dash's hot-reload and debug overlay only when DASH_DEBUG=true is set
 # in the environment. In production this should be false to avoid exposing
@@ -607,7 +614,6 @@ app.layout = html.Div([
     ]),
 
 ], style={'maxWidth': '100%', 'padding': '0 8px', 'boxSizing': 'border-box'})
-
 
 # ---------------------------------------------------------------------------
 # Utility decorator: log the execution time of every callback
