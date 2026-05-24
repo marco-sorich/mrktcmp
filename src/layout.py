@@ -70,7 +70,8 @@ def create_layout():
             # -----------------------------------------------------------
             # Tab 1: Market Data – single-asset price + volume chart
             # -----------------------------------------------------------
-            dcc.Tab(label='Market Data', value='tab-chart', children=[
+            dcc.Tab(
+                label=html.Span([html.I(className="bi bi-bar-chart-line"), " Market Data"]), value='tab-chart', children=[
 
                 # Asset-class selector (e.g. 'stocks', 'crypto', 'etfs').
                 # RadioItems fires the update_asset_class callback which then
@@ -100,7 +101,8 @@ def create_layout():
             # -----------------------------------------------------------
             # Tab 2: Backtesting – DCA simulation for two asset baskets
             # -----------------------------------------------------------
-            dcc.Tab(label='Backtesting', value='tab-backtest', children=[
+            dcc.Tab(
+                label = html.Span([html.I(className="bi bi-basket2"), " Backtesting"]), value='tab-backtest', children=[
 
                 # Two basket panels side by side using a flex row.
                 # gap: 8px adds horizontal space between the panels.
