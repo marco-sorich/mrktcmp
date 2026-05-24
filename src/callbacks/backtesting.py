@@ -656,7 +656,7 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     d0_label = start_date.strftime('%b %Y')
     d1_label = end_date.strftime('%b %Y')
     fig.update_layout(
-        title=f'Portfolio Value  {d0_label} – {d1_label}  ({months_shown} months, 1,000 €/month)',
+        title=f'Portfolio Value',
         xaxis_title='Date',
         yaxis_title='Portfolio Value (€)',
         # hovermode='x unified': a single tooltip shows values for ALL traces
@@ -670,7 +670,7 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
 
     # Build the side-by-side metrics table and assemble the status message.
     metrics_div = _metrics_table(metrics_a, metrics_b)
-    status = f'Backtest complete – {d0_label} to {d1_label} ({months_shown} months).'
+    status = f'Backtest complete – {d0_label} to {d1_label} ({months_shown} months, 1,000 €/month).'
 
     _config.log.info("Backtest completed: %d months, A=%s, B=%s",
                      months_shown, len(filenames_a), len(filenames_b))
