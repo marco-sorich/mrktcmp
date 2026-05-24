@@ -263,14 +263,14 @@ def _bt_asset_search(search_value, asset_class, current_value):
 # ---------------------------------------------------------------------------
 
 @callback(
-    Output('bt-basket-store-a', 'data'),    # updated JSON list for basket A
-    Output('bt-basket-list-a', 'children'), # updated visible list for basket A
-    Input('bt-add-a', 'n_clicks'),          # add button clicked
+    Output('bt-basket-store-a', 'data'),     # updated JSON list for basket A
+    Output('bt-basket-list-a', 'children'),  # updated visible list for basket A
+    Input('bt-add-a', 'n_clicks'),           # add button clicked
     # ALL pattern: fires when *any* remove button for basket A is clicked.
     # The Input value is a list of n_clicks, one per matching button.
     Input({'type': 'bt-remove-a', 'index': ALL}, 'n_clicks'),
-    State('bt-asset-a', 'value'),           # currently selected asset filename
-    State('bt-basket-store-a', 'data'),     # current basket contents (list of dicts)
+    State('bt-asset-a', 'value'),            # currently selected asset filename
+    State('bt-basket-store-a', 'data'),      # current basket contents (list of dicts)
     prevent_initial_call=True,
 )
 @log_time
@@ -470,7 +470,7 @@ def update_date_range_slider(basket_a, basket_b):
         _config.base_url, filenames_a, filenames_b, _config.df,
     )
 
-    if common_start is None:
+    if common_start is None or common_end is None:
         return (*_disabled[:6], 'No overlapping date range found across the selected assets.')
 
     # Build the ordered list of month-end dates within the common window.
@@ -539,11 +539,11 @@ def update_date_display(slider_value, date_store):
 # ---------------------------------------------------------------------------
 
 @callback(
-    Output('bt-chart', 'figure'),     # the portfolio value line chart
-    Output('bt-chart', 'style'),      # show/hide the chart container
-    Output('bt-metrics', 'children'), # the metrics comparison table
-    Output('bt-status', 'children'),  # status / error message text
-    Input('bt-run', 'n_clicks'),      # fires when the Run button is clicked
+    Output('bt-chart', 'figure'),      # the portfolio value line chart
+    Output('bt-chart', 'style'),       # show/hide the chart container
+    Output('bt-metrics', 'children'),  # the metrics comparison table
+    Output('bt-status', 'children'),   # status / error message text
+    Input('bt-run', 'n_clicks'),       # fires when the Run button is clicked
     State('bt-basket-store-a', 'data'),  # basket A contents (read, not trigger)
     State('bt-basket-store-b', 'data'),  # basket B contents
     # slider_value is [start_index, end_index] into the date_store list.
@@ -581,7 +581,7 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
       status_text     : str – summary or error message shown below the button.
     """
     empty_chart = go.Figure()
-    hidden  = {'width': '100%', 'display': 'none'}   # hide the chart div
+    hidden = {'width': '100%', 'display': 'none'}   # hide the chart div
     visible = {'width': '100%', 'display': 'block'}  # show the chart div
 
     # Require at least one basket to have assets before running.
@@ -601,7 +601,7 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     # slider_value is [i0, i1]; date_store[i0] is an ISO string like
     # '2020-01-31T00:00:00+00:00'. pd.Timestamp() parses it correctly.
     start_date = pd.Timestamp(date_store[slider_value[0]])
-    end_date   = pd.Timestamp(date_store[slider_value[1]])
+    end_date = pd.Timestamp(date_store[slider_value[1]])
 
     # Extract filenames from each basket's list of asset dicts.
     filenames_a = [item['filename'] for item in (basket_a or [])]
@@ -656,7 +656,7 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     d0_label = start_date.strftime('%b %Y')
     d1_label = end_date.strftime('%b %Y')
     fig.update_layout(
-        title=f'Portfolio Value',
+        title='Portfolio Value',
         xaxis_title='Date',
         yaxis_title='Portfolio Value (€)',
         # hovermode='x unified': a single tooltip shows values for ALL traces

@@ -4,9 +4,20 @@
         {
             "label": "Start Gunicorn",
             "type": "shell",
-            "command": "pytest && PYTHONPATH=/workspace gunicorn -b 0.0.0.0:8050 --reload src.app:server",
+            "command": "PYTHONPATH=/workspace gunicorn -b 0.0.0.0:8050 --reload src.app:server",
             "isBackground": true,
             "group": { "kind": "build", "isDefault": true },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            }
+        },
+        {
+            "label": "QA pipeline",
+            "type": "shell",
+            "command": "flake8 --max-complexity=10 --max-line-length=127 && mypy src/backtest.py && mypy tests/test_backtest.py && pytest",
+            "group": "test",
             "problemMatcher": [],
             "presentation": {
                 "reveal": "always",

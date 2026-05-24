@@ -79,8 +79,8 @@ def _basket_ui(basket_id):
         # user can narrow the search dropdown to one class (e.g. 'stocks').
         # inline=True puts the radio buttons on a single horizontal line.
         dcc.RadioItems(
-            _config.assetsClasses,           # list of option labels/values
-            id=f'bt-assetclass-{basket_id}', # unique component ID for callbacks
+            _config.assetsClasses,            # list of option labels/values
+            id=f'bt-assetclass-{basket_id}',  # unique component ID for callbacks
             inline=True,
             style={'marginBottom': '8px'},
         ),
