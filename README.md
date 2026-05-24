@@ -27,18 +27,23 @@ A Plotly Dash web application for market data visualisation and DCA (Dollar-Cost
    pip install -r requirements.txt
    ```
 
-2. Create a `.env` file (or set environment variables):
-   ```
-   BASE_URL=https://your-data-host/path   # root URL or local path to parquet files
-   LOG_LEVEL=INFO                          # optional, default INFO
-   DASH_DEBUG=false                        # set true for hot-reload in development
-   ```
+2. Set environment variables:
+   ```bash
+   # URL or local path to parquet files
+   BASE_URL=https://your-data-host/path
+
+   # optional: set log level to CRITICAL, ERROR, WARNING, INFO, DEBUG (default: INFO)
+   LOG_LEVEL=INFO
+
+   # optional: (de-)activate dev tools of Plotly/Dash (default: false)
+   DASH_DEBUG=false
+
 
 ## Running
 
 **Development:**
 ```
-python src/app.py
+gunicorn --reload src.app:server
 ```
 
 **Production (gunicorn):**
