@@ -40,7 +40,7 @@ DASH_DEBUG=false
 * Keep the tests updated
 * Keep the comments updated
 * Keep `CLAUDE.md` updated
-* Keep `Readme.md` updated
+* Keep `README.md` updated
 * Perform tests after each change
 * Perform linting with `flake8 --max-complexity=10 --max-line-length=127` after each change
 
