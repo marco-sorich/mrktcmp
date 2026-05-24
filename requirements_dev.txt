@@ -12,3 +12,4 @@ dash_bootstrap_components
 mypy
 pytest
 flake8
+pandas-stubs
