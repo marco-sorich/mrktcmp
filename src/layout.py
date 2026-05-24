@@ -21,6 +21,9 @@
 #       Graph, RangeSlider, RadioItems, and Store.
 from dash import html, dcc
 
+# Import dash bootstrap
+import dash_bootstrap_components as dbc
+
 # ---------------------------------------------------------------------------
 # Internal imports
 # ---------------------------------------------------------------------------
@@ -84,13 +87,13 @@ def create_layout():
         # id     – unique ID so callbacks can read which tab is active.
         # value  – the initially selected tab (matched against each Tab's value).
         # children – list of dcc.Tab components, one per tab.
-        dcc.Tabs(id='main-tabs', value='tab-chart', children=[
+        dbc.Tabs(id='main-tabs', children=[
 
             # -----------------------------------------------------------
             # Tab 1: Market Data – single-asset price + volume chart
             # -----------------------------------------------------------
-            dcc.Tab(
-                label=html.Span([html.I(className="bi bi-bar-chart-line"), " Market Data"]), value='tab-chart', children=[
+            dbc.Tab(
+                label="Market Data", children=[
 
                 # Asset-class selector (e.g. 'stocks', 'crypto', 'etfs').
                 # RadioItems fires the update_asset_class callback which then
@@ -120,8 +123,8 @@ def create_layout():
             # -----------------------------------------------------------
             # Tab 2: Backtesting – DCA simulation for two asset baskets
             # -----------------------------------------------------------
-            dcc.Tab(
-                label = html.Span([html.I(className="bi bi-basket2"), " Backtesting"]), value='tab-backtest', children=[
+            dbc.Tab(
+                label = "Backtesting", children=[
 
                 # Two basket panels side by side using a flex row.
                 # gap: 8px adds horizontal space between the panels.
