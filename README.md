@@ -53,9 +53,18 @@ gunicorn src.app:server
 
 Open `http://127.0.0.1:8050/` in your browser.
 
-## Running Tests
 
-```
+## QA Checks
+```bash
+# Linting
+flake8 --max-complexity=10 --max-line-length=127
+
+# Type checking
+mypy src/backtest.py
+mypy tests/test_backtest.py
+
+
+# Testing
 pytest
 ```
 

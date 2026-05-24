@@ -30,15 +30,15 @@ log = logging.getLogger(__name__)
 MONTHLY_INVESTMENT = 1000.0
 
 
-def load_monthly_closes(base_url, filenames, df_meta):
+def load_monthly_closes(base_url: str, filenames: list[str], df_meta: pd.DataFrame) -> pd.DataFrame:
     """Load and combine monthly close prices for the given asset filenames.
 
     Parameters
     ----------
-    base_url  : str  – root URL/path where the parquet files are hosted.
-    filenames : list – list of parquet file names (e.g. ['aapl.parquet']).
-    df_meta   : DataFrame – the master metadata table that maps filenames to
-                            human-readable symbols and names.
+    base_url  – root URL/path where the parquet files are hosted.
+    filenames – list of parquet file names (e.g. ['aapl.parquet']).
+    df_meta   – the master metadata table that maps filenames to
+                human-readable symbols and names.
 
     Returns
     -------
@@ -73,6 +73,7 @@ def load_monthly_closes(base_url, filenames, df_meta):
             # Normalise to UTC so all series share a common timezone for
             # alignment. Without a timezone, pandas cannot safely compare
             # timestamps from different series.
+            assert isinstance(close.index, pd.DatetimeIndex)
             if close.index.tz is None:
                 close.index = close.index.tz_localize('UTC')
 
@@ -104,20 +105,20 @@ def load_monthly_closes(base_url, filenames, df_meta):
     return pd.DataFrame(series)
 
 
-def simulate_dca(price_df, monthly_investment=MONTHLY_INVESTMENT):
+def simulate_dca(price_df: pd.DataFrame, monthly_investment: float = MONTHLY_INVESTMENT) -> tuple[pd.Series, float]:
     """Simulate monthly DCA: invest a fixed amount each month, split equally
     across all assets that have a valid price that month.
 
     Parameters
     ----------
-    price_df          : DataFrame – monthly close prices (one column per asset).
-    monthly_investment: float     – total EUR invested per month across the basket.
+    price_df           – monthly close prices (one column per asset).
+    monthly_investment – total EUR invested per month across the basket.
 
     Returns
     -------
     (portfolio_series, total_invested)
-      portfolio_series : Series of portfolio value at each month-end.
-      total_invested   : float – cumulative EUR put in (excludes months with no data).
+      portfolio_series – Series of portfolio value at each month-end.
+      total_invested   – cumulative EUR put in (excludes months with no data).
     """
     # holdings maps each asset symbol to the number of units (shares/coins)
     # currently owned. Starts at zero for every asset.
@@ -138,7 +139,7 @@ def simulate_dca(price_df, monthly_investment=MONTHLY_INVESTMENT):
         # Build a dict of assets that can actually be bought this month.
         # A NaN price means the data feed had a gap; a zero price means the
         # asset was suspended or delisted – both should be skipped.
-        available = {c: p for c, p in prices.items() if pd.notna(p) and p > 0}
+        available: dict[str, float] = {str(c): float(p) for c, p in prices.items() if pd.notna(p) and p > 0}
 
         if available:
             # Split the monthly investment equally among all available assets.
@@ -171,13 +172,13 @@ def simulate_dca(price_df, monthly_investment=MONTHLY_INVESTMENT):
     return pd.Series(values, index=price_df.index), total_invested
 
 
-def compute_metrics(portfolio, total_invested):
+def compute_metrics(portfolio: pd.Series, total_invested: float) -> dict[str, str]:
     """Compute standard performance metrics from a DCA portfolio value series.
 
     Parameters
     ----------
-    portfolio      : Series – monthly portfolio value over time.
-    total_invested : float  – total EUR deposited throughout the period.
+    portfolio      – monthly portfolio value over time.
+    total_invested – total EUR deposited throughout the period.
 
     Returns
     -------
@@ -256,7 +257,7 @@ def compute_metrics(portfolio, total_invested):
     }
 
 
-def _get_monthly_range(base_url, filename, df_meta):
+def _get_monthly_range(base_url: str, filename: str, df_meta: pd.DataFrame) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
     """Return the earliest and latest month-end dates for a single asset.
 
     Loads only the 'Close' column to minimise data transfer, then resamples
@@ -264,9 +265,9 @@ def _get_monthly_range(base_url, filename, df_meta):
 
     Parameters
     ----------
-    base_url : str       – root URL/path for the parquet files.
-    filename : str       – parquet filename for this asset.
-    df_meta  : DataFrame – master metadata table.
+    base_url – root URL/path for the parquet files.
+    filename – parquet filename for this asset.
+    df_meta  – master metadata table.
 
     Returns
     -------
@@ -282,6 +283,7 @@ def _get_monthly_range(base_url, filename, df_meta):
         # than loading the full OHLCV dataset when we only need date bounds.
         ohlcv = pd.read_parquet(f"{base_url}/{filename}", columns=['Close'])
         close = ohlcv['Close']
+        assert isinstance(close.index, pd.DatetimeIndex)
         if close.index.tz is None:
             close.index = close.index.tz_localize('UTC')
         else:
@@ -297,7 +299,9 @@ def _get_monthly_range(base_url, filename, df_meta):
         return None, None
 
 
-def get_common_date_range(base_url, filenames_a, filenames_b, df_meta):
+def get_common_date_range(
+    base_url: str | None, filenames_a: list[str], filenames_b: list[str], df_meta: pd.DataFrame
+) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
     """Find the monthly date range common to every asset in both baskets.
 
     The common (overlapping) range is [max(all_starts), min(all_ends)].
@@ -306,10 +310,10 @@ def get_common_date_range(base_url, filenames_a, filenames_b, df_meta):
 
     Parameters
     ----------
-    base_url   : str       – root URL/path for the parquet files.
-    filenames_a: list      – parquet filenames for basket A (may be empty).
-    filenames_b: list      – parquet filenames for basket B (may be empty).
-    df_meta    : DataFrame – master metadata table.
+    base_url    – root URL/path for the parquet files.
+    filenames_a – parquet filenames for basket A (may be empty).
+    filenames_b – parquet filenames for basket B (may be empty).
+    df_meta     – master metadata table.
 
     Returns
     -------
@@ -322,10 +326,11 @@ def get_common_date_range(base_url, filenames_a, filenames_b, df_meta):
     if not all_filenames or not base_url:
         return None, None
 
-    starts, ends = [], []
+    starts: list[pd.Timestamp] = []
+    ends: list[pd.Timestamp] = []
     for filename in all_filenames:
         s, e = _get_monthly_range(base_url, filename, df_meta)
-        if s is not None:
+        if s is not None and e is not None:
             starts.append(s)
             ends.append(e)
 
@@ -347,7 +352,9 @@ def get_common_date_range(base_url, filenames_a, filenames_b, df_meta):
     return common_start, common_end
 
 
-def run_backtest(base_url, filenames, start_date, end_date, df_meta):
+def run_backtest(
+    base_url: str | None, filenames: list[str], start_date: pd.Timestamp, end_date: pd.Timestamp, df_meta: pd.DataFrame
+) -> tuple[pd.Series | None, dict[str, str] | None]:
     """Orchestrate a full DCA backtest for a single basket of assets.
 
     Steps:
@@ -359,11 +366,11 @@ def run_backtest(base_url, filenames, start_date, end_date, df_meta):
 
     Parameters
     ----------
-    base_url   : str       – root URL/path for the parquet data files.
-    filenames  : list      – parquet filenames for every asset in the basket.
-    start_date : Timestamp – first month-end date to include (inclusive).
-    end_date   : Timestamp – last month-end date to include (inclusive).
-    df_meta    : DataFrame – master metadata table (symbol, name, filename …).
+    base_url   – root URL/path for the parquet data files.
+    filenames  – parquet filenames for every asset in the basket.
+    start_date – first month-end date to include (inclusive).
+    end_date   – last month-end date to include (inclusive).
+    df_meta    – master metadata table (symbol, name, filename …).
 
     Returns
     -------

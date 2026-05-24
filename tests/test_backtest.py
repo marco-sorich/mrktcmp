@@ -31,7 +31,7 @@ BASE_URL = "http://example.com"
 _MONTHLY_IDX = pd.date_range('2020-01-31', periods=24, freq='ME', tz='UTC')
 
 
-def _daily_ohlcv(price, n_days=400, tz='UTC'):
+def _daily_ohlcv(price, n_days=400, tz: str | None = 'UTC'):
     """Build a minimal daily OHLCV DataFrame with a constant close price."""
     idx = pd.date_range('2020-01-01', periods=n_days, freq='D', tz=tz)
     return pd.DataFrame(
@@ -71,12 +71,12 @@ class TestLoadMonthlyCloses:
     def test_timezone_naive_index_gets_utc_localization(self):
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0, tz=None)):
             result = load_monthly_closes(BASE_URL, ['aapl.parquet'], SAMPLE_META)
-        assert result.index.tz is not None
+        assert isinstance(result.index, pd.DatetimeIndex) and result.index.tz is not None
 
     def test_timezone_aware_index_preserved(self):
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0, tz='America/New_York')):
             result = load_monthly_closes(BASE_URL, ['aapl.parquet'], SAMPLE_META)
-        assert result.index.tz is not None
+        assert isinstance(result.index, pd.DatetimeIndex) and result.index.tz is not None
 
     def test_parquet_error_is_swallowed_returns_empty(self):
         with patch('src.backtest.pd.read_parquet', side_effect=OSError("not found")):

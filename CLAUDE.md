@@ -13,6 +13,13 @@ gunicorn --reload src.app:server
 # Production
 gunicorn src.app:server
 
+# Linting
+flake8 --max-complexity=10 --max-line-length=127
+
+# Type check
+mypy src/backtest.py
+mypy tests/test_backtest.py
+
 # Tests
 pytest
 
@@ -37,12 +44,15 @@ DASH_DEBUG=false
 
 ## Development
 
+* Implement type checking for all functions which are not Dash callbacks
+* Add comprhensive code commenting
 * Keep the tests updated
 * Keep the comments updated
 * Keep `CLAUDE.md` updated
 * Keep `README.md` updated
+* Perform linting after each change
+* Perform type checking after each change
 * Perform tests after each change
-* Perform linting with `flake8 --max-complexity=10 --max-line-length=127` after each change
 
 ## Architecture
 

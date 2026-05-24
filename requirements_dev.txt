@@ -1,0 +1,14 @@
+dash
+plotly
+numpy
+pandas
+gunicorn
+requests
+pyarrow
+dash-ag-grid
+python-dotenv
+dash_bootstrap_components
+
+mypy
+pytest
+flake8
