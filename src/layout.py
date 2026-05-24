@@ -58,8 +58,27 @@ def create_layout():
     # declared width so content does not overflow horizontally.
     return html.Div([
 
-        # Page heading – rendered as an HTML <h1> tag.
-        html.H1("mrktcmp _ markets compare"),
+        # Page heading – main brand name with a subtitle line below.
+        html.Header([
+            html.H1([
+                html.I(className="bi bi-graph-up-arrow", style={'marginRight': '10px', 'fontSize': '2rem', 'verticalAlign': 'middle'}),
+                "mrktcmp",
+            ], style={
+                'margin': '0',
+                'fontSize': '2.4rem',
+                'fontWeight': '700',
+                'letterSpacing': '0.08em',
+                'lineHeight': '1',
+            }),
+            html.P("compare markets", style={
+                'margin': '4px 0 0 2px',
+                'fontSize': '0.85rem',
+                'fontWeight': '400',
+                'letterSpacing': '0.18em',
+                'color': '#888',
+                'textTransform': 'uppercase',
+            }),
+        ], style={'marginBottom': '16px', 'borderBottom': '1px solid #e0e0e0', 'paddingBottom': '12px'}),
 
         # dcc.Tabs creates a tabbed interface.
         # id     – unique ID so callbacks can read which tab is active.
