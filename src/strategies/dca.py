@@ -24,6 +24,10 @@ class DCAStrategy(BacktestStrategy):
         return "DCA"
 
     @classmethod
+    def get_icon(cls) -> str:
+        return "bi-calendar-month"
+
+    @classmethod
     def get_description(cls) -> str:
         return (
             "Dollar-Cost Averaging: invest a fixed amount each month, "

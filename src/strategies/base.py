@@ -92,6 +92,17 @@ class BacktestStrategy(ABC):
 
     @classmethod
     @abstractmethod
+    def get_icon(cls) -> str:
+        """Bootstrap icon class name for this strategy (e.g. 'bi-calendar-month').
+
+        Used by the GUI to render an icon next to the strategy name in
+        dropdown options and other UI elements.  The value must be a valid
+        Bootstrap Icons class (https://icons.getbootstrap.com/).
+        """
+        ...
+
+    @classmethod
+    @abstractmethod
     def get_config_schema(cls) -> list[ConfigParam]:
         """Declare the parameters the user can configure for this strategy.
 

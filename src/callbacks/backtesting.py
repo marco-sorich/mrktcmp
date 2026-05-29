@@ -65,7 +65,7 @@ import plotly.graph_objects as go
 #              id dict shares a given 'type' key. Used to listen to every
 #              remove button in a basket at once without knowing in advance
 #              how many there will be.
-from dash import Input, Output, State, callback, no_update, ALL
+from dash import Input, Output, State, callback, no_update, ALL, MATCH
 
 # dash.callback_context: provides runtime information about the callback
 # that just fired (which Input triggered it, what its new value is, etc.).
@@ -89,7 +89,7 @@ from src.utils import log_time
 # UI helper functions for rendering basket contents and the metrics table.
 # These live in components.py because they build Dash component trees that
 # are also needed elsewhere (e.g. layout.py builds _basket_ui panels).
-from src.components import _render_basket_list, _metrics_table
+from src.components import _render_basket_list, _metrics_table, _build_strategy_params_ui
 
 # The DCA simulation engine. run_backtest orchestrates data loading, the
 # monthly investment simulation, and metric computation. get_common_date_range
@@ -97,6 +97,65 @@ from src.components import _render_basket_list, _metrics_table
 # Imported at module scope so tests can patch 'src.callbacks.backtesting.run_backtest'
 # and 'src.callbacks.backtesting.get_common_date_range'.
 from src.backtest import run_backtest, get_common_date_range
+from src.strategies.registry import get_strategy
+
+
+# ---------------------------------------------------------------------------
+# Strategy helper functions
+# ---------------------------------------------------------------------------
+
+def _get_strategy_instance(config: dict | None):
+    """Instantiate the strategy class named in *config*, or return None.
+
+    Parameters
+    ----------
+    config – dict with keys 'strategy' (str) and 'params' (dict), as stored
+             in bt-strategy-config-store-{x}.  None or missing keys are safe.
+    """
+    if not config:
+        return None
+    name = config.get('strategy')
+    if not name:
+        return None
+    try:
+        return get_strategy(name)()
+    except KeyError:
+        return None
+
+
+def _build_strategy_config(
+    strategy_name: str | None,
+    param_values: list,
+    inputs_meta: list,
+) -> dict:
+    """Build a strategy config dict from the current strategy dropdown + param inputs.
+
+    Parameters
+    ----------
+    strategy_name – selected strategy name from the dropdown.
+    param_values  – list of current input values (from ALL pattern-match).
+    inputs_meta   – callback_context.inputs_list entry for the ALL pattern;
+                    each element has {'id': {'type': ..., 'index': key}, ...}.
+    """
+    if not strategy_name:
+        return {'strategy': None, 'params': {}}
+    try:
+        strategy_cls = get_strategy(strategy_name)
+    except KeyError:
+        return {'strategy': strategy_name, 'params': {}}
+
+    # Start from declared defaults so missing inputs never cause KeyError in run().
+    params: dict = {p.key: p.default for p in strategy_cls.get_config_schema()}
+
+    # Override with the values currently shown in the UI (may be fewer than
+    # schema params if the UI is still updating after a strategy switch).
+    for i, meta in enumerate(inputs_meta):
+        key = meta['id']['index']
+        val = param_values[i] if i < len(param_values) else None
+        if val is not None:
+            params[key] = val
+
+    return {'strategy': strategy_name, 'params': params}
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +594,62 @@ def update_date_display(slider_value, date_store):
 
 
 # ---------------------------------------------------------------------------
+# Callback: render strategy parameter inputs when strategy changes (both baskets)
+# ---------------------------------------------------------------------------
+
+@callback(
+    Output({'type': 'bt-strategy-params', 'basket': MATCH}, 'children'),
+    Input({'type': 'bt-strategy', 'basket': MATCH}, 'value'),
+    prevent_initial_call=True,
+)
+@log_time
+def render_strategy_params(strategy_name: str | None) -> list:
+    """Re-render param inputs whenever the user picks a different strategy.
+
+    Uses MATCH so a single callback serves both basket A and basket B.
+    basket_id is extracted from the triggering component's dict ID.
+    """
+    basket_id = dash.callback_context.triggered_id['basket']
+    return _build_strategy_params_ui(strategy_name, basket_id)
+
+
+# ---------------------------------------------------------------------------
+# Callbacks: keep strategy config stores in sync with UI (one per basket)
+# ---------------------------------------------------------------------------
+
+@callback(
+    Output('bt-strategy-config-store-a', 'data'),
+    Input({'type': 'bt-strategy', 'basket': 'a'}, 'value'),
+    Input({'type': 'bt-param-a', 'index': ALL}, 'value'),
+    prevent_initial_call=True,
+)
+@log_time
+def update_strategy_config_a(strategy_name: str | None, param_values: list) -> dict:
+    """Sync strategy config store for basket A with the current UI state."""
+    return _build_strategy_config(
+        strategy_name,
+        param_values,
+        dash.callback_context.inputs_list[1],
+    )
+
+
+@callback(
+    Output('bt-strategy-config-store-b', 'data'),
+    Input({'type': 'bt-strategy', 'basket': 'b'}, 'value'),
+    Input({'type': 'bt-param-b', 'index': ALL}, 'value'),
+    prevent_initial_call=True,
+)
+@log_time
+def update_strategy_config_b(strategy_name: str | None, param_values: list) -> dict:
+    """Sync strategy config store for basket B with the current UI state."""
+    return _build_strategy_config(
+        strategy_name,
+        param_values,
+        dash.callback_context.inputs_list[1],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Callback: run the DCA backtest and render results
 # ---------------------------------------------------------------------------
 
@@ -544,16 +659,17 @@ def update_date_display(slider_value, date_store):
     Output('bt-metrics', 'children'),  # the metrics comparison table
     Output('bt-status', 'children'),   # status / error message text
     Input('bt-run', 'n_clicks'),       # fires when the Run button is clicked
-    State('bt-basket-store-a', 'data'),  # basket A contents (read, not trigger)
-    State('bt-basket-store-b', 'data'),  # basket B contents
-    # slider_value is [start_index, end_index] into the date_store list.
-    State('bt-date-range', 'value'),
-    # date_store is a list of ISO-format date strings, one per slider step.
-    State('bt-date-store', 'data'),
+    State('bt-basket-store-a', 'data'),          # basket A contents (read, not trigger)
+    State('bt-basket-store-b', 'data'),          # basket B contents
+    State('bt-date-range', 'value'),             # [start_index, end_index] into date_store
+    State('bt-date-store', 'data'),              # ISO date strings, one per slider step
+    State('bt-strategy-config-store-a', 'data'),  # selected strategy + params for basket A
+    State('bt-strategy-config-store-b', 'data'),  # selected strategy + params for basket B
     prevent_initial_call=True,  # do not run at page load (no data yet)
 )
 @log_time
-def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store):
+def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store,
+                          strategy_config_a, strategy_config_b):
     """Execute the DCA simulation for both baskets and update the UI.
 
     Steps:
@@ -565,12 +681,14 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
 
     Parameters
     ----------
-    n_clicks     : int  – click count on the Run button (unused; the click
-                          itself is the trigger, not its count).
-    basket_a     : list – asset dicts for Basket A (may be None or empty).
-    basket_b     : list – asset dicts for Basket B (may be None or empty).
-    slider_value : list – [start_index, end_index] into date_store.
-    date_store   : list – ISO date strings for each slider position.
+    n_clicks          : int  – click count on the Run button (unused; the click
+                               itself is the trigger, not its count).
+    basket_a          : list – asset dicts for Basket A (may be None or empty).
+    basket_b          : list – asset dicts for Basket B (may be None or empty).
+    slider_value      : list – [start_index, end_index] into date_store.
+    date_store        : list – ISO date strings for each slider position.
+    strategy_config_a : dict – {'strategy': name, 'params': {...}} for basket A.
+    strategy_config_b : dict – {'strategy': name, 'params': {...}} for basket B.
 
     Returns
     -------
@@ -607,16 +725,26 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     filenames_a = [item['filename'] for item in (basket_a or [])]
     filenames_b = [item['filename'] for item in (basket_b or [])]
 
+    # Resolve strategy instances from the per-basket config stores.  If a
+    # store is absent or its 'strategy' key is missing, _get_strategy_instance
+    # returns None and run_backtest falls back to the built-in DCA code path.
+    strategy_a = _get_strategy_instance(strategy_config_a)
+    strategy_b = _get_strategy_instance(strategy_config_b)
+    params_a = (strategy_config_a or {}).get('params') or {}
+    params_b = (strategy_config_b or {}).get('params') or {}
+
     # Run the simulation for each basket, but skip the call entirely if the
     # basket has no assets (saves an unnecessary function call).
     # run_backtest returns (portfolio_series, metrics_dict) on success, or
     # (None, None) if no data was available for the selected period.
     portfolio_a, metrics_a = (
-        run_backtest(_config.base_url, filenames_a, start_date, end_date, _config.df)
+        run_backtest(_config.base_url, filenames_a, start_date, end_date, _config.df,
+                     strategy=strategy_a, strategy_params=params_a)
         if filenames_a else (None, None)
     )
     portfolio_b, metrics_b = (
-        run_backtest(_config.base_url, filenames_b, start_date, end_date, _config.df)
+        run_backtest(_config.base_url, filenames_b, start_date, end_date, _config.df,
+                     strategy=strategy_b, strategy_params=params_b)
         if filenames_b else (None, None)
     )
 
@@ -670,10 +798,15 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
 
     # Build the side-by-side metrics table and assemble the status message.
     metrics_div = _metrics_table(metrics_a, metrics_b)
-    status = f'Backtest complete – {d0_label} to {d1_label} ({months_shown} months, 1,000 €/month).'
+    name_a = (strategy_config_a or {}).get('strategy') or 'DCA'
+    name_b = (strategy_config_b or {}).get('strategy') or 'DCA'
+    status = (
+        f'Backtest complete – {d0_label} to {d1_label} ({months_shown} months). '
+        f'Strategy A: {name_a}, Strategy B: {name_b}.'
+    )
 
-    _config.log.info("Backtest completed: %d months, A=%s, B=%s",
-                     months_shown, len(filenames_a), len(filenames_b))
+    _config.log.info("Backtest completed: %d months, A=%s (%s), B=%s (%s)",
+                     months_shown, len(filenames_a), name_a, len(filenames_b), name_b)
 
     # Return four values matching the four Output declarations above.
     return fig, visible, metrics_div, status

@@ -43,3 +43,21 @@ def get_strategy(name: str) -> type[BacktestStrategy]:
 def list_strategies() -> list[str]:
     """Return the names of all registered strategies, in insertion order."""
     return list(_registry)
+
+
+def get_all_strategy_info() -> list[dict[str, str]]:
+    """Return display metadata for all registered strategies, in registration order.
+
+    Each dict contains:
+      'name'        – the strategy's unique identifier (same as its registry key).
+      'icon'        – Bootstrap icon class name for the GUI (e.g. 'bi-calendar-month').
+      'description' – one-sentence human-readable description.
+    """
+    return [
+        {
+            'name': name,
+            'icon': cls.get_icon(),
+            'description': cls.get_description(),
+        }
+        for name, cls in _registry.items()
+    ]

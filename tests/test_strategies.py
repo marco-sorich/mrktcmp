@@ -172,6 +172,17 @@ class TestRegistry:
 # ---------------------------------------------------------------------------
 
 class TestDCAStrategy:
+    def test_get_name_returns_dca(self):
+        assert DCAStrategy.get_name() == 'DCA'
+
+    def test_get_icon_returns_non_empty_string(self):
+        icon = DCAStrategy.get_icon()
+        assert isinstance(icon, str) and icon, "get_icon() must return a non-empty string"
+
+    def test_get_description_returns_non_empty_string(self):
+        assert isinstance(DCAStrategy.get_description(), str)
+        assert DCAStrategy.get_description()
+
     def test_get_config_schema_contains_monthly_investment(self):
         schema = DCAStrategy.get_config_schema()
         keys = [p.key for p in schema]
