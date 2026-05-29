@@ -12,6 +12,14 @@
 # logger (instead of print) lets callers control output format and level.
 import logging
 
+# TYPE_CHECKING guard avoids a circular import at runtime: strategies/dca.py
+# imports from backtest.py, so importing BacktestStrategy here unconditionally
+# would create a cycle.  Under TYPE_CHECKING the import is only evaluated by
+# static analysis tools (mypy), not at runtime.
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from src.strategies.base import BacktestStrategy
+
 # numpy: fast numerical array operations; used here for vectorised maths
 # such as annualising standard deviations.
 import numpy as np
@@ -353,11 +361,22 @@ def get_common_date_range(
 
 
 def run_backtest(
-    base_url: str | None, filenames: list[str], start_date: pd.Timestamp, end_date: pd.Timestamp, df_meta: pd.DataFrame
+    base_url: str | None,
+    filenames: list[str],
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+    df_meta: pd.DataFrame,
+    strategy: "BacktestStrategy | None" = None,
+    strategy_params: dict[str, int | float | str] | None = None,
 ) -> tuple[pd.Series | None, dict[str, str] | None]:
-    """Orchestrate a full DCA backtest for a single basket of assets.
+    """Orchestrate a backtest for a single basket of assets.
 
-    Steps:
+    When *strategy* is provided the call is delegated entirely to that plugin,
+    which is responsible for loading data, filtering dates, and computing
+    metrics.  When *strategy* is None the built-in DCA logic below is used,
+    preserving full backward compatibility for existing callers.
+
+    Steps (strategy=None / built-in DCA path):
       1. Load monthly close prices for every asset in the basket.
       2. Restrict to the caller-specified [start_date, end_date] window.
       3. Forward-fill small price gaps.
@@ -366,16 +385,29 @@ def run_backtest(
 
     Parameters
     ----------
-    base_url   – root URL/path for the parquet data files.
-    filenames  – parquet filenames for every asset in the basket.
-    start_date – first month-end date to include (inclusive).
-    end_date   – last month-end date to include (inclusive).
-    df_meta    – master metadata table (symbol, name, filename …).
+    base_url        – root URL/path for the parquet data files.
+    filenames       – parquet filenames for every asset in the basket.
+    start_date      – first month-end date to include (inclusive).
+    end_date        – last month-end date to include (inclusive).
+    df_meta         – master metadata table (symbol, name, filename …).
+    strategy        – optional strategy plugin instance; when supplied the
+                      remaining parameters are forwarded to strategy.run().
+    strategy_params – config values for the strategy plugin (may be empty or
+                      None; the plugin falls back to its declared defaults).
 
     Returns
     -------
     (portfolio_series, metrics_dict) on success, or (None, None) on failure.
     """
+    # Delegate to a strategy plugin when one is supplied.
+    if strategy is not None:
+        if not filenames or not base_url:
+            return None, None
+        return strategy.run(
+            base_url, filenames, start_date, end_date, df_meta,
+            strategy_params or {},
+        )
+
     # Bail out immediately if the caller provided nothing useful.
     if not filenames or not base_url:
         return None, None

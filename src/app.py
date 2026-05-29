@@ -75,6 +75,11 @@ from src.layout import create_layout
 # warning – the side effect is the entire purpose of this import.
 import src.callbacks  # noqa: F401
 
+# Importing src.strategies triggers __init__.py which imports every plugin
+# module; each module's @register decorator fires at import time, populating
+# the strategy registry before the first user interaction.
+import src.strategies  # noqa: F401
+
 # ---------------------------------------------------------------------------
 # Application startup
 # ---------------------------------------------------------------------------
