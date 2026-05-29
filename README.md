@@ -126,9 +126,10 @@ tests/
            ]
 
        def run(self, base_url, filenames, start_date, end_date, df_meta, params):
-           # params always contains all keys from get_config_schema() with
-           # either user-supplied values or the declared defaults.
-           my_param = float(params['my_param'])
+           # resolve_params merges caller-supplied values with schema defaults
+           # so that params={} (no user input) always works correctly.
+           resolved = self.resolve_params(params)
+           my_param = float(resolved['my_param'])
            # ... compute portfolio (pd.Series) and metrics (dict[str, str]) ...
            return portfolio, metrics
    ```

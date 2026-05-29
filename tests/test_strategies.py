@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 os.environ.pop("BASE_URL", None)
 
+import src.strategies.registry as _registry_module  # noqa: E402
 from src.strategies.base import BacktestStrategy, ConfigParam  # noqa: E402
 from src.strategies.registry import get_strategy, list_strategies, register  # noqa: E402
 from src.strategies.dca import DCAStrategy  # noqa: E402
@@ -34,8 +35,12 @@ _EXPECTED_METRIC_KEYS = {
 }
 
 
-def _daily_ohlcv(price: float, n_days: int = 800) -> pd.DataFrame:
-    """Constant-price daily OHLCV DataFrame for mocking pd.read_parquet."""
+def _daily_ohlcv(price: float, n_days: int = 1200) -> pd.DataFrame:
+    """Constant-price daily OHLCV DataFrame for mocking pd.read_parquet.
+
+    Default of 1200 days (~3.3 years from 2019-01-01) ensures coverage through
+    the test window end of 2021-12-31 with margin to spare.
+    """
     idx = pd.date_range('2019-01-01', periods=n_days, freq='D', tz='UTC')
     return pd.DataFrame(
         {'Open': price, 'High': price, 'Low': price, 'Close': price, 'Volume': 1000},
@@ -75,13 +80,31 @@ class TestConfigParam:
         assert len(p.options) > 0
         assert p.default in p.options
 
-    def test_default_options_list_is_empty_not_shared(self):
-        # Verify that the default_factory creates a new list each time,
-        # so mutating one instance doesn't affect another.
-        p1 = ConfigParam(key='a', label='A', type='select', default='x')
-        p2 = ConfigParam(key='b', label='B', type='select', default='y')
+    def test_options_list_is_not_shared_between_instances(self):
+        # Verify that field(default_factory=list) creates a fresh list per
+        # instance so mutating one instance doesn't affect another.
+        p1 = ConfigParam(key='a', label='A', type='select', default='x', options=['x'])
+        p2 = ConfigParam(key='b', label='B', type='select', default='y', options=['y'])
         p1.options.append('z')
         assert 'z' not in p2.options
+
+    # --- validation tests ---------------------------------------------------
+
+    def test_int_param_without_min_max_raises(self):
+        with pytest.raises(ValueError, match="min_value and max_value"):
+            ConfigParam(key='x', label='X', type='int', default=5)
+
+    def test_float_param_without_max_raises(self):
+        with pytest.raises(ValueError, match="min_value and max_value"):
+            ConfigParam(key='x', label='X', type='float', default=1.0, min_value=0.0)
+
+    def test_select_param_empty_options_raises(self):
+        with pytest.raises(ValueError, match="options must be non-empty"):
+            ConfigParam(key='x', label='X', type='select', default='a')
+
+    def test_select_param_default_not_in_options_raises(self):
+        with pytest.raises(ValueError, match="not in options"):
+            ConfigParam(key='x', label='X', type='select', default='z', options=['a', 'b'])
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +113,15 @@ class TestConfigParam:
 
 class TestRegistry:
     """Uses a local dummy strategy so tests are independent of DCAStrategy."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_registry(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Snapshot _registry before each test and restore it afterwards.
+
+        Prevents dummy registrations from leaking into subsequent tests or
+        into the live registry used by the running app.
+        """
+        monkeypatch.setattr(_registry_module, '_registry', dict(_registry_module._registry))
 
     def _make_dummy(self, name: str) -> type[BacktestStrategy]:
         """Create and register a minimal BacktestStrategy subclass on the fly."""
@@ -129,14 +161,17 @@ class TestRegistry:
         cls2 = self._make_dummy("_test_dummy_c")  # same name, different class
         assert get_strategy("_test_dummy_c") is cls2
 
+    def test_registry_isolated_between_tests(self):
+        # Confirm that dummy registrations from other tests are not visible here.
+        assert "_test_dummy_a" not in list_strategies()
+        assert "_test_dummy_b" not in list_strategies()
+
 
 # ---------------------------------------------------------------------------
 # Layer 3 – DCAStrategy unit tests
 # ---------------------------------------------------------------------------
 
 class TestDCAStrategy:
-    _strategy = DCAStrategy()
-
     def test_get_config_schema_contains_monthly_investment(self):
         schema = DCAStrategy.get_config_schema()
         keys = [p.key for p in schema]
@@ -148,8 +183,9 @@ class TestDCAStrategy:
             assert param.default is not None, f"Param '{param.key}' has no default"
 
     def test_run_with_empty_params_uses_defaults(self):
+        strategy = DCAStrategy()
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
-            portfolio, metrics = self._strategy.run(
+            portfolio, metrics = strategy.run(
                 BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META, params={}
             )
         assert portfolio is not None
@@ -157,28 +193,43 @@ class TestDCAStrategy:
         assert set(metrics.keys()) == _EXPECTED_METRIC_KEYS
 
     def test_run_returns_11_metric_keys(self):
+        strategy = DCAStrategy()
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
-            _, metrics = self._strategy.run(
+            _, metrics = strategy.run(
                 BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META, params={}
             )
         assert metrics is not None
         assert len(metrics) == 11
 
     def test_run_with_empty_filenames_returns_none_none(self):
-        portfolio, metrics = self._strategy.run(
+        strategy = DCAStrategy()
+        portfolio, metrics = strategy.run(
             BASE_URL, [], _START, _END, SAMPLE_META, params={}
         )
         assert portfolio is None
         assert metrics is None
 
-    def test_custom_monthly_investment_halves_invested_total(self):
-        # At the same constant price, doubling the investment doubles the
-        # invested total.  Use that relationship to verify params are respected.
+    def test_run_with_too_short_date_range_returns_none_none(self):
+        # Only 1 month of data → compute_metrics needs ≥3 → run() returns (None, None).
+        strategy = DCAStrategy()
+        start = pd.Timestamp('2020-06-30', tz='UTC')
+        end = pd.Timestamp('2020-06-30', tz='UTC')
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
-            _, m_default = self._strategy.run(
+            portfolio, metrics = strategy.run(
+                BASE_URL, ['aapl.parquet'], start, end, SAMPLE_META, params={}
+            )
+        assert portfolio is None
+        assert metrics is None
+
+    def test_custom_monthly_investment_halves_invested_total(self):
+        # At the same constant price, halving the monthly investment halves the
+        # invested total.  Use that relationship to verify params are respected.
+        strategy = DCAStrategy()
+        with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
+            _, m_default = strategy.run(
                 BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META, params={}
             )
-            _, m_half = self._strategy.run(
+            _, m_half = strategy.run(
                 BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META,
                 params={'monthly_investment': 500.0},
             )

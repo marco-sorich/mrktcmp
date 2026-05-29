@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.backtest import compute_metrics, load_monthly_closes, simulate_dca
+from src.backtest import MONTHLY_INVESTMENT, compute_metrics, load_monthly_closes, simulate_dca
 from src.strategies.base import BacktestStrategy, ConfigParam
 from src.strategies.registry import register
 
@@ -37,7 +37,9 @@ class DCAStrategy(BacktestStrategy):
                 key='monthly_investment',
                 label='Monthly Investment (€)',
                 type='float',
-                default=1000.0,
+                # Share the module constant from backtest.py so both code paths
+                # always start from the same default value.
+                default=float(MONTHLY_INVESTMENT),
                 min_value=1.0,
                 max_value=1_000_000.0,
             ),
@@ -52,11 +54,9 @@ class DCAStrategy(BacktestStrategy):
         df_meta: pd.DataFrame,
         params: dict[str, int | float | str],
     ) -> tuple[pd.Series | None, dict[str, str] | None]:
-        # Merge schema defaults with caller-supplied params so that missing
-        # keys always fall back to their declared default values.  This means
-        # passing params={} is equivalent to using all defaults.
-        schema_defaults = {p.key: p.default for p in self.get_config_schema()}
-        resolved = {**schema_defaults, **params}
+        # resolve_params merges caller-supplied values with schema defaults so
+        # that passing params={} is equivalent to using all declared defaults.
+        resolved = self.resolve_params(params)
 
         monthly_investment = float(resolved['monthly_investment'])
 
@@ -75,4 +75,12 @@ class DCAStrategy(BacktestStrategy):
         price_df = price_df.ffill(limit=3)
 
         portfolio, total_invested = simulate_dca(price_df, monthly_investment)
-        return portfolio, compute_metrics(portfolio, total_invested)
+        metrics = compute_metrics(portfolio, total_invested)
+
+        # compute_metrics returns {} when portfolio is too short (< 3 months)
+        # or total_invested is zero.  Treat that as a failure so callers always
+        # receive either a fully-populated result or (None, None).
+        if not metrics:
+            return None, None
+
+        return portfolio, metrics

@@ -51,6 +51,25 @@ class ConfigParam:
     max_value: int | float | None = None  # required when type in ('int', 'float')
     options: list[str] = field(default_factory=list)  # required when type == 'select'
 
+    def __post_init__(self) -> None:
+        # Catch misconfigured params at plugin registration time, not at GUI render time.
+        if self.type in ('int', 'float'):
+            if self.min_value is None or self.max_value is None:
+                raise ValueError(
+                    f"ConfigParam '{self.key}': min_value and max_value are required "
+                    f"for type='{self.type}'."
+                )
+        if self.type == 'select':
+            if not self.options:
+                raise ValueError(
+                    f"ConfigParam '{self.key}': options must be non-empty for type='select'."
+                )
+            if self.default not in self.options:
+                raise ValueError(
+                    f"ConfigParam '{self.key}': default {self.default!r} "
+                    f"is not in options {self.options!r}."
+                )
+
 
 class BacktestStrategy(ABC):
     """Abstract base class that every strategy plugin must implement.
@@ -82,6 +101,18 @@ class BacktestStrategy(ABC):
         """
         ...
 
+    def resolve_params(
+        self, params: dict[str, int | float | str]
+    ) -> dict[str, int | float | str]:
+        """Merge caller-supplied params with schema defaults.
+
+        Any key absent from *params* falls back to its ConfigParam.default.
+        Call this at the start of every run() implementation to ensure all
+        parameters have a value even when params={} is passed.
+        """
+        schema_defaults = {p.key: p.default for p in self.get_config_schema()}
+        return {**schema_defaults, **params}
+
     @abstractmethod
     def run(
         self,
@@ -102,8 +133,8 @@ class BacktestStrategy(ABC):
         end_date   – last month-end date to include (inclusive).
         df_meta    – master metadata table (symbol, name, filename, …).
         params     – user-supplied config values, keyed by ConfigParam.key.
-                     May be empty; the plugin must fall back to each param's
-                     *default* for any missing key.
+                     May be empty; call self.resolve_params(params) at the start
+                     of run() to merge in the declared defaults for missing keys.
 
         Returns
         -------
