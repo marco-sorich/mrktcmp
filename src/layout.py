@@ -127,7 +127,7 @@ def create_layout():
             # Tab 2: Backtesting – DCA simulation for two asset baskets
             # -----------------------------------------------------------
             dbc.Tab(
-                label="Montl. invest", children=[
+                label="Backtesting", children=[
 
                     # Two basket panels side by side using a flex row.
                     # gap: 8px adds horizontal space between the panels.
