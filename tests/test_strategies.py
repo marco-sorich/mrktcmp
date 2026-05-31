@@ -135,6 +135,10 @@ class TestRegistry:
                 return "dummy"
 
             @classmethod
+            def get_icon(cls) -> str:
+                return "bi-question"
+
+            @classmethod
             def get_config_schema(cls) -> list[ConfigParam]:
                 return []
 
