@@ -624,17 +624,52 @@ def toggle_strategy_dropdown_b(basket_data: list | None) -> bool:
 @callback(
     Output({'type': 'bt-strategy-params', 'basket': MATCH}, 'children'),
     Input({'type': 'bt-strategy', 'basket': MATCH}, 'value'),
+    State('bt-basket-store-a', 'data'),
+    State('bt-basket-store-b', 'data'),
     prevent_initial_call=True,
 )
 @log_time
-def render_strategy_params(strategy_name: str | None) -> list:
+def render_strategy_params(
+    strategy_name: str | None,
+    basket_a: list | None,
+    basket_b: list | None,
+) -> list:
     """Re-render param inputs whenever the user picks a different strategy.
 
     Uses MATCH so a single callback serves both basket A and basket B.
     basket_id is extracted from the triggering component's dict ID.
+    Params are rendered disabled when the corresponding basket is empty.
     """
     basket_id = dash.callback_context.triggered_id['basket']
-    return _build_strategy_params_ui(strategy_name, basket_id)
+    basket_data = basket_a if basket_id == 'a' else basket_b
+    disabled = not bool(basket_data)
+    return _build_strategy_params_ui(strategy_name, basket_id, disabled=disabled)
+
+
+# ---------------------------------------------------------------------------
+# Callbacks: disable/enable param inputs when basket becomes empty/non-empty
+# ---------------------------------------------------------------------------
+
+@callback(
+    Output({'type': 'bt-param-a', 'index': ALL}, 'disabled'),
+    Input('bt-basket-store-a', 'data'),
+)
+@log_time
+def disable_params_a(basket_data: list | None) -> list:
+    """Disable all basket-A param inputs when the basket is empty."""
+    disabled = not bool(basket_data)
+    return [disabled] * len(dash.callback_context.outputs_list)
+
+
+@callback(
+    Output({'type': 'bt-param-b', 'index': ALL}, 'disabled'),
+    Input('bt-basket-store-b', 'data'),
+)
+@log_time
+def disable_params_b(basket_data: list | None) -> list:
+    """Disable all basket-B param inputs when the basket is empty."""
+    disabled = not bool(basket_data)
+    return [disabled] * len(dash.callback_context.outputs_list)
 
 
 # ---------------------------------------------------------------------------

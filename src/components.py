@@ -78,7 +78,11 @@ def _default_strategy_config() -> dict:
     return {'strategy': name, 'params': params}
 
 
-def _build_strategy_params_ui(strategy_name: str | None, basket_id: str) -> list:
+def _build_strategy_params_ui(
+    strategy_name: str | None,
+    basket_id: str,
+    disabled: bool = False,
+) -> list:
     """Build input widgets for every ConfigParam of *strategy_name*.
 
     Called at layout time (initial render) and by the strategy-selector
@@ -88,6 +92,8 @@ def _build_strategy_params_ui(strategy_name: str | None, basket_id: str) -> list
     ----------
     strategy_name – registered strategy name (e.g. 'DCA'), or None.
     basket_id     – 'a' or 'b'; used to build per-basket param input IDs.
+    disabled      – when True all controls are rendered in the disabled state
+                    (used when the basket is empty).
 
     Returns
     -------
@@ -114,6 +120,7 @@ def _build_strategy_params_ui(strategy_name: str | None, basket_id: str) -> list
                 step=1 if p.type == 'int' else 'any',
                 debounce=True,
                 size='sm',
+                disabled=disabled,
             )
         else:  # 'select'
             control = dcc.Dropdown(
@@ -121,6 +128,7 @@ def _build_strategy_params_ui(strategy_name: str | None, basket_id: str) -> list
                 options=[{'label': o, 'value': o} for o in p.options],
                 value=str(p.default),
                 clearable=False,
+                disabled=disabled,
                 style={'fontSize': '13px'},
             )
         widgets.append(
@@ -236,7 +244,9 @@ def _basket_ui(basket_id):
         # render_strategy_params callback when the user picks a strategy.
         html.Div(
             id={'type': 'bt-strategy-params', 'basket': basket_id},
-            children=_build_strategy_params_ui(_default_strategy_config()['strategy'], basket_id),
+            children=_build_strategy_params_ui(
+                _default_strategy_config()['strategy'], basket_id, disabled=True
+            ),
         ),
 
         # Invisible store that holds the currently selected strategy name and
