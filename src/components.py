@@ -22,6 +22,7 @@
 # dcc:  "Dash Core Components" – interactive widgets like Dropdown,
 #       RadioItems, and Store that go beyond plain HTML.
 from dash import html, dcc
+import dash_bootstrap_components as dbc
 
 # ---------------------------------------------------------------------------
 # Internal imports
@@ -41,6 +42,106 @@ from src.styles import _BASKET_ITEM_STYLE, _BTN_SMALL, _METRIC_TABLE_STYLE
 # ---------------------------------------------------------------------------
 # Helper: build the UI block for one asset basket
 # ---------------------------------------------------------------------------
+
+def _get_strategy_options() -> list[dict]:
+    """Build dcc.Dropdown option dicts for every registered strategy.
+
+    Each option shows a Bootstrap icon alongside the strategy name.
+    Lazy-imported so component module load order does not matter.
+    """
+    from src.strategies.registry import get_all_strategy_info
+    return [
+        {
+            'label': html.Span(
+                [html.I(className=f"bi {info['icon']} me-2"), info['name']],
+                style={'display': 'flex', 'alignItems': 'center', 'gap': '4px'},
+            ),
+            'value': info['name'],
+        }
+        for info in get_all_strategy_info()
+    ]
+
+
+def _default_strategy_config() -> dict:
+    """Return the config store initial value for the first registered strategy.
+
+    Used to pre-populate bt-strategy-config-store-{x} at layout time so the
+    main backtest callback always has a valid strategy + params dict to read.
+    """
+    from src.strategies.registry import list_strategies, get_strategy
+    strategies = list_strategies()
+    if not strategies:
+        return {'strategy': None, 'params': {}}
+    name = strategies[0]
+    strategy_cls = get_strategy(name)
+    params = {p.key: p.default for p in strategy_cls.get_config_schema()}
+    return {'strategy': name, 'params': params}
+
+
+def _build_strategy_params_ui(
+    strategy_name: str | None,
+    basket_id: str,
+    disabled: bool = False,
+) -> list:
+    """Build input widgets for every ConfigParam of *strategy_name*.
+
+    Called at layout time (initial render) and by the strategy-selector
+    callback whenever the user switches strategies.
+
+    Parameters
+    ----------
+    strategy_name – registered strategy name (e.g. 'DCA'), or None.
+    basket_id     – 'a' or 'b'; used to build per-basket param input IDs.
+    disabled      – when True all controls are rendered in the disabled state
+                    (used when the basket is empty).
+
+    Returns
+    -------
+    List of Dash components (one labelled input per ConfigParam), or [].
+    """
+    if not strategy_name:
+        return []
+    from src.strategies.registry import get_strategy
+    try:
+        strategy_cls = get_strategy(strategy_name)
+    except KeyError:
+        return []
+
+    widgets = []
+    for p in strategy_cls.get_config_schema():
+        input_id = {'type': f'bt-param-{basket_id}', 'index': p.key}
+        if p.type in ('int', 'float'):
+            control = dbc.Input(
+                id=input_id,
+                type='number',
+                value=p.default,
+                min=p.min_value,
+                max=p.max_value,
+                step=1 if p.type == 'int' else 'any',
+                debounce=True,
+                size='sm',
+                disabled=disabled,
+            )
+        else:  # 'select'
+            control = dcc.Dropdown(
+                id=input_id,
+                options=[{'label': o, 'value': o} for o in p.options],
+                value=str(p.default),
+                clearable=False,
+                disabled=disabled,
+                style={'fontSize': '13px'},
+            )
+        widgets.append(
+            html.Div([
+                html.Label(
+                    p.label,
+                    style={'fontSize': '12px', 'color': '#555', 'marginBottom': '2px', 'display': 'block'},
+                ),
+                control,
+            ], style={'marginBottom': '6px'})
+        )
+    return widgets
+
 
 def _basket_ui(basket_id):
     """Return the complete HTML/component tree for a single basket panel.
@@ -116,6 +217,41 @@ def _basket_ui(basket_id):
         # removes assets. minHeight ensures the panel does not collapse to
         # zero height when the basket is empty.
         html.Div(id=f'bt-basket-list-{basket_id}', style={'minHeight': '32px'}),
+
+        # --------------- Strategy selector ----------------------------------
+        # A thin divider separates the asset list from the strategy section.
+        html.Hr(style={'margin': '10px 0', 'borderColor': '#eee'}),
+
+        html.Label(
+            'Strategy',
+            style={'fontSize': '12px', 'fontWeight': 'bold', 'marginBottom': '4px', 'display': 'block'},
+        ),
+
+        # Dropdown listing every registered strategy with its Bootstrap icon.
+        # Dict ID enables a single MATCH callback to serve both baskets.
+        # Starts disabled; the toggle_strategy_dropdown_x callbacks enable it
+        # once at least one asset has been added to the basket.
+        dcc.Dropdown(
+            id={'type': 'bt-strategy', 'basket': basket_id},
+            options=_get_strategy_options(),
+            value=_default_strategy_config()['strategy'],
+            clearable=False,
+            disabled=True,
+            style={'marginBottom': '8px'},
+        ),
+
+        # Container for strategy-specific parameter inputs.  Populated by the
+        # render_strategy_params callback when the user picks a strategy.
+        html.Div(
+            id={'type': 'bt-strategy-params', 'basket': basket_id},
+            children=_build_strategy_params_ui(
+                _default_strategy_config()['strategy'], basket_id, disabled=True
+            ),
+        ),
+
+        # Invisible store that holds the currently selected strategy name and
+        # its resolved parameter values.  Read by the main backtest callback.
+        dcc.Store(id=f'bt-strategy-config-store-{basket_id}', data=_default_strategy_config()),
 
         # dcc.Store is an invisible component that holds JSON data in the
         # browser's memory for the duration of the session. We use it to

@@ -30,8 +30,8 @@ jobs:
         mypy --install-types
     - name: Type check with mypy
       run: |
-        mypy src/backtest.py
-        mypy tests/test_backtest.py
+        mypy --explicit-package-bases --ignore-missing-imports src/backtest.py src/strategies/
+        mypy --explicit-package-bases --ignore-missing-imports tests/test_backtest.py tests/test_strategies.py
     - name: Lint with flake8
       run: |
         # stop the build if there are Python syntax errors or undefined names

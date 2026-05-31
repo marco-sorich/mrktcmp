@@ -510,23 +510,29 @@ _DATE_STORE = [d.isoformat() for d in _TEST_DATES]
 _SLIDER_VAL = [0, 23]
 
 
+_STRATEGY_CFG = {'strategy': 'DCA', 'params': {'monthly_investment': 1000.0}}
+
+
 class TestRunBacktestCallback:
     def test_both_baskets_empty_returns_status_message(self):
-        _, style, _, status = run_backtest_callback(1, [], [], _SLIDER_VAL, _DATE_STORE)
+        _, style, _, status = run_backtest_callback(
+            1, [], [], _SLIDER_VAL, _DATE_STORE, None, None)
         assert 'basket' in status
         assert style['display'] == 'none'
 
     def test_no_base_url_returns_error_status(self):
         with patch.object(config_module, 'base_url', None), \
              patch.object(config_module, 'df', SAMPLE_DF):
-            _, style, _, status = run_backtest_callback(1, BASKET_A, [], _SLIDER_VAL, _DATE_STORE)
+            _, style, _, status = run_backtest_callback(
+                1, BASKET_A, [], _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
         assert 'data source' in status
         assert style['display'] == 'none'
 
     def test_empty_date_store_returns_error_status(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF):
-            _, style, _, status = run_backtest_callback(1, BASKET_A, [], _SLIDER_VAL, [])
+            _, style, _, status = run_backtest_callback(
+                1, BASKET_A, [], _SLIDER_VAL, [], _STRATEGY_CFG, _STRATEGY_CFG)
         assert 'date range' in status.lower()
         assert style['display'] == 'none'
 
@@ -534,7 +540,8 @@ class TestRunBacktestCallback:
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF), \
              patch('src.callbacks.backtesting.run_backtest', return_value=(None, None)):
-            _, style, _, status = run_backtest_callback(1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE)
+            _, style, _, status = run_backtest_callback(
+                1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
         assert style['display'] == 'none'
         assert 'No data' in status
 
@@ -542,21 +549,24 @@ class TestRunBacktestCallback:
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF), \
              patch('src.callbacks.backtesting.run_backtest', return_value=(_PORTFOLIO_STUB, _METRICS_STUB)):
-            _, style, _, _ = run_backtest_callback(1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE)
+            _, style, _, _ = run_backtest_callback(
+                1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
         assert style['display'] == 'block'
 
     def test_successful_run_returns_plotly_figure(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF), \
              patch('src.callbacks.backtesting.run_backtest', return_value=(_PORTFOLIO_STUB, _METRICS_STUB)):
-            fig, _, _, _ = run_backtest_callback(1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE)
+            fig, _, _, _ = run_backtest_callback(
+                1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
         assert isinstance(fig, go.Figure)
 
     def test_only_basket_a_filled_also_succeeds(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF), \
              patch('src.callbacks.backtesting.run_backtest', return_value=(_PORTFOLIO_STUB, _METRICS_STUB)):
-            fig, style, _, status = run_backtest_callback(1, BASKET_A, [], _SLIDER_VAL, _DATE_STORE)
+            fig, style, _, status = run_backtest_callback(
+                1, BASKET_A, [], _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, None)
         assert style['display'] == 'block'
         assert 'complete' in status
 
