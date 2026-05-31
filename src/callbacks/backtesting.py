@@ -594,6 +594,30 @@ def update_date_display(slider_value, date_store):
 
 
 # ---------------------------------------------------------------------------
+# Callbacks: enable/disable the strategy dropdown based on basket contents
+# ---------------------------------------------------------------------------
+
+@callback(
+    Output({'type': 'bt-strategy', 'basket': 'a'}, 'disabled'),
+    Input('bt-basket-store-a', 'data'),
+)
+@log_time
+def toggle_strategy_dropdown_a(basket_data: list | None) -> bool:
+    """Disable the strategy dropdown for basket A when the basket is empty."""
+    return not bool(basket_data)
+
+
+@callback(
+    Output({'type': 'bt-strategy', 'basket': 'b'}, 'disabled'),
+    Input('bt-basket-store-b', 'data'),
+)
+@log_time
+def toggle_strategy_dropdown_b(basket_data: list | None) -> bool:
+    """Disable the strategy dropdown for basket B when the basket is empty."""
+    return not bool(basket_data)
+
+
+# ---------------------------------------------------------------------------
 # Callback: render strategy parameter inputs when strategy changes (both baskets)
 # ---------------------------------------------------------------------------
 

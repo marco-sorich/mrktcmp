@@ -221,11 +221,14 @@ def _basket_ui(basket_id):
 
         # Dropdown listing every registered strategy with its Bootstrap icon.
         # Dict ID enables a single MATCH callback to serve both baskets.
+        # Starts disabled; the toggle_strategy_dropdown_x callbacks enable it
+        # once at least one asset has been added to the basket.
         dcc.Dropdown(
             id={'type': 'bt-strategy', 'basket': basket_id},
             options=_get_strategy_options(),
             value=_default_strategy_config()['strategy'],
             clearable=False,
+            disabled=True,
             style={'marginBottom': '8px'},
         ),
 
