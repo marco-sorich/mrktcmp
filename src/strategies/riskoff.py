@@ -89,7 +89,10 @@ class RiskOffStrategy(BacktestStrategy):
         value = signals.asof(month_end)
         if pd.isna(value):
             return 0.0
-        return float(value) / 3.0
+        # pandas-stubs types asof() as Scalar | Series[S1]; Scalar is too broad
+        # for float().  At runtime value is always an int (0..3) from
+        # compute_riskoff_signals, so this conversion is always safe.
+        return float(value) / 3.0  # type: ignore[arg-type]
 
     def run(
         self,
