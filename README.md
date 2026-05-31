@@ -61,11 +61,18 @@ Open `http://127.0.0.1:8050/` in your browser.
 
 ## QA Checks
 
+Install the development dependencies first (this also pins **mypy 2.1.0**, the
+version CI runs — older 1.x releases silently miss some errors):
+
+```bash
+pip install -r requirements_dev.txt
+```
+
 ```bash
 # Linting
 flake8 --max-complexity=10 --max-line-length=127
 
-# Type checking
+# Type checking (mypy 2.1.0)
 mypy --explicit-package-bases --ignore-missing-imports src/backtest.py src/strategies/
 mypy --explicit-package-bases --ignore-missing-imports tests/test_backtest.py tests/test_strategies.py
 

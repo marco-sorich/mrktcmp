@@ -16,7 +16,8 @@ gunicorn src.app:server
 # Linting
 flake8 --max-complexity=10 --max-line-length=127
 
-# Type check
+# Type check (requires mypy 2.1.0 — pinned in requirements_dev.txt; older 1.x
+# releases silently miss errors that CI's mypy 2.1.0 reports)
 mypy --explicit-package-bases --ignore-missing-imports src/backtest.py src/strategies/
 mypy --explicit-package-bases --ignore-missing-imports tests/test_backtest.py tests/test_strategies.py
 

@@ -9,7 +9,7 @@ dash-ag-grid
 python-dotenv
 dash_bootstrap_components
 
-mypy
+mypy==2.1.0
 pytest
 flake8
 pandas-stubs
