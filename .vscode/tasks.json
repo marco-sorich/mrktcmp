@@ -14,9 +14,23 @@
             }
         },
         {
+            // Type check with mypy 2.1.0 (pinned in requirements_dev.txt); older
+            // 1.x releases silently miss errors that CI's mypy 2.1.0 reports.
+            "label": "Type check (mypy 2.1.0)",
+            "type": "shell",
+            "command": "mypy --explicit-package-bases --ignore-missing-imports src/backtest.py src/strategies/ && mypy --explicit-package-bases --ignore-missing-imports tests/test_backtest.py tests/test_strategies.py",
+            "group": "test",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            }
+        },
+        {
+            // Mirrors the CI pipeline: flake8 → mypy 2.1.0 → pytest.
             "label": "QA pipeline",
             "type": "shell",
-            "command": "flake8 --max-complexity=10 --max-line-length=127 && mypy src/backtest.py && mypy tests/test_backtest.py && pytest",
+            "command": "flake8 --max-complexity=10 --max-line-length=127 && mypy --explicit-package-bases --ignore-missing-imports src/backtest.py src/strategies/ && mypy --explicit-package-bases --ignore-missing-imports tests/test_backtest.py tests/test_strategies.py && pytest",
             "group": "test",
             "problemMatcher": [],
             "presentation": {

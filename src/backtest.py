@@ -37,6 +37,12 @@ log = logging.getLogger(__name__)
 # to find and change in one place.
 MONTHLY_INVESTMENT = 1000.0
 
+# The one-off lump sum (in the portfolio's base currency, e.g. EUR) made
+# available as cash at the very start of the Risk-Off strategy.  Unlike DCA
+# there are no recurring contributions: this amount is the entire capital,
+# tactically shifted between the basket and cash each month.
+INITIAL_INVESTMENT = 10_000.0
+
 
 def load_monthly_closes(base_url: str, filenames: list[str], df_meta: pd.DataFrame) -> pd.DataFrame:
     """Load and combine monthly close prices for the given asset filenames.
@@ -263,6 +269,278 @@ def compute_metrics(portfolio: pd.Series, total_invested: float) -> dict[str, st
         'Best Month': f"{monthly_returns.max() * 100:+.1f}%",
         'Worst Month': f"{monthly_returns.min() * 100:+.1f}%",
     }
+
+
+# ---------------------------------------------------------------------------
+# Risk-Off signal strategy engine
+#
+# A second, tactical strategy lives alongside DCA.  Instead of investing a
+# fixed amount every month, it starts from a single lump sum held entirely in
+# cash and shifts capital between the basket and cash based on three market
+# signals evaluated on the basket as a whole:
+#   1. 200-day trend  – basket index above its 200-trading-day moving average.
+#   2. YTD return     – basket index above its value on the first trading day
+#                       of the current calendar year.
+#   3. January barometer – the first 10 trading days of the calendar year were
+#                          positive (fixed for the whole year once known).
+# The number of *positive* signals (0..3) maps directly to the invested
+# fraction in thirds: 3 → 100 %, 2 → 66 %, 1 → 33 %, 0 → 0 % (all cash).
+# All functions below are pure (no Dash dependency); the plugin in
+# strategies/riskoff.py only orchestrates them.
+# ---------------------------------------------------------------------------
+
+
+def load_daily_closes(base_url: str, filenames: list[str], df_meta: pd.DataFrame) -> pd.DataFrame:
+    """Load and combine *daily* close prices for the given asset filenames.
+
+    Mirrors load_monthly_closes but keeps the full daily resolution and the
+    full available history (no date-window restriction).  The extra history is
+    required so signals with long look-back windows (e.g. the 200-day moving
+    average and the year-to-date anchor) have enough warm-up data before the
+    backtest window begins.
+
+    Parameters
+    ----------
+    base_url  – root URL/path where the parquet files are hosted.
+    filenames – list of parquet file names (e.g. ['aapl.parquet']).
+    df_meta   – master metadata table mapping filenames to symbols/names.
+
+    Returns
+    -------
+    DataFrame with one column per successfully loaded asset (named by symbol)
+    and one row per trading day. Missing days are NaN. Empty if nothing loaded.
+    """
+    # Accumulate individual daily price series here before combining them.
+    series = {}
+
+    for filename in filenames:
+        try:
+            # Look up the asset's metadata row by its filename; skip unknowns.
+            meta = df_meta[df_meta['filename'] == filename]
+            if meta.empty:
+                continue
+
+            symbol = meta.iloc[0]['symbol']
+
+            ohlcv = pd.read_parquet(f"{base_url}/{filename}")
+            close = ohlcv['Close']
+
+            # Normalise to UTC so all series share a common timezone, matching
+            # the timezone handling in load_monthly_closes / _get_monthly_range.
+            assert isinstance(close.index, pd.DatetimeIndex)
+            if close.index.tz is None:
+                close.index = close.index.tz_localize('UTC')
+            else:
+                close.index = close.index.tz_convert('UTC')
+
+            # Drop rows with no close (gaps before listing). Keep daily cadence.
+            close = close.dropna()
+            if not close.empty:
+                series[symbol] = close
+
+        except Exception:
+            # Log the full traceback but keep processing remaining filenames.
+            log.exception("Failed to load %s", filename)
+
+    if not series:
+        return pd.DataFrame()
+
+    # Outer-join on the date index and sort chronologically so rolling windows
+    # and as-of look-ups operate on a monotonically increasing index.
+    return pd.DataFrame(series).sort_index()
+
+
+def build_equal_weight_index(daily_df: pd.DataFrame) -> pd.Series:
+    """Combine per-asset daily closes into one equal-weight price index.
+
+    Each day's basket return is the simple mean of the individual assets'
+    daily returns (averaging only over assets that have a price that day, so
+    mixed start dates and single-asset baskets both work).  Compounding those
+    returns yields a single index series (rebased to 100) on which the three
+    market signals are evaluated.
+
+    Parameters
+    ----------
+    daily_df – DataFrame of daily closes, one column per asset.
+
+    Returns
+    -------
+    Series indexed by trading day with the equal-weight index value (base 100),
+    or an empty Series when *daily_df* is empty.
+    """
+    if daily_df.empty:
+        return pd.Series(dtype=float)
+
+    # Treat non-positive prices as missing so they never enter a return.
+    prices = daily_df.where(daily_df > 0)
+
+    # Per-asset day-over-day returns, then the cross-sectional mean per day.
+    # mean(axis=1) skips NaN, so the average spans only the assets present.
+    basket_return = prices.pct_change().mean(axis=1)
+
+    # The first row (and any all-NaN row) has no return; fill with 0 so the
+    # cumulative product is not poisoned to NaN. cumprod of (1+r) rebased to 100
+    # reduces to price/price0*100 for a single asset.
+    index = (1.0 + basket_return.fillna(0.0)).cumprod() * 100.0
+    return index
+
+
+def _sma_trend_signal(index: pd.Series, window: int = 200) -> pd.Series:
+    """Signal 1 – index above its simple moving average over *window* days.
+
+    During the warm-up period the rolling mean is NaN; a comparison against
+    NaN evaluates to False in pandas, which is exactly the conservative
+    "not invested" default we want (no explicit fillna needed).
+    """
+    sma = index.rolling(window=window).mean()
+    return index > sma
+
+
+def _ytd_return_signal(index: pd.Series) -> pd.Series:
+    """Signal 2 – running year-to-date return positive.
+
+    Compares each day's index value to the index value on the first trading
+    day of the *same* calendar year.  The signal flips to False as soon as the
+    basket falls back below its yearly starting value.  Calendar-year anchored,
+    so it needs no window parameter and never produces NaN.
+    """
+    assert isinstance(index.index, pd.DatetimeIndex)
+    # transform('first') broadcasts each year's first value back onto every
+    # row of that year, so the comparison is elementwise.
+    year_start = index.groupby(index.index.year).transform('first')
+    return index > year_start
+
+
+def _first_n_days_signal(index: pd.Series, n: int = 10) -> pd.Series:
+    """Signal 3 – "January barometer": first *n* trading days of the year up.
+
+    For each calendar year the close on the n-th trading day is compared to the
+    close on the first trading day; the resulting boolean is broadcast to every
+    day of that year (it is fixed once the first n days are known, ~mid-January,
+    so it is always available at month-ends and introduces no look-ahead).
+    A partial year without n trading days is treated as False (conservative).
+    """
+    assert isinstance(index.index, pd.DatetimeIndex)
+
+    # Start all-False so partial years (and any gaps) default to "not invested".
+    result = pd.Series(False, index=index.index)
+
+    for _, group in index.groupby(index.index.year):
+        if len(group) >= n:
+            positive = bool(group.iloc[n - 1] > group.iloc[0])
+        else:
+            positive = False
+        # Stamp the year's verdict onto all of that year's days.
+        result.loc[group.index] = positive
+
+    return result
+
+
+def compute_riskoff_signals(index: pd.Series, sma_window: int = 200, first_n_days: int = 10) -> pd.Series:
+    """Combine the three boolean signals into a positive-signal count (0..3).
+
+    Parameters
+    ----------
+    index        – equal-weight basket index (from build_equal_weight_index).
+    sma_window   – look-back window for the moving-average trend signal.
+    first_n_days – number of January trading days for the barometer signal.
+
+    Returns
+    -------
+    Integer Series in [0, 3]: the number of positive signals on each day.
+    Dividing by 3 yields the target invested fraction.
+    """
+    sma_sig = _sma_trend_signal(index, sma_window)
+    ytd_sig = _ytd_return_signal(index)
+    jan_sig = _first_n_days_signal(index, first_n_days)
+    return sma_sig.astype(int) + ytd_sig.astype(int) + jan_sig.astype(int)
+
+
+def _rebalance_to_target(
+    holdings: dict[str, float], cash: float, prices: pd.Series, inv_frac: float
+) -> tuple[dict[str, float], float, float]:
+    """Rebalance the whole portfolio to a target invested fraction for one month.
+
+    The target invested value is *inv_frac* × total portfolio value, spread
+    equally across all assets that have a valid price this month; the remainder
+    stays in cash.  Extracted into its own helper to keep simulate_riskoff
+    below the flake8 complexity threshold.
+
+    Parameters
+    ----------
+    holdings – units currently held per asset symbol.
+    cash     – current uninvested cash.
+    prices   – this month's close price per asset (may contain NaN/zero).
+    inv_frac – target fraction of the portfolio to be invested (0.0..1.0).
+
+    Returns
+    -------
+    (new_holdings, new_cash, total_value) where total_value is the portfolio's
+    worth this month (cash plus the value of all priced holdings).
+    """
+    # Assets that can actually be traded this month (valid, positive price).
+    priced = {str(c): float(p) for c, p in prices.items() if pd.notna(p) and p > 0}
+
+    # Total worth = cash + value of currently priced holdings.
+    invested_value = sum(holdings[c] * priced[c] for c in priced)
+    total_value = cash + invested_value
+
+    if not priced:
+        # Nothing tradable this month: carry holdings and cash unchanged.
+        return holdings, cash, total_value
+
+    # Buy the target invested amount, split equally across priced assets.
+    target_invested = inv_frac * total_value
+    per_asset = target_invested / len(priced)
+
+    new_holdings = dict(holdings)
+    for c in priced:
+        new_holdings[c] = per_asset / priced[c]
+
+    new_cash = total_value - target_invested
+    return new_holdings, new_cash, total_value
+
+
+def simulate_riskoff(
+    price_df: pd.DataFrame,
+    invested_fraction_at_month: pd.Series,
+    initial_investment: float = INITIAL_INVESTMENT,
+) -> tuple[pd.Series, float]:
+    """Simulate the lump-sum Risk-Off strategy month by month.
+
+    The full *initial_investment* starts as cash.  Each month the portfolio is
+    rebalanced to the invested fraction supplied for that month (selling when
+    the fraction drops, buying when it rises); cash earns 0 %.  There are no
+    additional contributions, so *total_invested* equals the initial lump sum.
+
+    Parameters
+    ----------
+    price_df                    – monthly close prices (one column per asset).
+    invested_fraction_at_month  – Series of target invested fractions (0..1);
+                                  reindexed onto price_df's index, with missing
+                                  months defaulting to 0.0 (fully in cash).
+    initial_investment          – one-off lump sum provided as cash at the start.
+
+    Returns
+    -------
+    (portfolio_series, total_invested)
+      portfolio_series – Series of portfolio value (holdings + cash) per month.
+      total_invested   – the initial lump sum (constant; no contributions).
+    """
+    holdings: dict[str, float] = {str(col): 0.0 for col in price_df.columns}
+    cash = initial_investment
+
+    # Align the per-month fractions to the price index; unknown months stay in
+    # cash (0.0) as a conservative fallback.
+    inv = invested_fraction_at_month.reindex(price_df.index).fillna(0.0)
+
+    values: list[float] = []
+    for i, (_, prices) in enumerate(price_df.iterrows()):
+        inv_frac = float(inv.iloc[i])
+        holdings, cash, value = _rebalance_to_target(holdings, cash, prices, inv_frac)
+        values.append(value)
+
+    return pd.Series(values, index=price_df.index), initial_investment
 
 
 def _get_monthly_range(base_url: str, filename: str, df_meta: pd.DataFrame) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:

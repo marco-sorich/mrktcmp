@@ -13,7 +13,11 @@ A Plotly Dash web application for market data visualisation and backtesting acro
 - Build two asset baskets (Basket A and Basket B) from any combination of assets
 - Date range slider auto-calculated from the overlapping history of all selected assets
 - Pluggable backtesting strategies — each basket can use a different strategy with its own configurable parameters
-- Monthly DCA simulation (default): 1,000 € invested per basket per month, split equally across available assets
+- **DCA** (default): a fixed amount (1,000 €) invested per basket every month, split equally across available assets
+- **Risk-Off Signale**: a one-off lump sum is held as cash and tactically shifted between the basket and cash each month.
+  Three market signals are evaluated on the basket as a whole — 200-day trend, year-to-date return, and the January
+  barometer (first 10 trading days of the year) — and the number of *positive* signals sets the invested fraction in
+  thirds (3 → 100 %, 2 → 66 %, 1 → 33 %, 0 → all cash)
 - Side-by-side performance metrics: Total Return, CAGR, Sharpe Ratio, Max. Drawdown, Volatility, Calmar Ratio, and more
 
 ## Requirements
@@ -57,11 +61,18 @@ Open `http://127.0.0.1:8050/` in your browser.
 
 ## QA Checks
 
+Install the development dependencies first (this also pins **mypy 2.1.0**, the
+version CI runs — older 1.x releases silently miss some errors):
+
+```bash
+pip install -r requirements_dev.txt
+```
+
 ```bash
 # Linting
 flake8 --max-complexity=10 --max-line-length=127
 
-# Type checking
+# Type checking (mypy 2.1.0)
 mypy --explicit-package-bases --ignore-missing-imports src/backtest.py src/strategies/
 mypy --explicit-package-bases --ignore-missing-imports tests/test_backtest.py tests/test_strategies.py
 
@@ -74,12 +85,15 @@ pytest
 ```
 src/
   app.py              # Dash application entry point
-  backtest.py         # DCA simulation engine: load_monthly_closes, simulate_dca, compute_metrics
+  backtest.py         # pure simulation engines: DCA (load_monthly_closes, simulate_dca)
+                      #   and Risk-Off (load_daily_closes, build_equal_weight_index,
+                      #   compute_riskoff_signals, simulate_riskoff); shared compute_metrics
   strategies/
     __init__.py       # imports all plugins to trigger registration at startup
     base.py           # BacktestStrategy ABC and ConfigParam dataclass
     registry.py       # @register decorator, get_strategy(), list_strategies()
     dca.py            # Dollar-Cost Averaging strategy plugin
+    riskoff.py        # Risk-Off signal strategy plugin (lump sum + tactical cash)
   callbacks/
     backtesting.py    # Backtesting tab callbacks
     chart.py          # Market Data tab callbacks

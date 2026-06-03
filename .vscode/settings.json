@@ -5,5 +5,13 @@
             "label": "▶ Gunicorn",
             "task": "Start Gunicorn"
         }
+    ],
+    // Use mypy 2.1.0 installed in the environment (pinned in requirements_dev.txt)
+    // instead of the version bundled with the ms-python.mypy-type-checker
+    // extension, so the editor reports exactly the same errors as CI.
+    "mypy-type-checker.importStrategy": "fromEnvironment",
+    "mypy-type-checker.args": [
+        "--explicit-package-bases",
+        "--ignore-missing-imports"
     ]
 }

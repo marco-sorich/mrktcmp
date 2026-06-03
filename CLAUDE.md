@@ -16,9 +16,10 @@ gunicorn src.app:server
 # Linting
 flake8 --max-complexity=10 --max-line-length=127
 
-# Type check
-mypy src/backtest.py
-mypy tests/test_backtest.py
+# Type check (requires mypy 2.1.0 — pinned in requirements_dev.txt; older 1.x
+# releases silently miss errors that CI's mypy 2.1.0 reports)
+mypy --explicit-package-bases --ignore-missing-imports src/backtest.py src/strategies/
+mypy --explicit-package-bases --ignore-missing-imports tests/test_backtest.py tests/test_strategies.py
 
 # Tests
 pytest
@@ -62,8 +63,14 @@ DASH_DEBUG=false
 **`src/config.py` — startup singleton**
 Loads `.env`, configures logging, fetches `master.parquet` from `BASE_URL` into the module-level global `df` (a DataFrame). Exposes `base_url`, `assetsClasses`, `df`, and `log` to the rest of the app. All other modules import this as `import src.config as _config`.
 
-**`src/backtest.py` — pure DCA engine**
-No Dash dependencies. Call chain: `run_backtest()` → `load_monthly_closes()` → `simulate_dca()` → `compute_metrics()`. Separately, `get_common_date_range()` finds the overlapping history across both baskets. All parquet I/O happens here.
+**`src/backtest.py` — pure simulation engines (no Dash dependencies)**
+Two strategies share this module; all parquet I/O happens here.
+- DCA: `run_backtest()` → `load_monthly_closes()` → `simulate_dca()` → `compute_metrics()`.
+- Risk-Off: `load_daily_closes()` (full daily history for look-back) → `build_equal_weight_index()` → `compute_riskoff_signals()` (three booleans `_sma_trend_signal`/`_ytd_return_signal`/`_first_n_days_signal`, summed to a 0..3 positive-signal count) → `simulate_riskoff()` (lump sum rebalanced between basket and cash via `_rebalance_to_target()`).
+- `compute_metrics()` is shared by both (for the lump-sum path `total_invested` is the initial investment). `get_common_date_range()` finds the overlapping history across both baskets.
+
+**`src/strategies/` — strategy plugin system**
+`base.py` defines the `BacktestStrategy` ABC and the `ConfigParam` dataclass (GUI-rendered, self-validating params). `registry.py` holds the `@register` decorator and `get_strategy()`/`list_strategies()`/`get_all_strategy_info()`. Plugins are thin orchestrators over `backtest.py`: `dca.py` (DCA) and `riskoff.py` (Risk-Off Signale). `__init__.py` imports every plugin module so importing the package registers all strategies. Each `run()` returns `(pd.Series | None, dict | None)` with the same 11 metric keys as `compute_metrics()`.
 
 **`src/callbacks/`**
 - `chart.py`: Market Data tab — asset class filter, search, candlestick+volume chart, y-axis sync on zoom

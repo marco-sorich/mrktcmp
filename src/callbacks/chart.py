@@ -89,10 +89,13 @@ from src.utils import log_time
     # Input: fire this callback whenever the 'value' of assetclasses-type
     # changes (i.e. whenever the user clicks a different radio button).
     Input('assetclasses-type', 'value'),
-    # running: while this callback is executing, Dash automatically sets
-    # asset-type.disabled = True; when done, it restores it to False.
-    # This prevents the user from typing in the dropdown while results load.
-    running=[(Output('asset-type', 'disabled'), True, False)],
+    # NOTE: do NOT add a `running=[...]` argument here. `running` is a
+    # background-callback feature (it only applies when background=True). On a
+    # regular synchronous callback, dash-renderer sets the "running" value
+    # (disabled=True) but never applies the "runningOff" reset (disabled=False),
+    # so asset-type.disabled would stay stuck at True and the dropdown would
+    # never re-enable. This callback is a fast in-memory filter and already
+    # returns the correct `disabled` value below, so no `running` is needed.
 )
 @log_time
 def update_asset_class(asset_class):
