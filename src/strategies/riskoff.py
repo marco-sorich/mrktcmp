@@ -102,7 +102,7 @@ class RiskOffStrategy(BacktestStrategy):
         end_date: pd.Timestamp,
         df_meta: pd.DataFrame,
         params: dict[str, int | float | str],
-    ) -> tuple[pd.Series | None, dict[str, str] | None]:
+    ) -> tuple[pd.Series | None, dict[str, str] | None, list[dict] | None]:
         # Merge caller-supplied values with schema defaults.
         resolved = self.resolve_params(params)
 
@@ -116,7 +116,7 @@ class RiskOffStrategy(BacktestStrategy):
         #    The extra history gives the long look-back signals enough warm-up.
         daily_df = load_daily_closes(base_url, filenames, df_meta)
         if daily_df.empty:
-            return None, None
+            return None, None, None
 
         index = build_equal_weight_index(daily_df)
         signals = compute_riskoff_signals(index, sma_window, first_n_days)
@@ -130,12 +130,12 @@ class RiskOffStrategy(BacktestStrategy):
         # 2. Monthly closes restricted to the requested window (bounds inclusive).
         price_df = load_monthly_closes(base_url, filenames, df_meta)
         if price_df.empty:
-            return None, None
+            return None, None, None
 
         mask = (price_df.index >= start_date) & (price_df.index <= end_date)
         price_df = price_df.loc[mask].dropna(how='all', axis=1)
         if price_df.empty:
-            return None, None
+            return None, None, None
 
         # Forward-fill short price gaps (≤3 months), as in the DCA path.
         price_df = price_df.ffill(limit=3)
@@ -146,12 +146,13 @@ class RiskOffStrategy(BacktestStrategy):
             index=price_df.index,
         )
 
-        portfolio, total_invested = simulate_riskoff(price_df, inv_frac, initial_investment)
+        # The event ledger is returned raw; run_backtest() adds the derived KPIs.
+        portfolio, total_invested, events = simulate_riskoff(price_df, inv_frac, initial_investment)
         metrics = compute_metrics(portfolio, total_invested)
 
         # compute_metrics returns {} when the series is too short (<3 months);
-        # treat that as a failure so callers get either a full result or (None, None).
+        # treat that as a failure so callers get either a full result or (None, None, None).
         if not metrics:
-            return None, None
+            return None, None, None
 
-        return portfolio, metrics
+        return portfolio, metrics, events

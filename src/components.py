@@ -36,7 +36,13 @@ import src.config as _config
 
 # Shared style dicts imported from styles.py so all components stay visually
 # consistent without duplicating the same dict literals.
-from src.styles import _BASKET_ITEM_STYLE, _BTN_SMALL, _METRIC_TABLE_STYLE
+from src.styles import (
+    _BASKET_ITEM_STYLE,
+    _BTN_SMALL,
+    _METRIC_TABLE_STYLE,
+    _TX_SCROLL_STYLE,
+    _TX_BTN_STYLE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -371,3 +377,163 @@ def _metrics_table(metrics_a, metrics_b):
     ]
 
     return html.Table(rows, style=_METRIC_TABLE_STYLE)
+
+
+# ---------------------------------------------------------------------------
+# Helper: per-run transaction / event table
+# ---------------------------------------------------------------------------
+
+def _fmt_eur(value: float) -> str:
+    """Format a number as euros with a thousands separator and no decimals."""
+    return f"{value:,.0f}"
+
+
+def _fmt_pct(value: float) -> str:
+    """Format a fraction (e.g. 0.123) as a signed percentage ('+12.3%')."""
+    return f"{value * 100:+.1f}%"
+
+
+def _transaction_columns(events: list[dict]) -> list[str]:
+    """Return the per-asset symbol columns, as the sorted union over all events.
+
+    Symbols are collected across every event so the table has a stable column
+    for each asset that was ever traded, even if a given month only touched a
+    subset of them.
+    """
+    symbols: set[str] = set()
+    for ev in events:
+        symbols.update(ev['legs'].keys())
+    return sorted(symbols)
+
+
+def _transaction_row(ev: dict, symbols: list[str], run_id: str, index: int) -> 'html.Tr':
+    """Build one table row for a single event.
+
+    The row carries a pattern-matching id (for the row-click → chart-marker
+    callback) and a data-index attribute (so the graph-click clientside
+    callback can scroll to and highlight it).
+    """
+    # Per-asset cells: signed share count when traded that month, else blank.
+    asset_cells = []
+    for sym in symbols:
+        leg = ev['legs'].get(sym)
+        text = f"{leg['shares']:+.4f}" if leg else ''
+        asset_cells.append(html.Td(text, style={'textAlign': 'right', 'padding': '3px 8px'}))
+
+    # Profit/loss is coloured green when positive, red when negative.
+    pnl = ev['pnl']
+    pnl_color = '#1a7f37' if pnl >= 0 else '#c0392b'
+
+    cells = [
+        html.Td(ev['date'].strftime('%b %Y'), style={'padding': '3px 8px', 'whiteSpace': 'nowrap'}),
+        html.Td(_fmt_eur(ev['value_pre_trade']), style={'textAlign': 'right', 'padding': '3px 8px'}),
+        *asset_cells,
+        html.Td(_fmt_eur(ev['cash']), style={'textAlign': 'right', 'padding': '3px 8px'}),
+        html.Td(_fmt_eur(ev['value_post_trade']), style={'textAlign': 'right', 'padding': '3px 8px'}),
+        html.Td(_fmt_eur(ev['cum_invested']), style={'textAlign': 'right', 'padding': '3px 8px'}),
+        html.Td(f"{pnl:+,.0f}", style={'textAlign': 'right', 'padding': '3px 8px', 'color': pnl_color}),
+        html.Td(_fmt_pct(ev['pnl_pct']), style={'textAlign': 'right', 'padding': '3px 8px', 'color': pnl_color}),
+        html.Td(_fmt_pct(ev['equity_pct']), style={'textAlign': 'right', 'padding': '3px 8px'}),
+        html.Td(_fmt_pct(ev['period_return_pct']), style={'textAlign': 'right', 'padding': '3px 8px'}),
+    ]
+    return html.Tr(
+        cells,
+        id={'type': 'bt-tx-row', 'run': run_id, 'index': index},
+        n_clicks=0,
+        className='bt-tx-row',
+        # data-index lets the graph-click clientside callback locate this row.
+        **{'data-index': str(index)},
+    )
+
+
+def _transaction_table(events: 'list[dict] | None', run_id: str) -> 'html.Div':
+    """Build the scrollable transaction table for one backtest run.
+
+    Parameters
+    ----------
+    events – the run's enriched event ledger, [] if it produced none, or None
+             when the strategy does not generate a ledger at all.
+    run_id – stable run key ('a' / 'b' …) used in row ids and the wrapper id.
+
+    Returns
+    -------
+    html.Div wrapping a dbc.Table (or a placeholder message).
+    """
+    if events is None:
+        return html.Div(
+            html.P('No transaction details available for this strategy.',
+                   style={'color': '#aaa', 'fontStyle': 'italic', 'margin': '8px'}),
+            id=f'bt-tx-{run_id}',
+        )
+    if not events:
+        return html.Div(
+            html.P('No transactions.', style={'color': '#aaa', 'fontStyle': 'italic', 'margin': '8px'}),
+            id=f'bt-tx-{run_id}',
+        )
+
+    symbols = _transaction_columns(events)
+    header_style = {'textAlign': 'right', 'padding': '4px 8px',
+                    'position': 'sticky', 'top': '0', 'background': '#f0f0f0'}
+    header = html.Thead(html.Tr([
+        html.Th('Date', style={**header_style, 'textAlign': 'left'}),
+        html.Th('Pre-Trade Value', style=header_style),
+        *[html.Th(sym, style=header_style) for sym in symbols],
+        html.Th('Cash', style=header_style),
+        html.Th('Post-Trade Value', style=header_style),
+        html.Th('Invested', style=header_style),
+        html.Th('P&L (€)', style=header_style),
+        html.Th('Return %', style=header_style),
+        html.Th('Equity %', style=header_style),
+        html.Th('Period %', style=header_style),
+    ]))
+    body = html.Tbody([
+        _transaction_row(ev, symbols, run_id, i) for i, ev in enumerate(events)
+    ])
+
+    table = dbc.Table(
+        [header, body],
+        bordered=False, hover=True, striped=True, size='sm',
+        style={'fontSize': '13px', 'marginBottom': '0'},
+    )
+    # The wrapper div is the scroll container the buttons/clientside act on.
+    return html.Div(table, id=f'bt-tx-{run_id}', style=_TX_SCROLL_STYLE)
+
+
+def _transaction_section(runs: list) -> 'list':
+    """Build the dbc.Tabs of transaction tables, one tab per backtest run.
+
+    Driven entirely by the *runs* list, so the number of tabs follows the
+    number of comparisons with no structural change.  Each tab holds a
+    scroll-to-top / scroll-to-bottom button pair and the run's table.
+
+    Parameters
+    ----------
+    runs – list of backtest.BacktestRun; only runs with a portfolio (i.e. that
+           actually produced results) are shown.
+
+    Returns
+    -------
+    Empty list when there are no runs, otherwise a single-element list holding
+    the dbc.Tabs (a list keeps the layout container's children type uniform).
+    """
+    active = [r for r in runs if r.portfolio is not None]
+    if not active:
+        return []
+
+    tabs = []
+    for run in active:
+        controls = html.Div([
+            html.Button('⤒ Top', id={'type': 'bt-tx-top', 'run': run.run_id},
+                        n_clicks=0, style=_TX_BTN_STYLE),
+            html.Button('⤓ Bottom', id={'type': 'bt-tx-bottom', 'run': run.run_id},
+                        n_clicks=0, style=_TX_BTN_STYLE),
+        ], style={'margin': '8px 0'})
+        tabs.append(dbc.Tab(
+            html.Div([controls, _transaction_table(run.events, run.run_id)]),
+            tab_id=f'tx-{run.run_id}',
+            label=run.label,
+            # Tab labels echo the run colour so they line up with the chart.
+            label_style={'color': run.color},
+        ))
+
+    return [dbc.Tabs(tabs, id='bt-tx-tabs', active_tab=f'tx-{active[0].run_id}')]

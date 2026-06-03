@@ -19,6 +19,10 @@ A Plotly Dash web application for market data visualisation and backtesting acro
   barometer (first 10 trading days of the year) — and the number of *positive* signals sets the invested fraction in
   thirds (3 → 100 %, 2 → 66 %, 1 → 33 %, 0 → all cash)
 - Side-by-side performance metrics: Total Return, CAGR, Sharpe Ratio, Max. Drawdown, Volatility, Calmar Ratio, and more
+- Transaction table below the chart, with one tab per backtest run: every buy/sell event with pre-/post-trade value,
+  per-asset trade, cash, and running KPIs (invested, P&L, equity exposure, period return). Scrollable (~30-row viewport)
+  with jump-to-top/bottom buttons. Clicking a point on the chart highlights and scrolls to the matching row; clicking a
+  row marks the matching point on the chart.
 
 ## Requirements
 
@@ -98,10 +102,13 @@ src/
     backtesting.py    # Backtesting tab callbacks
     chart.py          # Market Data tab callbacks
   config.py           # startup singleton: logging, env vars, master.parquet
-  components.py       # reusable UI component builders
+  components.py       # reusable UI builders (baskets, metrics + transaction tables)
   layout.py           # top-level Dash layout
   styles.py           # shared inline style dicts
   utils.py            # @log_time decorator
+  assets/
+    layout.css        # tab icons, results layout, transaction-row highlight
+    transactions.js   # clientside scroll / graph-click interactions for the tables
 tests/
   test_app.py
   test_backtest.py
@@ -144,8 +151,10 @@ tests/
            # so that params={} (no user input) always works correctly.
            resolved = self.resolve_params(params)
            my_param = float(resolved['my_param'])
-           # ... compute portfolio (pd.Series) and metrics (dict[str, str]) ...
-           return portfolio, metrics
+           # ... compute portfolio (pd.Series), metrics (dict[str, str]), and
+           #     optionally an event ledger (list[dict]); return None for events
+           #     if the strategy has no transactions to show.
+           return portfolio, metrics, events
    ```
 
 2. Register the plugin by adding one import line to `src/strategies/__init__.py`:
@@ -157,7 +166,8 @@ tests/
 3. Add tests in `tests/test_strategies.py` following the existing `TestDCAStrategy` pattern.
 
 **Plugin contract:**
-- `run()` must return `(pd.Series | None, dict[str, str] | None)`.
+- `run()` must return `(pd.Series | None, dict[str, str] | None, list[dict] | None)`.
 - The metrics dict must contain exactly the same 11 keys as `compute_metrics()` in `backtest.py`.
+- The third element is the raw event ledger for the transaction table (or `None`); `run_backtest()` adds the derived KPIs.
 - Every `ConfigParam` must have a `default` value so the user is never forced to enter anything.
 - For `int`/`float` params, `min_value` and `max_value` are required (the GUI uses them to prevent invalid input).

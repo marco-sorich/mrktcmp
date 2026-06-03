@@ -101,6 +101,11 @@ app = dash.Dash(
     __name__,
     meta_tags=[{"name": "viewport", "content": "width=device-width, initial-scale=1"}],
     external_stylesheets=[dbc.themes.BOOTSTRAP, dbc.icons.BOOTSTRAP],
+    # The transaction-table section (bt-tx-tabs and its rows) is created at
+    # runtime by the backtest callback, so its component IDs are absent from
+    # the initial layout.  This flag tells Dash not to reject callbacks that
+    # reference those not-yet-present IDs.
+    suppress_callback_exceptions=True,
 )
 
 # Enable Dash's hot-reload and debug overlay only when DASH_DEBUG=true is set

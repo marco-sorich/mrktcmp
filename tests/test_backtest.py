@@ -13,6 +13,8 @@ from src.backtest import (  # noqa: E402
     run_backtest,
     get_common_date_range,
     _get_monthly_range,
+    _enrich_events,
+    BacktestRun,
 )
 
 # ---------------------------------------------------------------------------
@@ -107,23 +109,24 @@ class TestLoadMonthlyCloses:
 
 class TestSimulateDca:
     def test_empty_dataframe_returns_empty_series_and_zero_invested(self):
-        portfolio, total = simulate_dca(pd.DataFrame())
+        portfolio, total, events = simulate_dca(pd.DataFrame())
         assert portfolio.empty
         assert total == 0.0
+        assert events == []
 
     def test_single_asset_total_invested_equals_monthly_times_periods(self):
         df = pd.DataFrame({'AAPL': [100.0] * 12}, index=_MONTHLY_IDX[:12])
-        _, total = simulate_dca(df, monthly_investment=1000.0)
+        _, total, _ = simulate_dca(df, monthly_investment=1000.0)
         assert total == pytest.approx(12 * 1000.0)
 
     def test_single_asset_flat_price_first_month_value(self):
         df = pd.DataFrame({'AAPL': [100.0] * 3}, index=_MONTHLY_IDX[:3])
-        portfolio, _ = simulate_dca(df, monthly_investment=1000.0)
+        portfolio, _, _ = simulate_dca(df, monthly_investment=1000.0)
         assert portfolio.iloc[0] == pytest.approx(1000.0)
 
     def test_single_asset_flat_price_value_grows_linearly(self):
         df = pd.DataFrame({'AAPL': [100.0] * 4}, index=_MONTHLY_IDX[:4])
-        portfolio, _ = simulate_dca(df, monthly_investment=1000.0)
+        portfolio, _, _ = simulate_dca(df, monthly_investment=1000.0)
         # After n months at price 100 with 1000/month: n * 10 shares * 100 = n * 1000
         for i, expected in enumerate([1000.0, 2000.0, 3000.0, 4000.0]):
             assert portfolio.iloc[i] == pytest.approx(expected)
@@ -133,7 +136,7 @@ class TestSimulateDca:
             {'AAPL': [100.0], 'BTC': [200.0]},
             index=_MONTHLY_IDX[:1],
         )
-        portfolio, total = simulate_dca(df, monthly_investment=1000.0)
+        portfolio, total, _ = simulate_dca(df, monthly_investment=1000.0)
         # 500 in AAPL (5 shares) + 500 in BTC (2.5 shares) = 500 + 500 = 1000
         assert total == pytest.approx(1000.0)
         assert portfolio.iloc[0] == pytest.approx(1000.0)
@@ -143,7 +146,7 @@ class TestSimulateDca:
             {'AAPL': [100.0, 100.0], 'BTC': [np.nan, 200.0]},
             index=_MONTHLY_IDX[:2],
         )
-        portfolio, total = simulate_dca(df, monthly_investment=1000.0)
+        portfolio, total, _ = simulate_dca(df, monthly_investment=1000.0)
         # Month 1: only AAPL → invest full 1000 in AAPL
         # Month 2: both → invest 500 each; AAPL holdings = 10 + 5 = 15 shares
         assert total == pytest.approx(2000.0)
@@ -152,14 +155,100 @@ class TestSimulateDca:
     def test_output_index_matches_input_index(self):
         idx = _MONTHLY_IDX[:6]
         df = pd.DataFrame({'AAPL': [100.0] * 6}, index=idx)
-        portfolio, _ = simulate_dca(df)
+        portfolio, _, _ = simulate_dca(df)
         assert list(portfolio.index) == list(idx)
 
     def test_rising_prices_produce_profit(self):
         prices = [100.0 * (1.05 ** i) for i in range(12)]
         df = pd.DataFrame({'AAPL': prices}, index=_MONTHLY_IDX[:12])
-        portfolio, total = simulate_dca(df, monthly_investment=1000.0)
+        portfolio, total, _ = simulate_dca(df, monthly_investment=1000.0)
         assert portfolio.iloc[-1] > total
+
+
+# ---------------------------------------------------------------------------
+# simulate_dca – event ledger
+# ---------------------------------------------------------------------------
+
+class TestSimulateDcaEvents:
+    def test_one_event_per_investing_month(self):
+        df = pd.DataFrame({'AAPL': [100.0] * 4}, index=_MONTHLY_IDX[:4])
+        _, _, events = simulate_dca(df, monthly_investment=1000.0)
+        assert len(events) == 4
+
+    def test_event_records_pre_and_post_trade_value(self):
+        df = pd.DataFrame({'AAPL': [100.0] * 3}, index=_MONTHLY_IDX[:3])
+        _, _, events = simulate_dca(df, monthly_investment=1000.0)
+        # First month: nothing held before, 1000 invested after.
+        assert events[0]['value_pre_trade'] == pytest.approx(0.0)
+        assert events[0]['value_post_trade'] == pytest.approx(1000.0)
+        # post - pre always equals the monthly contribution (the external flow).
+        for ev in events:
+            assert ev['value_post_trade'] - ev['value_pre_trade'] == pytest.approx(1000.0)
+            assert ev['external_flow'] == pytest.approx(1000.0)
+
+    def test_legs_are_positive_buys_split_equally(self):
+        df = pd.DataFrame({'AAPL': [100.0], 'BTC': [200.0]}, index=_MONTHLY_IDX[:1])
+        _, _, events = simulate_dca(df, monthly_investment=1000.0)
+        legs = events[0]['legs']
+        assert set(legs) == {'AAPL', 'BTC'}
+        assert legs['AAPL']['amount'] == pytest.approx(500.0)
+        assert legs['AAPL']['shares'] == pytest.approx(5.0)
+        assert legs['BTC']['shares'] == pytest.approx(2.5)
+        assert all(leg['shares'] > 0 for leg in legs.values())
+
+    def test_month_without_priced_assets_yields_no_event(self):
+        df = pd.DataFrame({'AAPL': [np.nan, 100.0]}, index=_MONTHLY_IDX[:2])
+        _, _, events = simulate_dca(df, monthly_investment=1000.0)
+        assert len(events) == 1
+
+
+# ---------------------------------------------------------------------------
+# _enrich_events
+# ---------------------------------------------------------------------------
+
+class TestEnrichEvents:
+    def _dca_events(self):
+        df = pd.DataFrame({'AAPL': [100.0, 110.0, 121.0]}, index=_MONTHLY_IDX[:3])
+        _, _, events = simulate_dca(df, monthly_investment=1000.0)
+        return _enrich_events(events)
+
+    def test_none_and_empty_pass_through(self):
+        assert _enrich_events(None) is None
+        assert _enrich_events([]) == []
+
+    def test_cum_invested_accumulates_external_flow(self):
+        events = self._dca_events()
+        assert [ev['cum_invested'] for ev in events] == pytest.approx([1000.0, 2000.0, 3000.0])
+
+    def test_pnl_equals_value_minus_cost_basis(self):
+        events = self._dca_events()
+        for ev in events:
+            assert ev['pnl'] == pytest.approx(ev['value_post_trade'] - ev['cum_invested'])
+
+    def test_equity_and_cash_fractions_sum_to_one(self):
+        events = self._dca_events()
+        for ev in events:
+            assert ev['equity_pct'] + ev['cash_pct'] == pytest.approx(1.0)
+            assert ev['cash_pct'] == pytest.approx(0.0)  # DCA holds no cash
+
+    def test_first_period_return_is_zero(self):
+        events = self._dca_events()
+        assert events[0]['period_return_pct'] == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# BacktestRun
+# ---------------------------------------------------------------------------
+
+class TestBacktestRun:
+    def test_holds_provided_fields(self):
+        run = BacktestRun(
+            run_id='a', label='Basket A · DCA', color='#1a56db',
+            portfolio=None, metrics=None, events=None,
+        )
+        assert run.run_id == 'a'
+        assert run.label == 'Basket A · DCA'
+        assert run.color == '#1a56db'
 
 
 # ---------------------------------------------------------------------------
@@ -223,19 +312,22 @@ class TestRunBacktest:
     _END = pd.Timestamp('2023-12-31', tz='UTC')
 
     def test_empty_filenames_returns_none_none(self):
-        p, m = run_backtest(BASE_URL, [], self._START, self._END, SAMPLE_META)
-        assert p is None and m is None
+        p, m, ev = run_backtest(BASE_URL, [], self._START, self._END, SAMPLE_META)
+        assert p is None and m is None and ev is None
 
     def test_no_base_url_returns_none_none(self):
-        p, m = run_backtest(None, ['aapl.parquet'], self._START, self._END, SAMPLE_META)
-        assert p is None and m is None
+        p, m, ev = run_backtest(None, ['aapl.parquet'], self._START, self._END, SAMPLE_META)
+        assert p is None and m is None and ev is None
 
     def test_successful_run_returns_portfolio_and_metrics_dict(self):
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0, n_days=2000)):
-            p, m = run_backtest(BASE_URL, ['aapl.parquet'], self._START, self._END, SAMPLE_META)
+            p, m, ev = run_backtest(BASE_URL, ['aapl.parquet'], self._START, self._END, SAMPLE_META)
         assert p is not None
         assert isinstance(m, dict)
         assert 'CAGR' in m
+        # The built-in DCA path returns an enriched event ledger.
+        assert isinstance(ev, list) and ev
+        assert 'cum_invested' in ev[0]
 
     def test_date_window_filters_portfolio_length(self):
         # 5 years of daily data; request only 2 years → ~24 months returned.
@@ -247,19 +339,19 @@ class TestRunBacktest:
         )
         start = now - pd.DateOffset(years=2)
         with patch('src.backtest.pd.read_parquet', return_value=ohlcv):
-            p, _ = run_backtest(BASE_URL, ['aapl.parquet'], start, now, SAMPLE_META)
+            p, _, _ = run_backtest(BASE_URL, ['aapl.parquet'], start, now, SAMPLE_META)
         assert p is not None
         assert len(p) <= 26  # 2 years ≈ 24 months, allow 2 for edge rounding
 
     def test_start_after_end_returns_none_none(self):
         # Invalid range: start > end → empty DataFrame → (None, None).
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0, n_days=2000)):
-            p, m = run_backtest(
+            p, m, ev = run_backtest(
                 BASE_URL, ['aapl.parquet'],
                 self._END, self._START,   # intentionally reversed
                 SAMPLE_META,
             )
-        assert p is None and m is None
+        assert p is None and m is None and ev is None
 
     def test_both_bounds_respected(self):
         # Data spans 5 years; request the middle year → only ~12 months.
@@ -272,7 +364,7 @@ class TestRunBacktest:
         start = now - pd.DateOffset(years=3)
         end = now - pd.DateOffset(years=2)
         with patch('src.backtest.pd.read_parquet', return_value=ohlcv):
-            p, _ = run_backtest(BASE_URL, ['aapl.parquet'], start, end, SAMPLE_META)
+            p, _, _ = run_backtest(BASE_URL, ['aapl.parquet'], start, end, SAMPLE_META)
         assert p is not None
         assert 10 <= len(p) <= 14   # roughly 12 months
 

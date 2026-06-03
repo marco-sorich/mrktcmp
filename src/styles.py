@@ -38,3 +38,26 @@ _BTN_SMALL = {
 #   width: 100%             – stretch the table to fill its container.
 #   fontSize: 13px          – slightly smaller than body text for compactness.
 _METRIC_TABLE_STYLE = {'borderCollapse': 'collapse', 'width': '100%', 'fontSize': '13px'}
+
+# Approximate pixel height of one transaction-table row, used to size the
+# scroll viewport to ~30 rows (see _TX_SCROLL_STYLE).  A small constant rather
+# than a magic number sprinkled across the code.
+_TX_ROW_PX = 28
+
+# _TX_SCROLL_STYLE wraps a transaction table in a fixed-height, vertically
+# scrollable box.  maxHeight is sized to ~30 data rows plus the sticky header
+# so the table never grows taller than the requested 30-line viewport.
+_TX_SCROLL_STYLE = {
+    'maxHeight': f'{_TX_ROW_PX * 31}px',  # ~30 rows + header
+    'overflowY': 'auto',
+    'border': '1px solid #eee',
+    'borderRadius': '4px',
+}
+
+# _TX_BTN_STYLE styles the "scroll to top / bottom" buttons above each table.
+# Mirrors _BTN_SMALL but with a touch more horizontal padding for the labels.
+_TX_BTN_STYLE = {
+    'padding': '2px 10px', 'fontSize': '12px', 'cursor': 'pointer',
+    'border': '1px solid #ccc', 'borderRadius': '3px', 'background': 'white',
+    'marginRight': '6px',
+}

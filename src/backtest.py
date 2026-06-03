@@ -12,6 +12,9 @@
 # logger (instead of print) lets callers control output format and level.
 import logging
 
+# dataclass: lightweight, typed container used for BacktestRun (see below).
+from dataclasses import dataclass
+
 # TYPE_CHECKING guard avoids a circular import at runtime: strategies/dca.py
 # imports from backtest.py, so importing BacktestStrategy here unconditionally
 # would create a cycle.  Under TYPE_CHECKING the import is only evaluated by
@@ -42,6 +45,95 @@ MONTHLY_INVESTMENT = 1000.0
 # there are no recurring contributions: this amount is the entire capital,
 # tactically shifted between the basket and cash each month.
 INITIAL_INVESTMENT = 10_000.0
+
+# A tiny threshold below which a share delta is treated as "no trade".  Risk-Off
+# rebalances every month, so floating-point noise can produce vanishingly small
+# deltas; ignoring them keeps the transaction ledger to genuine buys/sells.
+_TRADE_EPS = 1e-9
+
+
+@dataclass
+class BacktestRun:
+    """One comparable backtest result: a (basket, strategy) combination.
+
+    This is the generic unit the result UI iterates over.  Today the app
+    produces two runs (basket A and B), but modelling a *list* of runs keeps
+    the chart and transaction tables agnostic of how many comparisons exist or
+    how baskets and strategies are paired, so future N-way comparisons (more
+    baskets, or one basket compared under several strategies) need no change to
+    the rendering code.
+
+    Fields
+    ------
+    run_id    – stable key used in component IDs and the event store
+                (e.g. 'a' / 'b'; any unique string in the future).
+    label     – human-readable name shown on the tab, e.g. 'Basket A · DCA'.
+    color     – trace/tab colour, assigned by position from a palette.
+    portfolio – monthly portfolio value series, or None if the run failed.
+    metrics   – pre-formatted performance metrics, or None.
+    events    – transaction/event ledger (see simulate_dca/simulate_riskoff),
+                or None when the strategy does not produce one.
+    """
+
+    run_id: str
+    label: str
+    color: str
+    portfolio: pd.Series | None
+    metrics: dict[str, str] | None
+    events: list[dict] | None
+
+
+def _value_at(holdings: dict[str, float], prices: pd.Series, columns: "pd.Index | list[str]") -> float:
+    """Total value of *holdings* priced at *prices*, ignoring assets without a price.
+
+    Shared by the simulation engines so the "before" and "after" valuations of
+    an event use exactly the same logic.
+    """
+    return float(sum(
+        holdings[c] * prices[c]
+        for c in columns
+        if pd.notna(prices.get(c, np.nan))  # prices.get returns NaN if key missing
+    ))
+
+
+def _enrich_events(events: list[dict] | None) -> list[dict] | None:
+    """Add derived per-event KPIs to a raw event ledger, in place.
+
+    The simulation engines emit only the base event fields (date, pre/post-trade
+    value, cash, per-asset legs and the external_flow contributed at the event).
+    This single, strategy-agnostic pass derives the running cost basis and the
+    performance KPIs shown in the transaction table, so every strategy gets the
+    same columns computed the same way.
+
+    Added keys
+    ----------
+    cum_invested      – running sum of external_flow (cost basis to date).
+    pnl, pnl_pct      – profit/loss vs cost basis, absolute and relative.
+    equity_pct        – fraction of the post-trade value held in assets.
+    cash_pct          – fraction of the post-trade value held in cash.
+    period_return_pct – return of the post-trade value vs the previous event.
+    """
+    if not events:
+        return events
+
+    cum_invested = 0.0
+    prev_value: float | None = None
+    for ev in events:
+        # cum_invested accumulates the external capital put in.  For DCA this is
+        # the monthly contribution; for Risk-Off the one-off lump sum carried by
+        # the first event.  Defining it via an explicit external_flow (rather
+        # than post-minus-pre value) is what makes the lump-sum cost basis come
+        # out correctly even though Risk-Off rebalancing is value-neutral.
+        cum_invested += ev['external_flow']
+        value = ev['value_post_trade']
+        ev['cum_invested'] = cum_invested
+        ev['pnl'] = value - cum_invested
+        ev['pnl_pct'] = (ev['pnl'] / cum_invested) if cum_invested else 0.0
+        ev['equity_pct'] = ((value - ev['cash']) / value) if value else 0.0
+        ev['cash_pct'] = (ev['cash'] / value) if value else 0.0
+        ev['period_return_pct'] = (value / prev_value - 1.0) if prev_value else 0.0
+        prev_value = value
+    return events
 
 
 def load_monthly_closes(base_url: str, filenames: list[str], df_meta: pd.DataFrame) -> pd.DataFrame:
@@ -119,7 +211,9 @@ def load_monthly_closes(base_url: str, filenames: list[str], df_meta: pd.DataFra
     return pd.DataFrame(series)
 
 
-def simulate_dca(price_df: pd.DataFrame, monthly_investment: float = MONTHLY_INVESTMENT) -> tuple[pd.Series, float]:
+def simulate_dca(
+    price_df: pd.DataFrame, monthly_investment: float = MONTHLY_INVESTMENT
+) -> tuple[pd.Series, float, list[dict]]:
     """Simulate monthly DCA: invest a fixed amount each month, split equally
     across all assets that have a valid price that month.
 
@@ -130,9 +224,12 @@ def simulate_dca(price_df: pd.DataFrame, monthly_investment: float = MONTHLY_INV
 
     Returns
     -------
-    (portfolio_series, total_invested)
+    (portfolio_series, total_invested, events)
       portfolio_series – Series of portfolio value at each month-end.
       total_invested   – cumulative EUR put in (excludes months with no data).
+      events           – per-event transaction ledger; one entry per month in
+                         which a purchase occurred (see module docs for the
+                         dict shape).  KPIs are added later by _enrich_events.
     """
     # holdings maps each asset symbol to the number of units (shares/coins)
     # currently owned. Starts at zero for every asset.
@@ -141,20 +238,26 @@ def simulate_dca(price_df: pd.DataFrame, monthly_investment: float = MONTHLY_INV
     # Collect the portfolio's total value at the end of each month.
     values = []
 
+    # Raw transaction ledger (one entry per investing month).
+    events: list[dict] = []
+
     # Running total of money actually deposited. This grows by
     # monthly_investment every month where at least one asset has a price.
     total_invested = 0.0
 
     # Iterate over every month in chronological order.
-    # price_df.iterrows() yields (index_value, Series_of_prices) pairs.
-    # The underscore '_' discards the date index since we only need prices here.
-    for _, prices in price_df.iterrows():
+    # price_df.iterrows() yields (date, Series_of_prices) pairs.
+    for date, prices in price_df.iterrows():
 
         # Build a dict of assets that can actually be bought this month.
         # A NaN price means the data feed had a gap; a zero price means the
         # asset was suspended or delisted – both should be skipped.
         available: dict[str, float] = {str(c): float(p) for c, p in prices.items() if pd.notna(p) and p > 0}
 
+        # Value of existing holdings at this month's prices, BEFORE buying.
+        value_pre_trade = _value_at(holdings, prices, price_df.columns)
+
+        legs: dict[str, dict] = {}
         if available:
             # Split the monthly investment equally among all available assets.
             # Example: 1,000 € split across 4 assets → 250 € per asset.
@@ -168,22 +271,29 @@ def simulate_dca(price_df: pd.DataFrame, monthly_investment: float = MONTHLY_INV
                 # Example: 250 € / 50 €per share = 5 shares.
                 # The decimal result is fine; fractional units model a fund
                 # or broker that allows partial shares.
-                holdings[col] += per_asset / price
+                shares = per_asset / price
+                holdings[col] += shares
+                # DCA only ever buys, so shares/amount are always positive.
+                legs[col] = {'shares': shares, 'amount': per_asset, 'price': price}
 
-        # Calculate total portfolio value: sum up (units × current price)
-        # for every asset that has a price this month. Assets without a
-        # current price are excluded from the valuation but their holdings
-        # are kept intact; they will contribute again when prices reappear.
-        value = sum(
-            holdings[c] * prices[c]
-            for c in price_df.columns
-            if pd.notna(prices.get(c, np.nan))  # prices.get returns NaN if key missing
-        )
+        # Portfolio value AFTER this month's purchase (same logic as before).
+        value = _value_at(holdings, prices, price_df.columns)
         values.append(value)
+
+        # Record an event only for months where a purchase actually happened.
+        if legs:
+            events.append({
+                'date': date,
+                'value_pre_trade': value_pre_trade,
+                'value_post_trade': value,
+                'cash': 0.0,                       # DCA is always fully invested
+                'external_flow': monthly_investment,  # the deposit made this month
+                'legs': legs,
+            })
 
     # Wrap the list into a pandas Series, reusing the DataFrame's date index
     # so the result is properly time-indexed.
-    return pd.Series(values, index=price_df.index), total_invested
+    return pd.Series(values, index=price_df.index), total_invested, events
 
 
 def compute_metrics(portfolio: pd.Series, total_invested: float) -> dict[str, str]:
@@ -501,11 +611,32 @@ def _rebalance_to_target(
     return new_holdings, new_cash, total_value
 
 
+def _rebalance_legs(
+    old_holdings: dict[str, float], new_holdings: dict[str, float], prices: pd.Series
+) -> dict[str, dict]:
+    """Build the per-asset transaction legs of one rebalancing step.
+
+    A leg is recorded for every priced asset whose unit count changed; the
+    share delta is signed (positive = buy, negative = sell).  Tiny deltas from
+    floating-point noise are ignored via _TRADE_EPS.
+    """
+    legs: dict[str, dict] = {}
+    for c, p in prices.items():
+        if pd.isna(p) or p <= 0:
+            continue
+        col = str(c)
+        delta = new_holdings[col] - old_holdings[col]
+        if abs(delta) > _TRADE_EPS:
+            price = float(p)
+            legs[col] = {'shares': delta, 'amount': delta * price, 'price': price}
+    return legs
+
+
 def simulate_riskoff(
     price_df: pd.DataFrame,
     invested_fraction_at_month: pd.Series,
     initial_investment: float = INITIAL_INVESTMENT,
-) -> tuple[pd.Series, float]:
+) -> tuple[pd.Series, float, list[dict]]:
     """Simulate the lump-sum Risk-Off strategy month by month.
 
     The full *initial_investment* starts as cash.  Each month the portfolio is
@@ -523,9 +654,12 @@ def simulate_riskoff(
 
     Returns
     -------
-    (portfolio_series, total_invested)
+    (portfolio_series, total_invested, events)
       portfolio_series – Series of portfolio value (holdings + cash) per month.
       total_invested   – the initial lump sum (constant; no contributions).
+      events           – per-event rebalancing ledger; one entry per month in
+                         which at least one asset was traded.  Rebalancing is
+                         value-neutral, so value_pre_trade == value_post_trade.
     """
     holdings: dict[str, float] = {str(col): 0.0 for col in price_df.columns}
     cash = initial_investment
@@ -535,12 +669,30 @@ def simulate_riskoff(
     inv = invested_fraction_at_month.reindex(price_df.index).fillna(0.0)
 
     values: list[float] = []
-    for i, (_, prices) in enumerate(price_df.iterrows()):
+    events: list[dict] = []
+    # The lump sum is external capital injected once; it is attached to the
+    # first recorded event so _enrich_events derives the cost basis correctly.
+    flow_pending = initial_investment
+
+    for i, (date, prices) in enumerate(price_df.iterrows()):
         inv_frac = float(inv.iloc[i])
-        holdings, cash, value = _rebalance_to_target(holdings, cash, prices, inv_frac)
+        old_holdings = holdings
+        holdings, cash, value = _rebalance_to_target(old_holdings, cash, prices, inv_frac)
         values.append(value)
 
-    return pd.Series(values, index=price_df.index), initial_investment
+        legs = _rebalance_legs(old_holdings, holdings, prices)
+        if legs:
+            events.append({
+                'date': date,
+                'value_pre_trade': value,   # rebalancing is value-neutral, so
+                'value_post_trade': value,  # before == after at current prices
+                'cash': cash,
+                'external_flow': flow_pending,  # lump sum on first event, else 0
+                'legs': legs,
+            })
+            flow_pending = 0.0
+
+    return pd.Series(values, index=price_df.index), initial_investment, events
 
 
 def _get_monthly_range(base_url: str, filename: str, df_meta: pd.DataFrame) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
@@ -646,7 +798,7 @@ def run_backtest(
     df_meta: pd.DataFrame,
     strategy: "BacktestStrategy | None" = None,
     strategy_params: dict[str, int | float | str] | None = None,
-) -> tuple[pd.Series | None, dict[str, str] | None]:
+) -> tuple[pd.Series | None, dict[str, str] | None, list[dict] | None]:
     """Orchestrate a backtest for a single basket of assets.
 
     When *strategy* is provided the call is delegated entirely to that plugin,
@@ -675,25 +827,30 @@ def run_backtest(
 
     Returns
     -------
-    (portfolio_series, metrics_dict) on success, or (None, None) on failure.
+    (portfolio_series, metrics_dict, events) on success, or (None, None, None)
+    on failure.  *events* is the per-event transaction ledger (with derived
+    KPIs added by _enrich_events), or None when the strategy produces no ledger.
     """
     # Delegate to a strategy plugin when one is supplied.
     if strategy is not None:
         if not filenames or not base_url:
-            return None, None
-        return strategy.run(
+            return None, None, None
+        portfolio, metrics, events = strategy.run(
             base_url, filenames, start_date, end_date, df_meta,
             strategy_params or {},
         )
+        # Derive the per-event KPIs centrally so every strategy's ledger gets
+        # the same columns computed identically.
+        return portfolio, metrics, _enrich_events(events)
 
     # Bail out immediately if the caller provided nothing useful.
     if not filenames or not base_url:
-        return None, None
+        return None, None, None
 
     # Load all assets' monthly close prices into a single aligned DataFrame.
     price_df = load_monthly_closes(base_url, filenames, df_meta)
     if price_df.empty:
-        return None, None
+        return None, None, None
 
     # Keep only rows within the requested date window [start_date, end_date].
     # Both bounds are inclusive (>=, <=) so the user's chosen start/end months
@@ -704,7 +861,7 @@ def run_backtest(
     price_df = price_df[mask].dropna(how='all', axis=1)
 
     if price_df.empty:
-        return None, None
+        return None, None, None
 
     # Forward-fill fills a NaN price by carrying the previous valid price
     # forward. This handles short gaps such as exchange holidays or delayed
@@ -714,5 +871,5 @@ def run_backtest(
     # incorrectly treated as having a price during their absence.
     price_df = price_df.ffill(limit=3)
 
-    portfolio, total_invested = simulate_dca(price_df)
-    return portfolio, compute_metrics(portfolio, total_invested)
+    portfolio, total_invested, events = simulate_dca(price_df)
+    return portfolio, compute_metrics(portfolio, total_invested), _enrich_events(events)

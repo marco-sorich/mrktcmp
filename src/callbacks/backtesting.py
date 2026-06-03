@@ -65,7 +65,11 @@ import plotly.graph_objects as go
 #              id dict shares a given 'type' key. Used to listen to every
 #              remove button in a basket at once without knowing in advance
 #              how many there will be.
-from dash import Input, Output, State, callback, no_update, ALL, MATCH
+from dash import (
+    Input, Output, State, callback, no_update, ALL, MATCH,
+    clientside_callback, ClientsideFunction,
+)
+from dash.exceptions import PreventUpdate
 
 # dash.callback_context: provides runtime information about the callback
 # that just fired (which Input triggered it, what its new value is, etc.).
@@ -89,15 +93,26 @@ from src.utils import log_time
 # UI helper functions for rendering basket contents and the metrics table.
 # These live in components.py because they build Dash component trees that
 # are also needed elsewhere (e.g. layout.py builds _basket_ui panels).
-from src.components import _render_basket_list, _metrics_table, _build_strategy_params_ui
+from src.components import (
+    _render_basket_list, _metrics_table, _build_strategy_params_ui, _transaction_section,
+)
 
 # The DCA simulation engine. run_backtest orchestrates data loading, the
 # monthly investment simulation, and metric computation. get_common_date_range
 # finds the date window that all selected assets share in common.
 # Imported at module scope so tests can patch 'src.callbacks.backtesting.run_backtest'
 # and 'src.callbacks.backtesting.get_common_date_range'.
-from src.backtest import run_backtest, get_common_date_range
+from src.backtest import run_backtest, get_common_date_range, BacktestRun
 from src.strategies.registry import get_strategy
+
+# Trace/tab colour palette, assigned to runs by position.  The first two entries
+# keep the established Basket A (blue) / Basket B (red) colours; further entries
+# support future N-way comparisons without code changes.
+_RUN_COLORS = ['#1a56db', '#c0392b', '#2e8b57', '#d97706', '#7c3aed', '#0891b2']
+
+# Name of the transient marker trace appended to the chart when a transaction
+# row is clicked.  Kept constant so each click replaces the previous marker.
+_HIGHLIGHT_TRACE = '__row_highlight__'
 
 
 # ---------------------------------------------------------------------------
@@ -712,12 +727,95 @@ def update_strategy_config_b(strategy_name: str | None, param_values: list) -> d
 # Callback: run the DCA backtest and render results
 # ---------------------------------------------------------------------------
 
+def _collect_runs(basket_a, basket_b, start_date, end_date, cfg_a, cfg_b):
+    """Run the backtest for each basket and return a list of BacktestRun.
+
+    This is the single seam between the (currently two-basket) input UI and the
+    generic, run-list-driven result rendering.  To support more baskets or
+    basket×strategy comparisons in the future, only this function changes; the
+    chart and transaction tables already iterate the returned list.
+
+    Each run pairs a basket with the strategy selected for it; an empty basket
+    yields a run with portfolio=None (skipped by the renderers).
+    """
+    specs = [
+        ('a', 'Basket A', basket_a, cfg_a),
+        ('b', 'Basket B', basket_b, cfg_b),
+    ]
+    runs = []
+    for i, (run_id, basket_label, basket, cfg) in enumerate(specs):
+        filenames = [item['filename'] for item in (basket or [])]
+        strategy = _get_strategy_instance(cfg)
+        params = (cfg or {}).get('params') or {}
+        strat_name = (cfg or {}).get('strategy') or 'DCA'
+        portfolio, metrics, events = (
+            run_backtest(_config.base_url, filenames, start_date, end_date, _config.df,
+                         strategy=strategy, strategy_params=params)
+            if filenames else (None, None, None)
+        )
+        runs.append(BacktestRun(
+            run_id=run_id,
+            label=f'{basket_label} · {strat_name}',
+            color=_RUN_COLORS[i % len(_RUN_COLORS)],
+            portfolio=portfolio,
+            metrics=metrics,
+            events=events,
+        ))
+    return runs
+
+
+def _build_chart(active_runs, start_date, end_date):
+    """Build the portfolio-value line chart, one trace per active run.
+
+    Trace order follows *active_runs*, which the graph-click callback relies on
+    to map a clicked point's curveNumber back to its run_id.
+    """
+    fig = go.Figure()
+    for run in active_runs:
+        # round(2) avoids floating-point noise in hover tooltips.
+        fig.add_trace(go.Scatter(
+            x=run.portfolio.index,
+            y=run.portfolio.round(2),
+            name=run.label,
+            line=dict(color=run.color, width=2),
+        ))
+    fig.update_layout(
+        title='Portfolio Value',
+        xaxis_title='Date',
+        yaxis_title='Portfolio Value (€)',
+        hovermode='x unified',
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+        margin=dict(l=8, r=8, t=48, b=8),
+    )
+    return fig
+
+
+def _build_events_store(active_runs):
+    """Build the bt-events-store payload used by the click interactions.
+
+    Structure
+    ---------
+    {'order': [run_id, …],                 # matches chart trace order
+     'rows':  {run_id: [{'date': iso, 'value': float}, …]}}
+    """
+    order = [run.run_id for run in active_runs]
+    rows = {}
+    for run in active_runs:
+        rows[run.run_id] = [
+            {'date': ev['date'].isoformat(), 'value': round(ev['value_post_trade'], 2)}
+            for ev in (run.events or [])
+        ]
+    return {'order': order, 'rows': rows}
+
+
 @callback(
-    Output('bt-chart', 'figure'),      # the portfolio value line chart
-    Output('bt-chart', 'style'),       # show/hide the chart container
-    Output('bt-metrics', 'children'),  # the metrics comparison table
-    Output('bt-status', 'children'),   # status / error message text
-    Input('bt-run', 'n_clicks'),       # fires when the Run button is clicked
+    Output('bt-chart', 'figure'),         # the portfolio value line chart
+    Output('bt-chart', 'style'),          # show/hide the chart container
+    Output('bt-metrics', 'children'),     # the metrics comparison table
+    Output('bt-tx-section', 'children'),  # the per-run transaction tab section
+    Output('bt-events-store', 'data'),    # event metadata for click interactions
+    Output('bt-status', 'children'),      # status / error message text
+    Input('bt-run', 'n_clicks'),          # fires when the Run button is clicked
     State('bt-basket-store-a', 'data'),          # basket A contents (read, not trigger)
     State('bt-basket-store-b', 'data'),          # basket B contents
     State('bt-date-range', 'value'),             # [start_index, end_index] into date_store
@@ -729,33 +827,18 @@ def update_strategy_config_b(strategy_name: str | None, param_values: list) -> d
 @log_time
 def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store,
                           strategy_config_a, strategy_config_b):
-    """Execute the DCA simulation for both baskets and update the UI.
+    """Execute the backtest for every run and update the UI.
 
     Steps:
       1. Validate that at least one basket has assets and dates are available.
       2. Convert slider indices to actual Timestamps.
-      3. Run the backtest for each non-empty basket via run_backtest().
-      4. Plot both portfolios on a single line chart.
-      5. Build the side-by-side metrics comparison table.
-
-    Parameters
-    ----------
-    n_clicks          : int  – click count on the Run button (unused; the click
-                               itself is the trigger, not its count).
-    basket_a          : list – asset dicts for Basket A (may be None or empty).
-    basket_b          : list – asset dicts for Basket B (may be None or empty).
-    slider_value      : list – [start_index, end_index] into date_store.
-    date_store        : list – ISO date strings for each slider position.
-    strategy_config_a : dict – {'strategy': name, 'params': {...}} for basket A.
-    strategy_config_b : dict – {'strategy': name, 'params': {...}} for basket B.
+      3. Build the run list via _collect_runs() (one run per basket+strategy).
+      4. Plot every successful run on a single line chart.
+      5. Build the metrics table and the per-run transaction tab section.
 
     Returns
     -------
-    (figure, chart_style, metrics_children, status_text)
-      figure          : go.Figure with A and/or B portfolio value traces.
-      chart_style     : dict – {'display': 'block'} or {'display': 'none'}.
-      metrics_children: Dash component – the comparison table or empty string.
-      status_text     : str – summary or error message shown below the button.
+    (figure, chart_style, metrics_children, tx_section, events_store, status).
     """
     empty_chart = go.Figure()
     hidden = {'width': '100%', 'display': 'none'}   # hide the chart div
@@ -763,109 +846,123 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
 
     # Require at least one basket to have assets before running.
     if not basket_a and not basket_b:
-        return empty_chart, hidden, '', 'Please fill at least one basket.'
+        return empty_chart, hidden, '', [], {}, 'Please fill at least one basket.'
 
     if not _config.base_url or _config.df is None:
-        return empty_chart, hidden, '', 'No data source available.'
+        return empty_chart, hidden, '', [], {}, 'No data source available.'
 
     # Guard: the date slider must have been populated by update_date_range_slider
     # before the user can run. If it has not (e.g. all files failed to load),
     # we cannot resolve the slider positions to actual Timestamps.
     if not date_store or not slider_value or len(date_store) < 2:
-        return empty_chart, hidden, '', 'No date range available. Add assets first.'
+        return empty_chart, hidden, '', [], {}, 'No date range available. Add assets first.'
 
     # Convert the slider's integer positions back to pandas Timestamps.
-    # slider_value is [i0, i1]; date_store[i0] is an ISO string like
-    # '2020-01-31T00:00:00+00:00'. pd.Timestamp() parses it correctly.
     start_date = pd.Timestamp(date_store[slider_value[0]])
     end_date = pd.Timestamp(date_store[slider_value[1]])
 
-    # Extract filenames from each basket's list of asset dicts.
-    filenames_a = [item['filename'] for item in (basket_a or [])]
-    filenames_b = [item['filename'] for item in (basket_b or [])]
+    # Run every basket+strategy combination.
+    runs = _collect_runs(basket_a, basket_b, start_date, end_date,
+                         strategy_config_a, strategy_config_b)
+    active = [r for r in runs if r.portfolio is not None]
 
-    # Resolve strategy instances from the per-basket config stores.  If a
-    # store is absent or its 'strategy' key is missing, _get_strategy_instance
-    # returns None and run_backtest falls back to the built-in DCA code path.
-    strategy_a = _get_strategy_instance(strategy_config_a)
-    strategy_b = _get_strategy_instance(strategy_config_b)
-    params_a = (strategy_config_a or {}).get('params') or {}
-    params_b = (strategy_config_b or {}).get('params') or {}
+    # If every backtest failed (e.g. all parquet files missing), abort.
+    if not active:
+        return empty_chart, hidden, '', [], {}, 'No data available for the selected period.'
 
-    # Run the simulation for each basket, but skip the call entirely if the
-    # basket has no assets (saves an unnecessary function call).
-    # run_backtest returns (portfolio_series, metrics_dict) on success, or
-    # (None, None) if no data was available for the selected period.
-    portfolio_a, metrics_a = (
-        run_backtest(_config.base_url, filenames_a, start_date, end_date, _config.df,
-                     strategy=strategy_a, strategy_params=params_a)
-        if filenames_a else (None, None)
-    )
-    portfolio_b, metrics_b = (
-        run_backtest(_config.base_url, filenames_b, start_date, end_date, _config.df,
-                     strategy=strategy_b, strategy_params=params_b)
-        if filenames_b else (None, None)
-    )
+    fig = _build_chart(active, start_date, end_date)
+    tx_section = _transaction_section(runs)
+    events_store = _build_events_store(active)
 
-    # If both backtests failed (e.g. all parquet files missing), abort.
-    if portfolio_a is None and portfolio_b is None:
-        return empty_chart, hidden, '', 'No data available for the selected period.'
+    # Metrics table keeps its A/B columns for now (runs[0]/runs[1] are baskets
+    # A and B); generalising it to N runs is a separate, later change.
+    metrics_div = _metrics_table(runs[0].metrics, runs[1].metrics)
 
-    # Build the portfolio value chart.
-    fig = go.Figure()
-
-    if portfolio_a is not None:
-        # go.Scatter draws a line chart. round(2) avoids floating-point noise
-        # in hover tooltips (e.g. 1000.0000000002 → 1000.0).
-        fig.add_trace(go.Scatter(
-            x=portfolio_a.index,       # x-axis: monthly dates
-            y=portfolio_a.round(2),    # y-axis: portfolio value in EUR
-            name='Basket A',
-            line=dict(color='#1a56db', width=2),  # blue line, 2px thick
-        ))
-
-    if portfolio_b is not None:
-        fig.add_trace(go.Scatter(
-            x=portfolio_b.index,
-            y=portfolio_b.round(2),
-            name='Basket B',
-            line=dict(color='#c0392b', width=2),  # red line
-        ))
-
-    # The two baskets may cover different date ranges (e.g. if one basket
-    # contains an asset that only recently started trading). Title the chart
-    # using the longer simulation so users understand what they are seeing.
-    months_shown = max(
-        len(portfolio_a) if portfolio_a is not None else 0,
-        len(portfolio_b) if portfolio_b is not None else 0,
-    )
-
+    months_shown = max(len(r.portfolio) for r in active)
     d0_label = start_date.strftime('%b %Y')
     d1_label = end_date.strftime('%b %Y')
-    fig.update_layout(
-        title='Portfolio Value',
-        xaxis_title='Date',
-        yaxis_title='Portfolio Value (€)',
-        # hovermode='x unified': a single tooltip shows values for ALL traces
-        # at the hovered x-position instead of separate tooltips per trace.
-        hovermode='x unified',
-        # Horizontal legend above the chart to save vertical space.
-        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
-        # Tight margins to maximise plot area; t=48 leaves room for the title.
-        margin=dict(l=8, r=8, t=48, b=8),
-    )
-
-    # Build the side-by-side metrics table and assemble the status message.
-    metrics_div = _metrics_table(metrics_a, metrics_b)
-    name_a = (strategy_config_a or {}).get('strategy') or 'DCA'
-    name_b = (strategy_config_b or {}).get('strategy') or 'DCA'
     status = (
         f'Backtest complete – {d0_label} to {d1_label} ({months_shown} months). '
-        f'Strategy A: {name_a}, Strategy B: {name_b}.'
+        + ', '.join(r.label for r in active) + '.'
     )
 
-    _config.log.info("Backtest completed: %d months, A=%s (%s), B=%s (%s)",
-                     months_shown, len(filenames_a), name_a, len(filenames_b), name_b)
+    _config.log.info("Backtest completed: %d months, %d run(s)", months_shown, len(active))
 
-    # Return four values matching the four Output declarations above.
-    return fig, visible, metrics_div, status
+    return fig, visible, metrics_div, tx_section, events_store, status
+
+
+# ---------------------------------------------------------------------------
+# Callback: row click → highlight the corresponding point on the chart
+# ---------------------------------------------------------------------------
+
+@callback(
+    Output('bt-chart', 'figure', allow_duplicate=True),
+    Input({'type': 'bt-tx-row', 'run': ALL, 'index': ALL}, 'n_clicks'),
+    State('bt-chart', 'figure'),
+    State('bt-events-store', 'data'),
+    prevent_initial_call=True,
+)
+@log_time
+def highlight_chart_point(_clicks, fig, store):
+    """Mark the clicked transaction's date/value on the chart.
+
+    Reads the triggering row's (run, index) from the pattern-matching id, looks
+    up its date and value in the event store, and appends a single marker trace
+    (replacing any previous one).  The marker is always the LAST trace so the
+    run↔curveNumber mapping used by the graph-click callback stays intact.
+    """
+    triggered = dash.callback_context.triggered
+    # Ignore the initial registration burst where every n_clicks is None/0.
+    if not triggered or not triggered[0]['value']:
+        raise PreventUpdate
+    if not fig or not store:
+        raise PreventUpdate
+
+    row_id = dash.callback_context.triggered_id
+    run_id = row_id['run']
+    index = row_id['index']
+    rows = (store.get('rows') or {}).get(run_id) or []
+    if index >= len(rows):
+        raise PreventUpdate
+    row = rows[index]
+
+    # Drop any previous highlight marker, then append a fresh one.
+    fig['data'] = [t for t in fig['data'] if t.get('name') != _HIGHLIGHT_TRACE]
+    fig['data'].append({
+        'type': 'scatter',
+        'x': [row['date']],
+        'y': [row['value']],
+        'mode': 'markers',
+        'marker': {'size': 13, 'color': '#111', 'symbol': 'circle-open',
+                   'line': {'width': 2, 'color': '#111'}},
+        'name': _HIGHLIGHT_TRACE,
+        'showlegend': False,
+        'hoverinfo': 'skip',
+    })
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Clientside callbacks: DOM scrolling (buttons + graph-click → table row)
+# ---------------------------------------------------------------------------
+
+# Scroll-to-top / scroll-to-bottom buttons.  Pure DOM work, so it runs in the
+# browser; the dummy Store output is required because every Dash callback must
+# declare at least one Output.
+clientside_callback(
+    ClientsideFunction(namespace='transactions', function_name='scrollButtons'),
+    Output('bt-tx-scroll-dummy', 'data'),
+    Input({'type': 'bt-tx-top', 'run': ALL}, 'n_clicks'),
+    Input({'type': 'bt-tx-bottom', 'run': ALL}, 'n_clicks'),
+    prevent_initial_call=True,
+)
+
+# Graph point click → activate the matching run's tab and scroll its table to
+# (and highlight) the nearest event row.
+clientside_callback(
+    ClientsideFunction(namespace='transactions', function_name='graphClickToRow'),
+    Output('bt-tx-tabs', 'active_tab'),
+    Input('bt-chart', 'clickData'),
+    State('bt-events-store', 'data'),
+    prevent_initial_call=True,
+)

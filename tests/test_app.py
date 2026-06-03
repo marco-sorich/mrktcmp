@@ -18,9 +18,13 @@ from src.callbacks.chart import (         # noqa: E402
 from src.callbacks.backtesting import (   # noqa: E402
     _bt_assetclass_options, _bt_asset_search, _manage_basket,
     run_backtest_callback, update_date_range_slider, update_date_display,
-    _build_slider_marks,
+    _build_slider_marks, _collect_runs, _build_events_store, highlight_chart_point,
+    _HIGHLIGHT_TRACE,
 )
-from src.components import _render_basket_list, _metrics_table  # noqa: E402
+from src.components import (  # noqa: E402
+    _render_basket_list, _metrics_table, _transaction_table, _transaction_section,
+)
+from src.backtest import BacktestRun  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -502,6 +506,23 @@ _PORTFOLIO_STUB = pd.Series(
 )
 _METRICS_STUB = {'Total Return': '+50.0%', 'CAGR': '10.0%'}
 
+# A fully-formed (already enriched) event, matching what run_backtest returns,
+# so the transaction section and event store can be built from the mock.
+_EVENTS_STUB = [{
+    'date': pd.Timestamp('2022-01-31', tz='UTC'),
+    'value_pre_trade': 0.0,
+    'value_post_trade': 1000.0,
+    'cash': 0.0,
+    'external_flow': 1000.0,
+    'legs': {'AAPL': {'shares': 10.0, 'amount': 1000.0, 'price': 100.0}},
+    'cum_invested': 1000.0,
+    'pnl': 0.0,
+    'pnl_pct': 0.0,
+    'equity_pct': 1.0,
+    'cash_pct': 0.0,
+    'period_return_pct': 0.0,
+}]
+
 BASKET_A = [BASKET_ITEM_AAPL]
 BASKET_B = [BASKET_ITEM_GOOGL]
 
@@ -515,7 +536,7 @@ _STRATEGY_CFG = {'strategy': 'DCA', 'params': {'monthly_investment': 1000.0}}
 
 class TestRunBacktestCallback:
     def test_both_baskets_empty_returns_status_message(self):
-        _, style, _, status = run_backtest_callback(
+        _, style, _, _, _, status = run_backtest_callback(
             1, [], [], _SLIDER_VAL, _DATE_STORE, None, None)
         assert 'basket' in status
         assert style['display'] == 'none'
@@ -523,7 +544,7 @@ class TestRunBacktestCallback:
     def test_no_base_url_returns_error_status(self):
         with patch.object(config_module, 'base_url', None), \
              patch.object(config_module, 'df', SAMPLE_DF):
-            _, style, _, status = run_backtest_callback(
+            _, style, _, _, _, status = run_backtest_callback(
                 1, BASKET_A, [], _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
         assert 'data source' in status
         assert style['display'] == 'none'
@@ -531,7 +552,7 @@ class TestRunBacktestCallback:
     def test_empty_date_store_returns_error_status(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF):
-            _, style, _, status = run_backtest_callback(
+            _, style, _, _, _, status = run_backtest_callback(
                 1, BASKET_A, [], _SLIDER_VAL, [], _STRATEGY_CFG, _STRATEGY_CFG)
         assert 'date range' in status.lower()
         assert style['display'] == 'none'
@@ -539,8 +560,8 @@ class TestRunBacktestCallback:
     def test_no_data_returned_shows_error_status(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF), \
-             patch('src.callbacks.backtesting.run_backtest', return_value=(None, None)):
-            _, style, _, status = run_backtest_callback(
+             patch('src.callbacks.backtesting.run_backtest', return_value=(None, None, None)):
+            _, style, _, _, _, status = run_backtest_callback(
                 1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
         assert style['display'] == 'none'
         assert 'No data' in status
@@ -548,27 +569,137 @@ class TestRunBacktestCallback:
     def test_successful_run_makes_chart_visible(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF), \
-             patch('src.callbacks.backtesting.run_backtest', return_value=(_PORTFOLIO_STUB, _METRICS_STUB)):
-            _, style, _, _ = run_backtest_callback(
+             patch('src.callbacks.backtesting.run_backtest', return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _EVENTS_STUB)):
+            _, style, _, _, _, _ = run_backtest_callback(
                 1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
         assert style['display'] == 'block'
 
     def test_successful_run_returns_plotly_figure(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF), \
-             patch('src.callbacks.backtesting.run_backtest', return_value=(_PORTFOLIO_STUB, _METRICS_STUB)):
-            fig, _, _, _ = run_backtest_callback(
+             patch('src.callbacks.backtesting.run_backtest', return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _EVENTS_STUB)):
+            fig, _, _, _, _, _ = run_backtest_callback(
                 1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
         assert isinstance(fig, go.Figure)
 
     def test_only_basket_a_filled_also_succeeds(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF), \
-             patch('src.callbacks.backtesting.run_backtest', return_value=(_PORTFOLIO_STUB, _METRICS_STUB)):
-            fig, style, _, status = run_backtest_callback(
+             patch('src.callbacks.backtesting.run_backtest', return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _EVENTS_STUB)):
+            fig, style, _, _, _, status = run_backtest_callback(
                 1, BASKET_A, [], _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, None)
         assert style['display'] == 'block'
         assert 'complete' in status
+
+
+# ---------------------------------------------------------------------------
+# _collect_runs / _build_events_store (run abstraction)
+# ---------------------------------------------------------------------------
+
+class TestCollectRuns:
+    _START = _TEST_DATES[0]
+    _END = _TEST_DATES[-1]
+
+    def test_returns_one_run_per_basket_with_labels_and_colors(self):
+        with patch('src.callbacks.backtesting.run_backtest',
+                   return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _EVENTS_STUB)):
+            runs = _collect_runs(BASKET_A, BASKET_B, self._START, self._END,
+                                 _STRATEGY_CFG, _STRATEGY_CFG)
+        assert [r.run_id for r in runs] == ['a', 'b']
+        assert runs[0].label == 'Basket A · DCA'
+        assert runs[1].label == 'Basket B · DCA'
+        assert runs[0].color == '#1a56db'
+        assert runs[1].color == '#c0392b'
+
+    def test_empty_basket_yields_inactive_run(self):
+        with patch('src.callbacks.backtesting.run_backtest',
+                   return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _EVENTS_STUB)):
+            runs = _collect_runs(BASKET_A, [], self._START, self._END,
+                                 _STRATEGY_CFG, None)
+        assert runs[0].portfolio is not None
+        assert runs[1].portfolio is None  # empty basket → not run
+
+
+class TestBuildEventsStore:
+    def test_store_order_and_rows_match_runs(self):
+        run_a = BacktestRun('a', 'Basket A · DCA', '#1a56db',
+                            _PORTFOLIO_STUB, _METRICS_STUB, _EVENTS_STUB)
+        run_b = BacktestRun('b', 'Basket B · DCA', '#c0392b',
+                            _PORTFOLIO_STUB, _METRICS_STUB, None)
+        store = _build_events_store([run_a, run_b])
+        assert store['order'] == ['a', 'b']
+        assert store['rows']['a'][0]['value'] == 1000.0
+        assert store['rows']['a'][0]['date'].startswith('2022-01-31')
+        assert store['rows']['b'] == []   # events=None → no rows
+
+
+# ---------------------------------------------------------------------------
+# highlight_chart_point (row click → chart marker)
+# ---------------------------------------------------------------------------
+
+class TestHighlightChartPoint:
+    def _ctx(self):
+        ctx = MagicMock()
+        ctx.triggered = [{'value': 1, 'prop_id': '{"index":0,"run":"a","type":"bt-tx-row"}.n_clicks'}]
+        ctx.triggered_id = {'type': 'bt-tx-row', 'run': 'a', 'index': 0}
+        return ctx
+
+    def test_appends_highlight_marker_trace(self):
+        fig = go.Figure(go.Scatter(x=_PORTFOLIO_STUB.index, y=_PORTFOLIO_STUB.values,
+                                   name='Basket A · DCA')).to_dict()
+        store = {'order': ['a'], 'rows': {'a': [{'date': '2022-01-31T00:00:00+00:00', 'value': 1000.0}]}}
+        with patch('dash.callback_context', self._ctx()):
+            out = highlight_chart_point([1], fig, store)
+        names = [t.get('name') for t in out['data']]
+        assert _HIGHLIGHT_TRACE in names
+        # The marker is the last trace so run↔curveNumber mapping is preserved.
+        assert out['data'][-1]['name'] == _HIGHLIGHT_TRACE
+
+    def test_replaces_previous_marker(self):
+        fig = go.Figure(go.Scatter(x=_PORTFOLIO_STUB.index, y=_PORTFOLIO_STUB.values,
+                                   name='Basket A · DCA')).to_dict()
+        store = {'order': ['a'], 'rows': {'a': [{'date': '2022-01-31T00:00:00+00:00', 'value': 1000.0}]}}
+        with patch('dash.callback_context', self._ctx()):
+            fig = highlight_chart_point([1], fig, store)
+            fig = highlight_chart_point([2], fig, store)
+        markers = [t for t in fig['data'] if t.get('name') == _HIGHLIGHT_TRACE]
+        assert len(markers) == 1  # only ever one highlight marker
+
+
+# ---------------------------------------------------------------------------
+# Transaction table / section components
+# ---------------------------------------------------------------------------
+
+class TestTransactionComponents:
+    def test_none_events_show_strategy_placeholder(self):
+        div = _transaction_table(None, 'a')
+        text = str(div)
+        assert 'No transaction details' in text
+        assert div.id == 'bt-tx-a'
+
+    def test_empty_events_show_no_transactions(self):
+        div = _transaction_table([], 'a')
+        assert 'No transactions' in str(div)
+
+    def test_table_has_expected_headers_and_wrapper_id(self):
+        div = _transaction_table(_EVENTS_STUB, 'a')
+        assert div.id == 'bt-tx-a'
+        text = str(div)
+        for header in ('Pre-Trade Value', 'Post-Trade Value', 'Cash', 'Invested', 'AAPL'):
+            assert header in text
+
+    def test_section_empty_without_active_runs(self):
+        run = BacktestRun('a', 'Basket A · DCA', '#1a56db', None, None, None)
+        assert _transaction_section([run]) == []
+
+    def test_section_builds_one_tab_per_active_run(self):
+        run_a = BacktestRun('a', 'Basket A · DCA', '#1a56db',
+                            _PORTFOLIO_STUB, _METRICS_STUB, _EVENTS_STUB)
+        section = _transaction_section([run_a])
+        assert len(section) == 1            # single dbc.Tabs
+        tabs = section[0]
+        assert tabs.id == 'bt-tx-tabs'
+        assert tabs.active_tab == 'tx-a'
 
 
 # ---------------------------------------------------------------------------

@@ -203,9 +203,22 @@ def create_layout():
                         html.Div(id='bt-metrics', className='bt-metrics-wrapper'),
                     ], className='results-container'),
 
-                    # Hidden result store (reserved for future drill-down
-                    # interactions, e.g. clicking a month to inspect it).
-                    dcc.Store(id='bt-result-store', data={}),
+                    # Transaction/event tables, one tab per backtest run.  The
+                    # whole dbc.Tabs tree is built dynamically by the backtest
+                    # callback (see _transaction_section), so this container
+                    # starts empty and scales to any number of runs without a
+                    # layout change.
+                    html.Div(id='bt-tx-section', style={'marginTop': '16px'}),
+
+                    # Per-run event metadata (date + value per row), keyed by
+                    # run_id.  Read by the graph-click and row-click callbacks
+                    # to map between chart points and table rows.
+                    dcc.Store(id='bt-events-store', data={}),
+
+                    # Dummy output target for the scroll-button clientside
+                    # callback (which manipulates the DOM directly and has no
+                    # real Dash output to update).
+                    dcc.Store(id='bt-tx-scroll-dummy', data={}),
                 ]),
         ]),
 

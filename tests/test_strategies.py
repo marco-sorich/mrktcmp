@@ -17,6 +17,7 @@ from src.backtest import (  # noqa: E402
     compute_riskoff_signals,
     run_backtest,
     simulate_riskoff,
+    _enrich_events,
 )
 
 # ---------------------------------------------------------------------------
@@ -165,7 +166,7 @@ class TestRegistry:
                 return []
 
             def run(self, base_url, filenames, start_date, end_date, df_meta, params):
-                return None, None
+                return None, None, None
 
         register(_Dummy)
         return _Dummy
@@ -222,7 +223,7 @@ class TestDCAStrategy:
     def test_run_with_empty_params_uses_defaults(self):
         strategy = DCAStrategy()
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
-            portfolio, metrics = strategy.run(
+            portfolio, metrics, _ = strategy.run(
                 BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META, params={}
             )
         assert portfolio is not None
@@ -232,7 +233,7 @@ class TestDCAStrategy:
     def test_run_returns_11_metric_keys(self):
         strategy = DCAStrategy()
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
-            _, metrics = strategy.run(
+            _, metrics, _ = strategy.run(
                 BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META, params={}
             )
         assert metrics is not None
@@ -240,7 +241,7 @@ class TestDCAStrategy:
 
     def test_run_with_empty_filenames_returns_none_none(self):
         strategy = DCAStrategy()
-        portfolio, metrics = strategy.run(
+        portfolio, metrics, _ = strategy.run(
             BASE_URL, [], _START, _END, SAMPLE_META, params={}
         )
         assert portfolio is None
@@ -252,7 +253,7 @@ class TestDCAStrategy:
         start = pd.Timestamp('2020-06-30', tz='UTC')
         end = pd.Timestamp('2020-06-30', tz='UTC')
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
-            portfolio, metrics = strategy.run(
+            portfolio, metrics, _ = strategy.run(
                 BASE_URL, ['aapl.parquet'], start, end, SAMPLE_META, params={}
             )
         assert portfolio is None
@@ -263,10 +264,10 @@ class TestDCAStrategy:
         # invested total.  Use that relationship to verify params are respected.
         strategy = DCAStrategy()
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
-            _, m_default = strategy.run(
+            _, m_default, _ = strategy.run(
                 BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META, params={}
             )
-            _, m_half = strategy.run(
+            _, m_half, _ = strategy.run(
                 BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META,
                 params={'monthly_investment': 500.0},
             )
@@ -292,7 +293,7 @@ class TestRunBacktestBackwardCompat:
     def test_five_positional_args_still_work(self):
         # Existing callers pass exactly 5 positional args; must not break.
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
-            p, m = run_backtest(
+            p, m, _ = run_backtest(
                 BASE_URL, ['aapl.parquet'], self._START, self._END, SAMPLE_META
             )
         assert p is not None
@@ -302,7 +303,7 @@ class TestRunBacktestBackwardCompat:
     def test_with_strategy_plugin_returns_correct_structure(self):
         strategy = DCAStrategy()
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
-            p, m = run_backtest(
+            p, m, _ = run_backtest(
                 BASE_URL, ['aapl.parquet'], self._START, self._END, SAMPLE_META,
                 strategy=strategy,
                 strategy_params={'monthly_investment': 500.0},
@@ -314,12 +315,12 @@ class TestRunBacktestBackwardCompat:
     def test_strategy_params_honoured_in_run_backtest(self):
         strategy = DCAStrategy()
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
-            _, m_default = run_backtest(
+            _, m_default, _ = run_backtest(
                 BASE_URL, ['aapl.parquet'], self._START, self._END, SAMPLE_META,
                 strategy=strategy,
                 strategy_params={},
             )
-            _, m_half = run_backtest(
+            _, m_half, _ = run_backtest(
                 BASE_URL, ['aapl.parquet'], self._START, self._END, SAMPLE_META,
                 strategy=strategy,
                 strategy_params={'monthly_investment': 500.0},
@@ -332,11 +333,11 @@ class TestRunBacktestBackwardCompat:
 
     def test_strategy_with_no_filenames_returns_none_none(self):
         strategy = DCAStrategy()
-        p, m = run_backtest(
+        p, m, ev = run_backtest(
             BASE_URL, [], self._START, self._END, SAMPLE_META,
             strategy=strategy,
         )
-        assert p is None and m is None
+        assert p is None and m is None and ev is None
 
 
 # ---------------------------------------------------------------------------
@@ -371,7 +372,7 @@ class TestRiskOffStrategy:
     def test_run_returns_exactly_11_metric_keys(self):
         strategy = RiskOffStrategy()
         with patch('src.backtest.pd.read_parquet', return_value=_daily_rising()):
-            portfolio, metrics = strategy.run(
+            portfolio, metrics, _ = strategy.run(
                 BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META, params={}
             )
         assert portfolio is not None
@@ -381,7 +382,7 @@ class TestRiskOffStrategy:
 
     def test_run_with_empty_filenames_returns_none_none(self):
         strategy = RiskOffStrategy()
-        portfolio, metrics = strategy.run(
+        portfolio, metrics, _ = strategy.run(
             BASE_URL, [], _START, _END, SAMPLE_META, params={}
         )
         assert portfolio is None and metrics is None
@@ -392,7 +393,7 @@ class TestRiskOffStrategy:
         start = pd.Timestamp('2020-06-30', tz='UTC')
         end = pd.Timestamp('2020-06-30', tz='UTC')
         with patch('src.backtest.pd.read_parquet', return_value=_daily_rising()):
-            portfolio, metrics = strategy.run(
+            portfolio, metrics, _ = strategy.run(
                 BASE_URL, ['aapl.parquet'], start, end, SAMPLE_META, params={}
             )
         assert portfolio is None and metrics is None
@@ -402,7 +403,7 @@ class TestRiskOffStrategy:
         # from the initial lump sum, so Total Return is ~0 % and End == Invested.
         strategy = RiskOffStrategy()
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
-            portfolio, metrics = strategy.run(
+            portfolio, metrics, _ = strategy.run(
                 BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META, params={}
             )
         assert metrics is not None
@@ -418,7 +419,7 @@ class TestRiskOffStrategy:
         # the portfolio grows well above the invested lump sum.
         strategy = RiskOffStrategy()
         with patch('src.backtest.pd.read_parquet', return_value=_daily_rising()):
-            portfolio, metrics = strategy.run(
+            portfolio, metrics, _ = strategy.run(
                 BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META, params={}
             )
         assert metrics is not None
@@ -431,7 +432,7 @@ class TestRiskOffStrategy:
         # The reported 'Invested' equals the configured lump sum.
         strategy = RiskOffStrategy()
         with patch('src.backtest.pd.read_parquet', return_value=_daily_rising()):
-            _, metrics = strategy.run(
+            _, metrics, _ = strategy.run(
                 BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META,
                 params={'initial_investment': 25_000.0},
             )
@@ -502,7 +503,7 @@ class TestRiskOffPureFunctions:
         idx = pd.date_range('2020-01-31', periods=6, freq='ME', tz='UTC')
         prices = pd.DataFrame({'A': [100.0, 110.0, 120.0, 130.0, 140.0, 150.0]}, index=idx)
         frac = pd.Series(1.0, index=idx)
-        portfolio, invested = simulate_riskoff(prices, frac, initial_investment=10_000.0)
+        portfolio, invested, _ = simulate_riskoff(prices, frac, initial_investment=10_000.0)
         assert invested == 10_000.0
         # Lump sum grows 100→150 → 10,000 → 15,000.
         assert portfolio.iloc[0] == pytest.approx(10_000.0)
@@ -512,7 +513,7 @@ class TestRiskOffPureFunctions:
         idx = pd.date_range('2020-01-31', periods=6, freq='ME', tz='UTC')
         prices = pd.DataFrame({'A': [100.0, 110.0, 90.0, 130.0, 70.0, 150.0]}, index=idx)
         frac = pd.Series(0.0, index=idx)
-        portfolio, _ = simulate_riskoff(prices, frac, initial_investment=10_000.0)
+        portfolio, _, _ = simulate_riskoff(prices, frac, initial_investment=10_000.0)
         assert (portfolio == 10_000.0).all()
 
     def test_simulate_riskoff_cash_caps_drawdown(self):
@@ -525,8 +526,53 @@ class TestRiskOffPureFunctions:
             peak = pf.expanding().max()
             return ((pf - peak) / peak).min()
 
-        hold, _ = simulate_riskoff(prices, pd.Series(1.0, index=idx), initial_investment=10_000.0)
-        protect, _ = simulate_riskoff(
+        hold, _, _ = simulate_riskoff(prices, pd.Series(1.0, index=idx), initial_investment=10_000.0)
+        protect, _, _ = simulate_riskoff(
             prices, pd.Series([1.0, 1.0, 1.0, 0.0, 0.0, 0.0], index=idx), initial_investment=10_000.0
         )
         assert _max_drawdown(protect) > _max_drawdown(hold)
+
+
+# ---------------------------------------------------------------------------
+# Layer 7 – Risk-Off event ledger
+# ---------------------------------------------------------------------------
+
+class TestRiskOffEvents:
+    _IDX = pd.date_range('2020-01-31', periods=6, freq='ME', tz='UTC')
+
+    def _events(self, fractions):
+        prices = pd.DataFrame({'A': [100.0, 120.0, 150.0, 90.0, 80.0, 75.0]}, index=self._IDX)
+        frac = pd.Series(fractions, index=self._IDX)
+        _, _, events = simulate_riskoff(prices, frac, initial_investment=10_000.0)
+        return events
+
+    def test_rebalancing_is_value_neutral(self):
+        # Pre- and post-trade values are identical: rebalancing only reshuffles
+        # an existing portfolio between assets and cash at current prices.
+        for ev in self._events([1.0] * 6):
+            assert ev['value_pre_trade'] == pytest.approx(ev['value_post_trade'])
+
+    def test_lump_sum_attached_to_first_event_only(self):
+        events = self._events([1.0] * 6)
+        assert events[0]['external_flow'] == pytest.approx(10_000.0)
+        assert all(ev['external_flow'] == 0.0 for ev in events[1:])
+
+    def test_initial_buy_has_positive_legs_and_no_cash(self):
+        events = self._events([1.0] * 6)
+        first = events[0]
+        assert first['legs']['A']['shares'] > 0      # a buy
+        assert first['cash'] == pytest.approx(0.0)   # fully invested
+
+    def test_going_to_cash_produces_a_sell_and_holds_cash(self):
+        # frac drops to 0 in month 4 → the position is sold (negative shares)
+        # and the proceeds are held as cash.
+        events = self._events([1.0, 1.0, 1.0, 0.0, 1.0, 1.0])
+        sell = next(ev for ev in events if ev['date'] == self._IDX[3])
+        assert sell['legs']['A']['shares'] < 0       # a sell
+        assert sell['cash'] > 0
+
+    def test_enriched_cost_basis_is_constant_lump_sum(self):
+        # Risk-Off makes no further contributions, so the cost basis stays at the
+        # initial lump sum across all events.
+        events = _enrich_events(self._events([1.0] * 6))
+        assert all(ev['cum_invested'] == pytest.approx(10_000.0) for ev in events)

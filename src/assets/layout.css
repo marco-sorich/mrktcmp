@@ -2,6 +2,16 @@
     margin-top: 8px;
 }
 
+/* Transaction table: keep the header visible while the body scrolls and make
+   the row clicked from the chart stand out briefly. */
+.bt-tx-row {
+    cursor: pointer;
+}
+
+.bt-tx-row.tx-row-highlight > * {
+    background-color: #fff3bf !important;
+}
+
 @media (min-width: 900px) {
     .results-container {
         display: flex;

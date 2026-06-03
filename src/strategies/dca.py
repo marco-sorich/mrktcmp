@@ -57,7 +57,7 @@ class DCAStrategy(BacktestStrategy):
         end_date: pd.Timestamp,
         df_meta: pd.DataFrame,
         params: dict[str, int | float | str],
-    ) -> tuple[pd.Series | None, dict[str, str] | None]:
+    ) -> tuple[pd.Series | None, dict[str, str] | None, list[dict] | None]:
         # resolve_params merges caller-supplied values with schema defaults so
         # that passing params={} is equivalent to using all declared defaults.
         resolved = self.resolve_params(params)
@@ -66,25 +66,26 @@ class DCAStrategy(BacktestStrategy):
 
         price_df = load_monthly_closes(base_url, filenames, df_meta)
         if price_df.empty:
-            return None, None
+            return None, None, None
 
         # Restrict to the requested date window (both bounds inclusive).
         mask = (price_df.index >= start_date) & (price_df.index <= end_date)
         price_df = price_df.loc[mask].dropna(how='all', axis=1)
         if price_df.empty:
-            return None, None
+            return None, None, None
 
         # Forward-fill short price gaps (≤3 months) to handle exchange
         # holidays or delayed data without distorting the simulation.
         price_df = price_df.ffill(limit=3)
 
-        portfolio, total_invested = simulate_dca(price_df, monthly_investment)
+        # The event ledger is returned raw; run_backtest() adds the derived KPIs.
+        portfolio, total_invested, events = simulate_dca(price_df, monthly_investment)
         metrics = compute_metrics(portfolio, total_invested)
 
         # compute_metrics returns {} when portfolio is too short (< 3 months)
         # or total_invested is zero.  Treat that as a failure so callers always
-        # receive either a fully-populated result or (None, None).
+        # receive either a fully-populated result or (None, None, None).
         if not metrics:
-            return None, None
+            return None, None, None
 
-        return portfolio, metrics
+        return portfolio, metrics, events

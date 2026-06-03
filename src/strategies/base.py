@@ -133,7 +133,7 @@ class BacktestStrategy(ABC):
         end_date: pd.Timestamp,
         df_meta: pd.DataFrame,
         params: dict[str, int | float | str],
-    ) -> tuple[pd.Series | None, dict[str, str] | None]:
+    ) -> tuple[pd.Series | None, dict[str, str] | None, list[dict] | None]:
         """Execute the backtest for one basket and return results.
 
         Parameters
@@ -149,8 +149,13 @@ class BacktestStrategy(ABC):
 
         Returns
         -------
-        (portfolio_series, metrics_dict) on success, or (None, None) on failure.
+        (portfolio_series, metrics_dict, events) on success, or
+        (None, None, None) on failure.
         portfolio_series – monthly portfolio value as a pandas Series.
         metrics_dict     – exactly the same 11 keys as compute_metrics() returns.
+        events           – per-event transaction ledger (list of dicts) for the
+                           transaction table, or None if the strategy produces
+                           no ledger.  run_backtest() adds the derived KPIs, so
+                           plugins return only the base event fields.
         """
         ...
