@@ -45,10 +45,11 @@ _METRIC_TABLE_STYLE = {'borderCollapse': 'collapse', 'width': '100%', 'fontSize'
 _TX_ROW_PX = 28
 
 # _TX_SCROLL_STYLE wraps a transaction table in a fixed-height, vertically
-# scrollable box.  maxHeight is sized to ~30 data rows plus the sticky header
-# so the table never grows taller than the requested 30-line viewport.
+# scrollable box.  maxHeight is the smaller of ~30 data rows (plus the sticky
+# header) and 80% of the viewport height, so the table never exceeds the
+# 30-line viewport on tall screens nor overruns the window on short ones.
 _TX_SCROLL_STYLE = {
-    'maxHeight': f'{_TX_ROW_PX * 31}px',  # ~30 rows + header
+    'maxHeight': f'min({_TX_ROW_PX * 31}px, 80vh)',  # min(~30 rows + header, 80% of window)
     'overflowY': 'auto',
     # Let the wide ledger scroll sideways on narrow screens; the Date column is
     # frozen (sticky) via the .tx-col-date CSS class so rows stay identifiable.
