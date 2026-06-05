@@ -7,7 +7,6 @@ from unittest.mock import patch
 os.environ.pop("BASE_URL", None)
 
 from src.backtest import (  # noqa: E402
-    load_monthly_closes,
     simulate_dca,
     compute_metrics,
     run_backtest,
@@ -42,63 +41,6 @@ def _daily_ohlcv(price, n_days=400, tz: str | None = 'UTC'):
 
 def _monthly_portfolio(values):
     return pd.Series(values, index=_MONTHLY_IDX[:len(values)])
-
-
-# ---------------------------------------------------------------------------
-# load_monthly_closes
-# ---------------------------------------------------------------------------
-
-class TestLoadMonthlyCloses:
-    def test_empty_filenames_returns_empty_dataframe(self):
-        result = load_monthly_closes(BASE_URL, [], SAMPLE_META)
-        assert result.empty
-
-    def test_unknown_filename_skipped_returns_empty(self):
-        with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
-            result = load_monthly_closes(BASE_URL, ['unknown.parquet'], SAMPLE_META)
-        assert result.empty
-
-    def test_single_asset_column_named_by_symbol(self):
-        with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
-            result = load_monthly_closes(BASE_URL, ['aapl.parquet'], SAMPLE_META)
-        assert 'AAPL' in result.columns
-
-    def test_daily_data_resampled_to_monthly(self):
-        with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0, n_days=365)):
-            result = load_monthly_closes(BASE_URL, ['aapl.parquet'], SAMPLE_META)
-        assert len(result) <= 13
-
-    def test_timezone_naive_index_gets_utc_localization(self):
-        with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0, tz=None)):
-            result = load_monthly_closes(BASE_URL, ['aapl.parquet'], SAMPLE_META)
-        assert isinstance(result.index, pd.DatetimeIndex) and result.index.tz is not None
-
-    def test_timezone_aware_index_preserved(self):
-        with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0, tz='America/New_York')):
-            result = load_monthly_closes(BASE_URL, ['aapl.parquet'], SAMPLE_META)
-        assert isinstance(result.index, pd.DatetimeIndex) and result.index.tz is not None
-
-    def test_parquet_error_is_swallowed_returns_empty(self):
-        with patch('src.backtest.pd.read_parquet', side_effect=OSError("not found")):
-            result = load_monthly_closes(BASE_URL, ['aapl.parquet'], SAMPLE_META)
-        assert result.empty
-
-    def test_multiple_assets_combined_into_one_dataframe(self):
-        with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
-            result = load_monthly_closes(BASE_URL, ['aapl.parquet', 'btc.parquet'], SAMPLE_META)
-        assert 'AAPL' in result.columns
-        assert 'BTC' in result.columns
-
-    def test_monthly_close_is_last_price_of_month(self):
-        idx = pd.date_range('2022-01-01', '2022-01-31', freq='D', tz='UTC')
-        prices = [100.0] * 30 + [999.0]
-        ohlcv = pd.DataFrame(
-            {'Open': prices, 'High': prices, 'Low': prices, 'Close': prices, 'Volume': 1},
-            index=idx,
-        )
-        with patch('src.backtest.pd.read_parquet', return_value=ohlcv):
-            result = load_monthly_closes(BASE_URL, ['aapl.parquet'], SAMPLE_META)
-        assert result['AAPL'].iloc[0] == pytest.approx(999.0)
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +103,24 @@ class TestSimulateDca:
         portfolio, total = simulate_dca(df, monthly_investment=1000.0)
         assert portfolio.iloc[-1] > total
 
+    def test_daily_data_invests_monthly_values_daily(self):
+        # 3 calendar months of *daily* constant-price data.
+        idx = pd.date_range('2020-01-01', '2020-03-31', freq='D', tz='UTC')
+        df = pd.DataFrame({'AAPL': 100.0}, index=idx)
+        portfolio, total = simulate_dca(df, monthly_investment=1000.0)
+        # One value per trading day (daily valuation).
+        assert len(portfolio) == len(idx)
+        # Exactly one contribution per calendar month (Jan, Feb, Mar) → 3 × 1000.
+        assert total == pytest.approx(3000.0)
+        # Before the first month-end nothing is invested yet → value 0 on day 1.
+        assert portfolio.iloc[0] == pytest.approx(0.0)
+        # On the final day (31 Mar, a month-end) all three contributions are in:
+        # 30 shares × 100 = 3000.
+        assert portfolio.iloc[-1] == pytest.approx(3000.0)
+        # The value steps up only on the three month-end contribution days.
+        increases = int((portfolio.diff().fillna(0.0) > 0).sum())
+        assert increases == 3
+
 
 # ---------------------------------------------------------------------------
 # compute_metrics
@@ -170,7 +130,7 @@ class TestComputeMetrics:
     _EXPECTED_KEYS = {
         'Total Return', 'CAGR', 'Sharpe Ratio', 'Max. Drawdown',
         'Volatility (p.a.)', 'Calmar Ratio', 'Invested', 'End Value',
-        'Profit/Loss', 'Best Month', 'Worst Month',
+        'Profit/Loss',
     }
 
     def test_empty_series_returns_empty_dict(self):
@@ -238,7 +198,8 @@ class TestRunBacktest:
         assert 'CAGR' in m
 
     def test_date_window_filters_portfolio_length(self):
-        # 5 years of daily data; request only 2 years → ~24 months returned.
+        # 5 years of daily data; request only 2 years. The curve is now daily,
+        # so ~2 years of trading days are returned (one value per day).
         now = pd.Timestamp.now(tz='UTC')
         idx = pd.date_range(now - pd.DateOffset(years=5), now, freq='D')
         ohlcv = pd.DataFrame(
@@ -249,7 +210,9 @@ class TestRunBacktest:
         with patch('src.backtest.pd.read_parquet', return_value=ohlcv):
             p, _ = run_backtest(BASE_URL, ['aapl.parquet'], start, now, SAMPLE_META)
         assert p is not None
-        assert len(p) <= 26  # 2 years ≈ 24 months, allow 2 for edge rounding
+        # ~2 years of daily rows (month-windowed): clearly daily, well over the
+        # ~24 a monthly curve would have, and below ~3 years' worth.
+        assert 700 <= len(p) <= 800
 
     def test_start_after_end_returns_none_none(self):
         # Invalid range: start > end → empty DataFrame → (None, None).
@@ -274,7 +237,8 @@ class TestRunBacktest:
         with patch('src.backtest.pd.read_parquet', return_value=ohlcv):
             p, _ = run_backtest(BASE_URL, ['aapl.parquet'], start, end, SAMPLE_META)
         assert p is not None
-        assert 10 <= len(p) <= 14   # roughly 12 months
+        # Middle year spans ~13 calendar months of daily rows (month-windowed).
+        assert 360 <= len(p) <= 420
 
 
 # ---------------------------------------------------------------------------

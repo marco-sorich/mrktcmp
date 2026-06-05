@@ -150,7 +150,7 @@ class BacktestStrategy(ABC):
         Returns
         -------
         (portfolio_series, metrics_dict) on success, or (None, None) on failure.
-        portfolio_series – monthly portfolio value as a pandas Series.
-        metrics_dict     – exactly the same 11 keys as compute_metrics() returns.
+        portfolio_series – daily portfolio value as a pandas Series.
+        metrics_dict     – exactly the same 9 keys as compute_metrics() returns.
         """
         ...

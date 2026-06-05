@@ -10,7 +10,13 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.backtest import MONTHLY_INVESTMENT, compute_metrics, load_monthly_closes, simulate_dca
+from src.backtest import (
+    MONTHLY_INVESTMENT,
+    _window_by_month,
+    compute_metrics,
+    load_daily_closes,
+    simulate_dca,
+)
 from src.strategies.base import BacktestStrategy, ConfigParam
 from src.strategies.registry import register
 
@@ -64,19 +70,21 @@ class DCAStrategy(BacktestStrategy):
 
         monthly_investment = float(resolved['monthly_investment'])
 
-        price_df = load_monthly_closes(base_url, filenames, df_meta)
+        # Load the full daily history, then keep only the calendar months of
+        # the requested window so the chosen start/end *months* are fully
+        # included regardless of exact trading-day boundaries.
+        price_df = load_daily_closes(base_url, filenames, df_meta)
         if price_df.empty:
             return None, None
 
-        # Restrict to the requested date window (both bounds inclusive).
-        mask = (price_df.index >= start_date) & (price_df.index <= end_date)
-        price_df = price_df.loc[mask].dropna(how='all', axis=1)
+        price_df = _window_by_month(price_df, start_date, end_date)
         if price_df.empty:
             return None, None
 
-        # Forward-fill short price gaps (≤3 months) to handle exchange
-        # holidays or delayed data without distorting the simulation.
-        price_df = price_df.ffill(limit=3)
+        # Forward-fill short price gaps (≤5 trading days, ≈ one week) to handle
+        # weekends, exchange holidays or delayed data without distorting the
+        # simulation or carrying delisted assets indefinitely.
+        price_df = price_df.ffill(limit=5)
 
         portfolio, total_invested = simulate_dca(price_df, monthly_investment)
         metrics = compute_metrics(portfolio, total_invested)

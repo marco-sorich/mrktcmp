@@ -3,10 +3,12 @@
 #
 # A tactical asset-allocation strategy.  Unlike DCA there is no recurring
 # savings rate: a single lump sum is provided as cash at the start and is
-# shifted between the basket and cash each month according to three market
-# signals evaluated on the basket as a whole (see backtest.py for the maths).
-# This plugin is a thin orchestration layer over the pure functions in
-# backtest.py so all computation logic stays in one place.
+# shifted between the basket and cash according to three market signals
+# evaluated on the basket as a whole (see backtest.py for the maths).  The
+# signals are evaluated *daily* and the basket is bought/sold to the new target
+# whenever the signal changes (then held until the next change); the portfolio
+# is valued every trading day.  This plugin is a thin orchestration layer over
+# the pure functions in backtest.py so all computation logic stays in one place.
 # ---------------------------------------------------------------------------
 
 from __future__ import annotations
@@ -15,11 +17,11 @@ import pandas as pd
 
 from src.backtest import (
     INITIAL_INVESTMENT,
+    _window_by_month,
     build_equal_weight_index,
     compute_metrics,
     compute_riskoff_signals,
     load_daily_closes,
-    load_monthly_closes,
     simulate_riskoff,
 )
 from src.strategies.base import BacktestStrategy, ConfigParam
@@ -42,8 +44,9 @@ class RiskOffStrategy(BacktestStrategy):
     def get_description(cls) -> str:
         return (
             "Risk-Off Signale: invest a one-off lump sum and shift between the "
-            "basket and cash each month based on three market signals (200-day "
-            "trend, year-to-date return, January barometer)."
+            "basket and cash based on three daily market signals (200-day trend, "
+            "year-to-date return, January barometer); the basket is bought/sold to "
+            "the new target whenever the signal changes."
         )
 
     @classmethod
@@ -77,23 +80,6 @@ class RiskOffStrategy(BacktestStrategy):
             ),
         ]
 
-    @staticmethod
-    def _fraction_at(signals: pd.Series, month_end: pd.Timestamp) -> float:
-        """Target invested fraction at *month_end* = positive signals / 3.
-
-        Uses Series.asof to pick the most recent signal at or before the
-        month-end (so only information available by then is used – no
-        look-ahead).  Before any signal history exists the value is NaN, which
-        we map to 0.0 (fully in cash) as a conservative default.
-        """
-        value = signals.asof(month_end)
-        if pd.isna(value):
-            return 0.0
-        # pandas-stubs types asof() as Scalar | Series[S1]; Scalar is too broad
-        # for float().  At runtime value is always an int (0..3) from
-        # compute_riskoff_signals, so this conversion is always safe.
-        return float(value) / 3.0  # type: ignore[arg-type]
-
     def run(
         self,
         base_url: str,
@@ -121,32 +107,23 @@ class RiskOffStrategy(BacktestStrategy):
         index = build_equal_weight_index(daily_df)
         signals = compute_riskoff_signals(index, sma_window, first_n_days)
 
-        # Normalise signal timestamps to midnight so Series.asof aligns cleanly
-        # with the month-end labels (which are at midnight) and never picks the
-        # previous day because of an intraday timestamp.
-        assert isinstance(signals.index, pd.DatetimeIndex)
-        signals.index = signals.index.normalize()
-
-        # 2. Monthly closes restricted to the requested window (bounds inclusive).
-        price_df = load_monthly_closes(base_url, filenames, df_meta)
+        # 2. Daily closes restricted to the requested window's calendar months.
+        #    Derived from the *same* daily_df so its index aligns exactly with
+        #    the signals computed above.
+        price_df = _window_by_month(daily_df, start_date, end_date)
         if price_df.empty:
             return None, None
 
-        mask = (price_df.index >= start_date) & (price_df.index <= end_date)
-        price_df = price_df.loc[mask].dropna(how='all', axis=1)
-        if price_df.empty:
-            return None, None
+        # Forward-fill short price gaps (≤5 trading days, ≈ one week), as in DCA.
+        price_df = price_df.ffill(limit=5)
 
-        # Forward-fill short price gaps (≤3 months), as in the DCA path.
-        price_df = price_df.ffill(limit=3)
+        # 3. Daily target invested fraction = positive signals / 3, aligned to
+        #    the windowed price index. Days before any signal history (NaN) map
+        #    to 0.0 (fully in cash). simulate_riskoff trades only when this
+        #    fraction changes (same-day execution), holding in between.
+        target_fraction = (signals / 3.0).reindex(price_df.index).fillna(0.0)
 
-        # 3. Target invested fraction per month-end = positive signals / 3.
-        inv_frac = pd.Series(
-            [self._fraction_at(signals, me) for me in price_df.index],
-            index=price_df.index,
-        )
-
-        portfolio, total_invested = simulate_riskoff(price_df, inv_frac, initial_investment)
+        portfolio, total_invested = simulate_riskoff(price_df, target_fraction, initial_investment)
         metrics = compute_metrics(portfolio, total_invested)
 
         # compute_metrics returns {} when the series is too short (<3 months);

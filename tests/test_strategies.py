@@ -39,7 +39,7 @@ _END = pd.Timestamp('2021-12-31', tz='UTC')
 _EXPECTED_METRIC_KEYS = {
     'Total Return', 'CAGR', 'Sharpe Ratio', 'Max. Drawdown',
     'Volatility (p.a.)', 'Calmar Ratio', 'Invested', 'End Value',
-    'Profit/Loss', 'Best Month', 'Worst Month',
+    'Profit/Loss',
 }
 
 
@@ -229,14 +229,14 @@ class TestDCAStrategy:
         assert isinstance(metrics, dict)
         assert set(metrics.keys()) == _EXPECTED_METRIC_KEYS
 
-    def test_run_returns_11_metric_keys(self):
+    def test_run_returns_9_metric_keys(self):
         strategy = DCAStrategy()
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
             _, metrics = strategy.run(
                 BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META, params={}
             )
         assert metrics is not None
-        assert len(metrics) == 11
+        assert len(metrics) == 9
 
     def test_run_with_empty_filenames_returns_none_none(self):
         strategy = DCAStrategy()
@@ -368,7 +368,7 @@ class TestRiskOffStrategy:
         assert by_key['sma_window'].default == 200
         assert by_key['first_n_days'].default == 10
 
-    def test_run_returns_exactly_11_metric_keys(self):
+    def test_run_returns_exactly_9_metric_keys(self):
         strategy = RiskOffStrategy()
         with patch('src.backtest.pd.read_parquet', return_value=_daily_rising()):
             portfolio, metrics = strategy.run(
@@ -377,7 +377,7 @@ class TestRiskOffStrategy:
         assert portfolio is not None
         assert isinstance(metrics, dict)
         assert set(metrics.keys()) == _EXPECTED_METRIC_KEYS
-        assert len(metrics) == 11
+        assert len(metrics) == 9
 
     def test_run_with_empty_filenames_returns_none_none(self):
         strategy = RiskOffStrategy()
@@ -507,6 +507,36 @@ class TestRiskOffPureFunctions:
         # Lump sum grows 100→150 → 10,000 → 15,000.
         assert portfolio.iloc[0] == pytest.approx(10_000.0)
         assert portfolio.iloc[-1] == pytest.approx(15_000.0)
+
+    def test_simulate_riskoff_trades_on_the_day_the_target_changes(self):
+        # Flat price until the last day; the target turns on at index 2. The
+        # trade must execute on that day, so when the price jumps on the final
+        # day the (now invested) lump sum doubles in value.
+        idx = pd.date_range('2020-01-31', periods=4, freq='ME', tz='UTC')
+        prices = pd.DataFrame({'A': [100.0, 100.0, 100.0, 200.0]}, index=idx)
+        target = pd.Series([0.0, 0.0, 1.0, 1.0], index=idx)
+        portfolio, _ = simulate_riskoff(prices, target, initial_investment=10_000.0)
+        # Still all cash while the target is 0 (no deployment before the change).
+        assert portfolio.iloc[0] == pytest.approx(10_000.0)
+        # Fully invested by index 2, so the price doubling on the last day
+        # doubles the portfolio (100 shares × 200).
+        assert portfolio.iloc[-1] == pytest.approx(20_000.0)
+
+    def test_simulate_riskoff_holds_and_drifts_between_changes(self):
+        # The target never changes after the initial deployment (constant 0.5),
+        # so the basket is bought once and then HELD: as the price rises and
+        # falls back the portfolio drifts and returns exactly to its start. A
+        # daily "maintain-the-fraction" strategy would instead end at 11,250.
+        idx = pd.date_range('2020-01-31', periods=3, freq='ME', tz='UTC')
+        prices = pd.DataFrame({'A': [100.0, 200.0, 100.0]}, index=idx)
+        target = pd.Series([0.5, 0.5, 0.5], index=idx)
+        portfolio, _ = simulate_riskoff(prices, target, initial_investment=10_000.0)
+        # Bought 50 shares (5,000) + 5,000 cash at index 0, then held.
+        assert portfolio.iloc[0] == pytest.approx(10_000.0)
+        assert portfolio.iloc[1] == pytest.approx(15_000.0)   # 50×200 + 5,000
+        assert portfolio.iloc[-1] == pytest.approx(10_000.0)  # 50×100 + 5,000
+        # Confirm we did NOT rebalance daily (which would have ended at 11,250).
+        assert portfolio.iloc[-1] != pytest.approx(11_250.0)
 
     def test_simulate_riskoff_zero_fraction_stays_constant(self):
         idx = pd.date_range('2020-01-31', periods=6, freq='ME', tz='UTC')

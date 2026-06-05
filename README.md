@@ -7,11 +7,15 @@ A Plotly Dash web application for backtesting across user-defined asset baskets.
 - Build two asset baskets (Basket A and Basket B) from any combination of assets
 - Date range slider auto-calculated from the overlapping history of all selected assets
 - Pluggable backtesting strategies — each basket can use a different strategy with its own configurable parameters
-- **DCA** (default): a fixed amount (1,000 €) invested per basket every month, split equally across available assets
-- **Risk-Off Signale**: a one-off lump sum is held as cash and tactically shifted between the basket and cash each month.
-  Three market signals are evaluated on the basket as a whole — 200-day trend, year-to-date return, and the January
-  barometer (first 10 trading days of the year) — and the number of *positive* signals sets the invested fraction in
-  thirds (3 → 100 %, 2 → 66 %, 1 → 33 %, 0 → all cash)
+- **DCA** (default): a fixed amount (1,000 €) contributed per basket every month (on each month's last trading day),
+  split equally across available assets; the portfolio is valued on every trading day
+- **Risk-Off Signale**: a one-off lump sum is held as cash and tactically shifted between the basket and cash.
+  Three market signals are evaluated on the basket as a whole *every day* — 200-day trend, year-to-date return, and the
+  January barometer (first 10 trading days of the year) — and the number of *positive* signals sets the target invested
+  fraction in thirds (3 → 100 %, 2 → 66 %, 1 → 33 %, 0 → all cash). The basket is bought/sold to the new target on the
+  day the signal changes and then held (drifting with the market) until the next change
+- All strategies value the portfolio on a **daily** basis, so the chart is a dense daily curve and the risk metrics are
+  daily-correct
 - Side-by-side performance metrics: Total Return, CAGR, Sharpe Ratio, Max. Drawdown, Volatility, Calmar Ratio, and more
 
 ## Requirements
@@ -79,8 +83,9 @@ pytest
 ```
 src/
   app.py              # Dash application entry point
-  backtest.py         # pure simulation engines: DCA (load_monthly_closes, simulate_dca)
-                      #   and Risk-Off (load_daily_closes, build_equal_weight_index,
+  backtest.py         # pure simulation engines, all on daily close prices:
+                      #   DCA (load_daily_closes, _window_by_month, simulate_dca) and
+                      #   Risk-Off (load_daily_closes, build_equal_weight_index,
                       #   compute_riskoff_signals, simulate_riskoff); shared compute_metrics
   strategies/
     __init__.py       # imports all plugins to trigger registration at startup
@@ -151,6 +156,6 @@ tests/
 
 **Plugin contract:**
 - `run()` must return `(pd.Series | None, dict[str, str] | None)`.
-- The metrics dict must contain exactly the same 11 keys as `compute_metrics()` in `backtest.py`.
+- The metrics dict must contain exactly the same 9 keys as `compute_metrics()` in `backtest.py`.
 - Every `ConfigParam` must have a `default` value so the user is never forced to enter anything.
 - For `int`/`float` params, `min_value` and `max_value` are required (the GUI uses them to prevent invalid input).

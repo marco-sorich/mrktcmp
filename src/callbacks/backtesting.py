@@ -825,7 +825,7 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
         # go.Scatter draws a line chart. round(2) avoids floating-point noise
         # in hover tooltips (e.g. 1000.0000000002 → 1000.0).
         fig.add_trace(go.Scatter(
-            x=portfolio_a.index,       # x-axis: monthly dates
+            x=portfolio_a.index,       # x-axis: daily dates
             y=portfolio_a.round(2),    # y-axis: portfolio value in EUR
             name='Basket A',
             line=dict(color='#1a56db', width=2),  # blue line, 2px thick
@@ -839,12 +839,13 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
             line=dict(color='#c0392b', width=2),  # red line
         ))
 
-    # The two baskets may cover different date ranges (e.g. if one basket
-    # contains an asset that only recently started trading). Title the chart
-    # using the longer simulation so users understand what they are seeing.
-    months_shown = max(
-        len(portfolio_a) if portfolio_a is not None else 0,
-        len(portfolio_b) if portfolio_b is not None else 0,
+    # Length of the selected window in months. Derived from the date range
+    # (not len(portfolio), which is now a daily count) so the status line still
+    # reads in months even though the curves are daily. Computed as an integer
+    # month index to avoid the tz-dropping warning that to_period() would emit.
+    n_months = (
+        (end_date.year * 12 + end_date.month)
+        - (start_date.year * 12 + start_date.month) + 1
     )
 
     d0_label = start_date.strftime('%b %Y')
@@ -867,12 +868,12 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     name_a = (strategy_config_a or {}).get('strategy') or 'DCA'
     name_b = (strategy_config_b or {}).get('strategy') or 'DCA'
     status = (
-        f'Backtest complete – {d0_label} to {d1_label} ({months_shown} months). '
+        f'Backtest complete – {d0_label} to {d1_label} ({n_months} months). '
         f'Strategy A: {name_a}, Strategy B: {name_b}.'
     )
 
     _config.log.info("Backtest completed: %d months, A=%s (%s), B=%s (%s)",
-                     months_shown, len(filenames_a), name_a, len(filenames_b), name_b)
+                     n_months, len(filenames_a), name_a, len(filenames_b), name_b)
 
     # Return four values matching the four Output declarations above.
     return fig, visible, metrics_div, status
