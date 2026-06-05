@@ -17,8 +17,7 @@
 #   utils.py              – log_time decorator
 #   components.py         – reusable UI component builders
 #   layout.py             – create_layout() factory
-#   callbacks/chart.py    – Market Data tab callbacks
-#   callbacks/backtesting.py – Backtesting tab callbacks
+#   callbacks/backtesting.py – backtesting callbacks
 #   backtest.py           – DCA simulation engine
 #
 # Running in development:
@@ -68,7 +67,7 @@ import src.config as _config
 from src.layout import create_layout
 
 # Importing src.callbacks triggers __init__.py which in turn imports
-# chart.py and backtesting.py. Each of those modules defines callback
+# backtesting.py. That module defines callback
 # functions decorated with @callback; the decorator executes at import time
 # and registers the callback's Input/Output wiring with Dash globally.
 # The 'noqa: F401' comment suppresses the "imported but unused" linter

@@ -73,9 +73,8 @@ Two strategies share this module; all parquet I/O happens here.
 `base.py` defines the `BacktestStrategy` ABC and the `ConfigParam` dataclass (GUI-rendered, self-validating params). `registry.py` holds the `@register` decorator and `get_strategy()`/`list_strategies()`/`get_all_strategy_info()`. Plugins are thin orchestrators over `backtest.py`: `dca.py` (DCA) and `riskoff.py` (Risk-Off Signale). `__init__.py` imports every plugin module so importing the package registers all strategies. Each `run()` returns `(pd.Series | None, dict | None)` with the same 11 metric keys as `compute_metrics()`.
 
 **`src/callbacks/`**
-- `chart.py`: Market Data tab — asset class filter, search, candlestick+volume chart, y-axis sync on zoom
-- `backtesting.py`: Backtesting tab — basket management, date range slider, `run_backtest` orchestration
-- `__init__.py` imports both modules so that importing the package registers all callbacks
+- `backtesting.py`: basket management, date range slider, `run_backtest` orchestration
+- `__init__.py` imports `backtesting` so that importing the package registers all callbacks
 
 **UI building blocks**
 - `layout.py`: top-level layout only, calls `_basket_ui()` from `components.py`
@@ -86,6 +85,5 @@ Two strategies share this module; all parquet I/O happens here.
 - On startup: `master.parquet` → `config.df` (asset catalogue with symbol, name, exchange, asset_class, filename, interval)
 - On user interaction: per-asset parquet files (`{BASE_URL}/{filename}`) fetched on demand; each file has OHLCV columns with a datetime index
 - Basket state is held in `dcc.Store` components client-side; the backtest callback reads them as lists of `{filename, symbol, name}` dicts
-- The y-axis zoom callback stores serialised OHLCV JSON in a `dcc.Store` to avoid re-fetching
 
 **`@log_time` decorator** (`utils.py`) wraps every callback to emit DEBUG-level timing.

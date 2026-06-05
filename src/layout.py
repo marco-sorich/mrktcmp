@@ -17,7 +17,7 @@
 # ---------------------------------------------------------------------------
 
 # html: wrappers for every standard HTML element (html.Div, html.H1, etc.).
-# dcc:  "Dash Core Components" – interactive widgets such as Tabs, Dropdown,
+# dcc:  "Dash Core Components" – interactive widgets such as Dropdown,
 #       Graph, RangeSlider, RadioItems, and Store.
 from dash import html, dcc
 
@@ -40,9 +40,9 @@ def create_layout():
     Called once during application startup in app.py:
         app.layout = create_layout()
 
-    The page is divided into two tabs:
-      • Market Data  – single-asset price + volume candlestick chart.
-      • Backtesting  – DCA simulation for two user-defined asset baskets.
+    The page lets users build two asset baskets and compare how a chosen
+    backtesting strategy (e.g. DCA, Risk-Off Signale) would have performed
+    over a user-selected date range.
 
     Returns
     -------
@@ -80,7 +80,7 @@ def create_layout():
 
         # Two basket panels side by side using a flex row.
         # gap: 8px adds horizontal space between the panels.
-        # marginTop: 12px adds vertical breathing room below the tabs.
+        # marginTop: 12px adds vertical breathing room below the header.
         html.Div([
             _basket_ui('a'),                       # Basket A controls
             html.Div(style={'width': '24px'}),     # visual divider spacer

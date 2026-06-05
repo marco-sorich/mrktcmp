@@ -1,15 +1,9 @@
 # mrktcmp — Markets Compare
 
-A Plotly Dash web application for market data visualisation and backtesting across user-defined asset baskets.
+A Plotly Dash web application for backtesting across user-defined asset baskets.
 
 ## Features
 
-**Market Data tab**
-- Searchable asset selector filtered by asset class (stocks, crypto, ETFs, …)
-- Candlestick + volume subplot chart with a shared x-axis
-- Y-axis auto-rescales to visible candles when zooming or panning
-
-**Backtesting tab**
 - Build two asset baskets (Basket A and Basket B) from any combination of assets
 - Date range slider auto-calculated from the overlapping history of all selected assets
 - Pluggable backtesting strategies — each basket can use a different strategy with its own configurable parameters
@@ -95,8 +89,7 @@ src/
     dca.py            # Dollar-Cost Averaging strategy plugin
     riskoff.py        # Risk-Off signal strategy plugin (lump sum + tactical cash)
   callbacks/
-    backtesting.py    # Backtesting tab callbacks
-    chart.py          # Market Data tab callbacks
+    backtesting.py    # backtesting callbacks
   config.py           # startup singleton: logging, env vars, master.parquet
   components.py       # reusable UI component builders
   layout.py           # top-level Dash layout

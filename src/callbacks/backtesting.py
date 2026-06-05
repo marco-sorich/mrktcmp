@@ -1,9 +1,9 @@
 # ---------------------------------------------------------------------------
-# callbacks/backtesting.py – Backtesting tab callbacks
+# callbacks/backtesting.py – Backtesting callbacks
 #
 # This module contains all Dash callbacks and helper functions that power
-# the Backtesting tab, where users build two asset baskets and compare how
-# a monthly DCA (Dollar-Cost Averaging) strategy would have performed.
+# the main page, where users build two asset baskets and compare how a
+# chosen strategy would have performed over a selected date range.
 #
 # The callbacks are grouped by feature:
 #
@@ -13,8 +13,7 @@
 #
 #   Live search             – bt_search_a / bt_search_b
 #                             Refine each basket's dropdown options as the
-#                             user types (same ranked scoring as the Market
-#                             Data tab).
+#                             user types.
 #
 #   Basket management       – manage_basket_a / manage_basket_b
 #                             Handle "＋ add" and "✕ remove" actions for
@@ -29,7 +28,7 @@
 #                             string while the user drags the slider.
 #
 #   Run backtest            – run_backtest_callback
-#                             Executes the DCA simulation for both baskets,
+#                             Executes the simulation for both baskets,
 #                             plots the portfolio value curves, and populates
 #                             the metrics comparison table.
 #
@@ -256,10 +255,9 @@ def bt_search_b(search_value, asset_class, current_value):
 def _bt_asset_search(search_value, asset_class, current_value):
     """Shared search logic for both basket dropdowns.
 
-    Uses the same 0–4 / 99 scoring algorithm as the Market Data tab's
-    update_asset_search: exact symbol match scores 0 (best), no match
-    scores 99 (excluded). Rows are sorted ascending so better matches
-    appear at the top of the dropdown list.
+    Uses a 0–4 / 99 scoring algorithm: exact symbol match scores 0 (best),
+    no match scores 99 (excluded). Rows are sorted ascending so better
+    matches appear at the top of the dropdown list.
 
     Parameters
     ----------
