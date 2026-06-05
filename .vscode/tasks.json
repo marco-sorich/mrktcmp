@@ -37,6 +37,11 @@
                 "reveal": "always",
                 "panel": "new"
             }
+        },
+        {
+            "label": "killdebugger",
+            "type": "shell",
+            "command": "lsof -t -i tcp:8050 | xargs kill -9"
         }
     ]
 }

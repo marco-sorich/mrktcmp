@@ -1,0 +1,22 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Gunicorn",
+            "type": "debugpy",
+            "request": "launch",
+            "program":"/home/vscode/.local/bin/gunicorn",
+            "gevent": true,
+            "env": {
+                "DASH_DEBUG": "true"
+            },
+            "envFile": "${workspaceFolder}/.env",
+            "args": [
+                "-b", "0.0.0.0.:8050",
+                "--reload",
+                "src.app:server",
+            ],
+            "postDebugTask": "killdebugger"
+        }
+    ]
+}
