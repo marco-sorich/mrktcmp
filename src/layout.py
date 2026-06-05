@@ -21,17 +21,9 @@
 #       Graph, RangeSlider, RadioItems, and Store.
 from dash import html, dcc
 
-# Import dash bootstrap
-import dash_bootstrap_components as dbc
-
 # ---------------------------------------------------------------------------
 # Internal imports
 # ---------------------------------------------------------------------------
-
-# config is imported as a module object so that assetsClasses is read at
-# call time (when create_layout() is invoked), not at import time. This
-# ensures the layout always reflects the data that was loaded from BASE_URL.
-import src.config as _config
 
 # _basket_ui builds the full component subtree for a single basket panel
 # (heading, radio buttons, dropdown, add button, item list, and Store).
@@ -86,127 +78,81 @@ def create_layout():
             }),
         ], style={'marginBottom': '16px', 'borderBottom': '1px solid #e0e0e0', 'paddingBottom': '12px'}),
 
-        # dcc.Tabs creates a tabbed interface.
-        # id     – unique ID so callbacks can read which tab is active.
-        # value  – the initially selected tab (matched against each Tab's value).
-        # children – list of dcc.Tab components, one per tab.
-        dbc.Tabs(id='main-tabs', children=[
+        # Two basket panels side by side using a flex row.
+        # gap: 8px adds horizontal space between the panels.
+        # marginTop: 12px adds vertical breathing room below the tabs.
+        html.Div([
+            _basket_ui('a'),                       # Basket A controls
+            html.Div(style={'width': '24px'}),     # visual divider spacer
+            _basket_ui('b'),                       # Basket B controls
+        ], style={'display': 'flex', 'gap': '8px', 'marginTop': '12px'}),
 
-            # -----------------------------------------------------------
-            # Tab 1: Market Data – single-asset price + volume chart
-            # -----------------------------------------------------------
-            dbc.Tab(
-                label="Market Data", children=[
+        # Date-range section: slider + human-readable label + store.
+        html.Div([
+            html.Label('Analysis period:', style={'fontWeight': 'bold', 'marginBottom': '4px'}),
 
-                    # Asset-class selector (e.g. 'stocks', 'crypto', 'etfs').
-                    # RadioItems fires the update_asset_class callback which then
-                    # populates the asset search dropdown below it.
-                    html.Div([
-                        dcc.RadioItems(_config.assetsClasses, id='assetclasses-type', inline=True),
-                        # Dropdown for the individual asset. Starts empty and
-                        # disabled; enabled once an asset class is chosen.
-                        dcc.Dropdown(id='asset-type', placeholder='Type to search…'),
-                    ]),
+            # dcc.RangeSlider has two draggable handles so the user
+            # can select both a start and an end date.
+            # min / max / value are integers (indices into the date
+            # list stored in bt-date-store). They are set dynamically
+            # by update_date_range_slider when assets are added.
+            # allowCross=False prevents the left handle from passing
+            # the right handle (keeps the range always valid).
+            # disabled=True at startup because no baskets are filled.
+            html.Div(
+                dcc.RangeSlider(
+                    id='bt-date-range',
+                    min=0, max=1, step=1, value=[0, 1],
+                    marks={},
+                    allowCross=False,
+                    updatemode='drag',
+                    disabled=True,
+                    allow_direct_input=False,
+                ),
+                style={'width': '98%', 'margin': '0 auto'},
+            ),
 
-                    # Headline (asset name + exchange/country) injected by the
-                    # update_chart callback as an html.H2 + html.P pair.
-                    html.Div(id='asset-headline'),
+            # Human-readable date range display, e.g. "Jan 2020 – Dec 2024".
+            # Updated by update_date_range_slider (on basket change)
+            # and update_date_display (on every slider drag).
+            html.Div(
+                id='bt-date-display',
+                children='Add assets to a basket to see the available date range.',
+                style={'color': '#666', 'fontSize': '13px', 'marginTop': '6px'},
+            ),
 
-                    # The candlestick + volume chart.
-                    # dcc.Graph wraps a Plotly figure. The figure itself is set by
-                    # the update_chart callback when an asset is selected.
-                    dcc.Graph(id='price-chart', style={'width': '100%'}),
+            # Invisible store holding the ordered list of monthly date
+            # strings (ISO format) that correspond to slider positions.
+            # Position 0 → date_store[0], position N-1 → date_store[-1].
+            dcc.Store(id='bt-date-store', data=[]),
 
-                    # Invisible data store: holds the serialised High/Low/Volume
-                    # columns so the y-axis zoom callback can recalculate visible
-                    # ranges without re-fetching the full parquet file.
-                    dcc.Store(id='ohlcv-data'),
-                ]),
+        ], style={'marginTop': '20px', 'marginBottom': '8px'}),
 
-            # -----------------------------------------------------------
-            # Tab 2: Backtesting – DCA simulation for two asset baskets
-            # -----------------------------------------------------------
-            dbc.Tab(
-                label="Backtesting", children=[
+        # Run button – clicking this fires run_backtest_callback.
+        html.Button(
+            '▶ Start Backtest',
+            id='bt-run',
+            n_clicks=0,
+            style={'padding': '8px 20px', 'fontSize': '14px', 'cursor': 'pointer', 'marginBottom': '16px'},
+        ),
 
-                    # Two basket panels side by side using a flex row.
-                    # gap: 8px adds horizontal space between the panels.
-                    # marginTop: 12px adds vertical breathing room below the tabs.
-                    html.Div([
-                        _basket_ui('a'),                       # Basket A controls
-                        html.Div(style={'width': '24px'}),     # visual divider spacer
-                        _basket_ui('b'),                       # Basket B controls
-                    ], style={'display': 'flex', 'gap': '8px', 'marginTop': '12px'}),
+        # Status line – shows messages like "Backtest complete – 5.0 years".
+        # Updated by run_backtest_callback; starts empty.
+        html.Div(id='bt-status', style={'color': '#888', 'fontSize': '13px', 'marginBottom': '8px'}),
 
-                    # Date-range section: slider + human-readable label + store.
-                    html.Div([
-                        html.Label('Analysis period:', style={'fontWeight': 'bold', 'marginBottom': '4px'}),
+        # Chart and metrics side by side on wide screens (via layout.css),
+        # stacked on narrow screens. CSS classes are defined in
+        # src/assets/layout.css which Dash loads automatically.
+        html.Div([
+            html.Div(
+                dcc.Graph(id='bt-chart', style={'width': '100%', 'display': 'none'}),
+                className='bt-chart-wrapper',
+            ),
+            html.Div(id='bt-metrics', className='bt-metrics-wrapper'),
+        ], className='results-container'),
 
-                        # dcc.RangeSlider has two draggable handles so the user
-                        # can select both a start and an end date.
-                        # min / max / value are integers (indices into the date
-                        # list stored in bt-date-store). They are set dynamically
-                        # by update_date_range_slider when assets are added.
-                        # allowCross=False prevents the left handle from passing
-                        # the right handle (keeps the range always valid).
-                        # disabled=True at startup because no baskets are filled.
-                        html.Div(
-                            dcc.RangeSlider(
-                                id='bt-date-range',
-                                min=0, max=1, step=1, value=[0, 1],
-                                marks={},
-                                allowCross=False,
-                                updatemode='drag',
-                                disabled=True,
-                                allow_direct_input=False,
-                            ),
-                            style={'width': '98%', 'margin': '0 auto'},
-                        ),
-
-                        # Human-readable date range display, e.g. "Jan 2020 – Dec 2024".
-                        # Updated by update_date_range_slider (on basket change)
-                        # and update_date_display (on every slider drag).
-                        html.Div(
-                            id='bt-date-display',
-                            children='Add assets to a basket to see the available date range.',
-                            style={'color': '#666', 'fontSize': '13px', 'marginTop': '6px'},
-                        ),
-
-                        # Invisible store holding the ordered list of monthly date
-                        # strings (ISO format) that correspond to slider positions.
-                        # Position 0 → date_store[0], position N-1 → date_store[-1].
-                        dcc.Store(id='bt-date-store', data=[]),
-
-                    ], style={'marginTop': '20px', 'marginBottom': '8px'}),
-
-                    # Run button – clicking this fires run_backtest_callback.
-                    html.Button(
-                        '▶ Start Backtest',
-                        id='bt-run',
-                        n_clicks=0,
-                        style={'padding': '8px 20px', 'fontSize': '14px', 'cursor': 'pointer',
-                               'marginBottom': '16px'},
-                    ),
-
-                    # Status line – shows messages like "Backtest complete – 5.0 years".
-                    # Updated by run_backtest_callback; starts empty.
-                    html.Div(id='bt-status', style={'color': '#888', 'fontSize': '13px', 'marginBottom': '8px'}),
-
-                    # Chart and metrics side by side on wide screens (via layout.css),
-                    # stacked on narrow screens. CSS classes are defined in
-                    # src/assets/layout.css which Dash loads automatically.
-                    html.Div([
-                        html.Div(
-                            dcc.Graph(id='bt-chart', style={'width': '100%', 'display': 'none'}),
-                            className='bt-chart-wrapper',
-                        ),
-                        html.Div(id='bt-metrics', className='bt-metrics-wrapper'),
-                    ], className='results-container'),
-
-                    # Hidden result store (reserved for future drill-down
-                    # interactions, e.g. clicking a month to inspect it).
-                    dcc.Store(id='bt-result-store', data={}),
-                ]),
-        ]),
+        # Hidden result store (reserved for future drill-down
+        # interactions, e.g. clicking a month to inspect it).
+        dcc.Store(id='bt-result-store', data={}),
 
     ], style={'maxWidth': '100%', 'padding': '0 8px', 'boxSizing': 'border-box'})

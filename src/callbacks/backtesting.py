@@ -39,6 +39,12 @@
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
+# Standard-library imports
+# ---------------------------------------------------------------------------
+
+from typing import Any
+
+# ---------------------------------------------------------------------------
 # Third-party imports
 # ---------------------------------------------------------------------------
 
@@ -583,7 +589,7 @@ def update_date_display(slider_value, date_store):
     or no_update if the store has not been populated yet.
     """
     # Guard against the slider firing before the date store has been populated.
-    if not slider_value or not date_store:
+    if slider_value is None or not date_store:
         return no_update
     i0, i1 = slider_value[0], slider_value[1]
     # Parse ISO strings back to Timestamps for formatting.
@@ -633,14 +639,17 @@ def render_strategy_params(
     strategy_name: str | None,
     basket_a: list | None,
     basket_b: list | None,
-) -> list:
+) -> list | Any:
     """Re-render param inputs whenever the user picks a different strategy.
 
     Uses MATCH so a single callback serves both basket A and basket B.
     basket_id is extracted from the triggering component's dict ID.
     Params are rendered disabled when the corresponding basket is empty.
     """
-    basket_id = dash.callback_context.triggered_id['basket']
+    tid = dash.callback_context.triggered_id
+    if not isinstance(tid, dict):
+        return no_update
+    basket_id = tid['basket']
     basket_data = basket_a if basket_id == 'a' else basket_b
     disabled = not bool(basket_data)
     return _build_strategy_params_ui(strategy_name, basket_id, disabled=disabled)
@@ -771,7 +780,7 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     # Guard: the date slider must have been populated by update_date_range_slider
     # before the user can run. If it has not (e.g. all files failed to load),
     # we cannot resolve the slider positions to actual Timestamps.
-    if not date_store or not slider_value or len(date_store) < 2:
+    if date_store is None or slider_value is None or len(date_store) < 2:
         return empty_chart, hidden, '', 'No date range available. Add assets first.'
 
     # Convert the slider's integer positions back to pandas Timestamps.

@@ -18,4 +18,4 @@
 # Importing chart and backtesting triggers all @callback decorators defined
 # in those modules. The noqa comment suppresses the "imported but unused"
 # linter warning – the side effect (callback registration) is the purpose.
-from src.callbacks import chart, backtesting  # noqa: F401
+from src.callbacks import backtesting  # noqa: F401
