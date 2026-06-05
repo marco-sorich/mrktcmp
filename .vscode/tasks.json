@@ -14,25 +14,47 @@
             }
         },
         {
-            // Mirrors the CI pipeline: flake8 → mypy 2.1.0 → pytest.
-            "label": "QA pipeline",
+            "label": "Lint (flake8)",
             "type": "shell",
-            "command": "flake8 --max-complexity=10 --max-line-length=127 && mypy --explicit-package-bases --ignore-missing-imports src/backtest.py src/strategies/ && mypy --explicit-package-bases --ignore-missing-imports tests/test_backtest.py tests/test_strategies.py && pytest",
+            "command": "flake8 --max-complexity=10 --max-line-length=127",
             "group": "test",
             "problemMatcher": [],
-            "presentation": {
-                "reveal": "always",
-                "panel": "new"
-            }
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "hide": true
+        },
+        {
+            // Type check with mypy 2.1.0 (pinned in requirements_dev.txt); older
+            // 1.x releases silently miss errors that CI's mypy 2.1.0 reports.
+            "label": "Type check (mypy 2.1.0)",
+            "type": "shell",
+            "command": "mypy --explicit-package-bases --ignore-missing-imports src/backtest.py src/strategies/ && mypy --explicit-package-bases --ignore-missing-imports tests/test_backtest.py tests/test_strategies.py",
+            "group": "test",
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "hide": true
+        },
+        {
+            "label": "pytest",
+            "type": "shell",
+            "command": "pytest",
+            "group": "test",
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "hide": true
+        },
+        {
+            // Mirrors the CI pipeline: flake8 → mypy 2.1.0 → pytest.
+            "label": "QA pipeline",
+            "dependsOn": ["Lint (flake8)", "Type check (mypy 2.1.0)", "pytest"],
+            "dependsOrder": "sequence",
+            "group": "test",
+            "problemMatcher": []
         },
         {
             "label": "killdebugger",
             "type": "shell",
-            "command": "lsof -t -i tcp:8050 | xargs kill -9",
-            "presentation": {
-                "reveal": "never",
-                "showReuseMessage": false
-            },
+            "command": "lsof -t -i tcp:8050 | xargs kill",
+            "presentation": { "reveal": "never", "showReuseMessage": false },
             "hide": true
         }
     ]

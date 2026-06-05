@@ -6,7 +6,6 @@
             "type": "debugpy",
             "request": "launch",
             "program":"/home/vscode/.local/bin/gunicorn",
-            "gevent": true,
             "env": {
                 "DASH_DEBUG": "true"
             },
