@@ -674,6 +674,15 @@ def simulate_riskoff(
     # first recorded event so _enrich_events derives the cost basis correctly.
     flow_pending = initial_investment
 
+    # Event cadence is monthly by design: this loop steps once per month, so at
+    # most one event is ever recorded per month – never several.  Because the
+    # portfolio is rebalanced back to equal weight every month, prices drifting
+    # apart mean some asset almost always needs a trade, so an event is produced
+    # in essentially every *invested* month.  Event-free months therefore occur
+    # only during sustained fully-in-cash stretches (target fraction 0, holdings
+    # already 0 → no trade → no leg → no event).  This is intentional: the table
+    # mirrors the strategy's monthly rebalancing, it does not trade only on
+    # signal changes.
     for i, (date, prices) in enumerate(price_df.iterrows()):
         inv_frac = float(inv.iloc[i])
         old_holdings = holdings
