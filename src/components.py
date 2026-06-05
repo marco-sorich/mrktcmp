@@ -424,17 +424,24 @@ def _transaction_row(ev: dict, symbols: list[str], run_id: str, index: int) -> '
     pnl = ev['pnl']
     pnl_color = '#1a7f37' if pnl >= 0 else '#c0392b'
 
+    # The tx-col-date / tx-col-optional classes mirror the header cells so the
+    # frozen Date column and the mobile-hidden columns line up (see layout.css).
     cells = [
-        html.Td(ev['date'].strftime('%b %Y'), style={'padding': '3px 8px', 'whiteSpace': 'nowrap'}),
-        html.Td(_fmt_eur(ev['value_pre_trade']), style={'textAlign': 'right', 'padding': '3px 8px'}),
+        html.Td(ev['date'].strftime('%b %Y'), style={'padding': '3px 8px', 'whiteSpace': 'nowrap'},
+                className='tx-col-date'),
+        html.Td(_fmt_eur(ev['value_pre_trade']), style={'textAlign': 'right', 'padding': '3px 8px'},
+                className='tx-col-optional'),
         *asset_cells,
-        html.Td(_fmt_eur(ev['cash']), style={'textAlign': 'right', 'padding': '3px 8px'}),
+        html.Td(_fmt_eur(ev['cash']), style={'textAlign': 'right', 'padding': '3px 8px'},
+                className='tx-col-optional'),
         html.Td(_fmt_eur(ev['value_post_trade']), style={'textAlign': 'right', 'padding': '3px 8px'}),
         html.Td(_fmt_eur(ev['cum_invested']), style={'textAlign': 'right', 'padding': '3px 8px'}),
         html.Td(f"{pnl:+,.0f}", style={'textAlign': 'right', 'padding': '3px 8px', 'color': pnl_color}),
         html.Td(_fmt_pct(ev['pnl_pct']), style={'textAlign': 'right', 'padding': '3px 8px', 'color': pnl_color}),
-        html.Td(_fmt_pct(ev['equity_pct']), style={'textAlign': 'right', 'padding': '3px 8px'}),
-        html.Td(_fmt_pct(ev['period_return_pct']), style={'textAlign': 'right', 'padding': '3px 8px'}),
+        html.Td(_fmt_pct(ev['equity_pct']), style={'textAlign': 'right', 'padding': '3px 8px'},
+                className='tx-col-optional'),
+        html.Td(_fmt_pct(ev['period_return_pct']), style={'textAlign': 'right', 'padding': '3px 8px'},
+                className='tx-col-optional'),
     ]
     return html.Tr(
         cells,
@@ -474,17 +481,20 @@ def _transaction_table(events: 'list[dict] | None', run_id: str) -> 'html.Div':
     symbols = _transaction_columns(events)
     header_style = {'textAlign': 'right', 'padding': '4px 8px',
                     'position': 'sticky', 'top': '0', 'background': '#f0f0f0'}
+    # className tags drive the responsive behaviour (see layout.css):
+    #   tx-col-date     – the frozen (sticky-left) Date column.
+    #   tx-col-optional – lower-priority columns hidden on narrow screens.
     header = html.Thead(html.Tr([
-        html.Th('Date', style={**header_style, 'textAlign': 'left'}),
-        html.Th('Pre-Trade Value', style=header_style),
+        html.Th('Date', style={**header_style, 'textAlign': 'left'}, className='tx-col-date'),
+        html.Th('Pre-Trade Value', style=header_style, className='tx-col-optional'),
         *[html.Th(sym, style=header_style) for sym in symbols],
-        html.Th('Cash', style=header_style),
+        html.Th('Cash', style=header_style, className='tx-col-optional'),
         html.Th('Post-Trade Value', style=header_style),
         html.Th('Invested', style=header_style),
         html.Th('P&L (€)', style=header_style),
         html.Th('Return %', style=header_style),
-        html.Th('Equity %', style=header_style),
-        html.Th('Period %', style=header_style),
+        html.Th('Equity %', style=header_style, className='tx-col-optional'),
+        html.Th('Period %', style=header_style, className='tx-col-optional'),
     ]))
     body = html.Tbody([
         _transaction_row(ev, symbols, run_id, i) for i, ev in enumerate(events)
@@ -493,6 +503,7 @@ def _transaction_table(events: 'list[dict] | None', run_id: str) -> 'html.Div':
     table = dbc.Table(
         [header, body],
         bordered=False, hover=True, striped=True, size='sm',
+        className='bt-tx-table',
         style={'fontSize': '13px', 'marginBottom': '0'},
     )
     # The wrapper div is the scroll container the buttons/clientside act on.

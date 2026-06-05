@@ -12,6 +12,30 @@
     background-color: #fff3bf !important;
 }
 
+/* Responsive ledger: the table is wide (Date + per-asset legs + several KPI
+   columns). On narrow screens it scrolls sideways with the Date column frozen
+   so each row stays identifiable, and the lower-priority columns are hidden. */
+.bt-tx-table .tx-col-date {
+    position: sticky;
+    left: 0;
+    background-color: #fff;   /* opaque so scrolled columns don't show through */
+}
+.bt-tx-table tbody .tx-col-date {
+    z-index: 1;
+}
+.bt-tx-table thead th {
+    z-index: 2;               /* sticky header stays above the scrolling body */
+}
+.bt-tx-table thead .tx-col-date {
+    z-index: 3;               /* frozen corner cell sits above row and column */
+}
+
+@media (max-width: 768px) {
+    .bt-tx-table .tx-col-optional {
+        display: none;        /* Pre-Trade, Cash, Equity %, Period % on phones */
+    }
+}
+
 @media (min-width: 900px) {
     .results-container {
         display: flex;

@@ -50,6 +50,9 @@ _TX_ROW_PX = 28
 _TX_SCROLL_STYLE = {
     'maxHeight': f'{_TX_ROW_PX * 31}px',  # ~30 rows + header
     'overflowY': 'auto',
+    # Let the wide ledger scroll sideways on narrow screens; the Date column is
+    # frozen (sticky) via the .tx-col-date CSS class so rows stay identifiable.
+    'overflowX': 'auto',
     'border': '1px solid #eee',
     'borderRadius': '4px',
 }
