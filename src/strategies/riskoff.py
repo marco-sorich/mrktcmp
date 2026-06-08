@@ -70,15 +70,21 @@ def _riskoff_order_events(
     # Align the daily targets to the price index; unknown days stay in cash.
     target = target_fraction.reindex(price_df.index).fillna(0.0)
 
+    # Trade only on days the target changes (the starting fraction is 0.0 = all
+    # cash); between changes the position is held, emitting no order.  Iterating
+    # just these change-days avoids a full daily pass over a held position.
+    changed = target.ne(target.shift(fill_value=0.0)).to_numpy()
+    change_rows = price_df.loc[changed]
+    change_targets = target.loc[changed]
+    assert isinstance(change_rows.index, pd.DatetimeIndex)
+
     # Fraction currently allocated; starts at 0.0 (all cash) so the first
     # non-zero target triggers the initial deployment.
     current = 0.0
 
     events: list[OrderEvent] = []
-    for i, (_, prices) in enumerate(price_df.iterrows()):
-        frac = float(target.iloc[i])
-        if frac == current:
-            continue
+    for i, (_, prices) in enumerate(change_rows.iterrows()):
+        frac = float(change_targets.iloc[i])
 
         # Worth before the trade, and the direction of the rebalance.
         value_before = _portfolio_value(holdings, cash, prices)
@@ -90,7 +96,7 @@ def _riskoff_order_events(
         current = frac
 
         events.append(OrderEvent(
-            date=price_df.index[i],
+            date=change_rows.index[i],
             side=side,
             value_before=value_before,
             inflow=0.0,

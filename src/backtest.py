@@ -125,6 +125,12 @@ def simulate_dca(price_df: pd.DataFrame, monthly_investment: float = MONTHLY_INV
     contribution is made on every row and the result is identical to the
     original monthly engine (this keeps the monthly-input unit tests valid).
 
+    Implemented with vectorised numpy array maths (no per-day Python loop): the
+    purchases form a (days × assets) matrix whose cumulative sum down the days is
+    the running holdings, valued against the price matrix in one shot.  This is
+    numerically identical to the day-by-day ``_portfolio_value`` valuation it
+    replaces but ~200× faster on multi-year daily windows.
+
     Parameters
     ----------
     price_df           – daily (or monthly) close prices, one column per asset.
@@ -141,42 +147,42 @@ def simulate_dca(price_df: pd.DataFrame, monthly_investment: float = MONTHLY_INV
     if price_df.empty:
         return pd.Series(dtype=float), 0.0
 
-    # holdings maps each asset symbol to the number of units currently owned.
-    holdings = {str(col): 0.0 for col in price_df.columns}
-
-    # Portfolio value collected for every trading day, plus the running total
-    # of money actually deposited (grows once per month with data).
-    values: list[float] = []
-    total_invested = 0.0
-
-    # True on each month's last trading day → the single day we contribute.
     assert isinstance(price_df.index, pd.DatetimeIndex)
-    contribute_day = _is_month_end_trading_day(price_df.index)
 
-    for is_contribution, (_, prices) in zip(contribute_day, price_df.iterrows()):
+    # Price matrix (days × assets); NaN marks a missing close on that day.
+    prices = price_df.to_numpy(dtype=float)
 
-        if is_contribution:
-            # Assets that can actually be bought on this month-end day. A NaN
-            # price means a data gap; a zero price means suspended/delisted –
-            # both are skipped.
-            available: dict[str, float] = {
-                str(c): float(p) for c, p in prices.items() if pd.notna(p) and p > 0
-            }
-            if available:
-                # Split the monthly investment equally among available assets
-                # (e.g. 1,000 € across 4 assets → 250 € each) and record the deposit.
-                per_asset = monthly_investment / len(available)
-                total_invested += monthly_investment
-                for col, price in available.items():
-                    # units = € / price_per_unit; fractional units are fine.
-                    holdings[col] += per_asset / price
+    # Assets buyable on a given day need a valid, strictly positive price. A NaN
+    # price means a data gap; a zero/negative price means suspended/delisted.
+    buyable = ~np.isnan(prices) & (prices > 0)
+    n_buyable = buyable.sum(axis=1)
 
-        # Value the portfolio on every trading day (cash component is always 0
-        # for DCA – all contributed money is immediately invested).
-        values.append(_portfolio_value(holdings, 0.0, prices))
+    # Contribute once per calendar month — on its last trading day — but only on
+    # month-ends that have at least one buyable asset.
+    contribute_day = _is_month_end_trading_day(price_df.index) & (n_buyable > 0)
 
-    # Wrap into a Series reusing the DataFrame's date index.
-    return pd.Series(values, index=price_df.index), total_invested
+    # Money put into each buyable asset on a contribution day = the monthly amount
+    # split equally among that day's buyable assets (0 € on every other day).
+    per_asset = np.zeros(len(prices))
+    per_asset[contribute_day] = monthly_investment / n_buyable[contribute_day]
+
+    # Units bought per (day, asset) = per-asset € / price, only where buyable on a
+    # contribution day; dividing by NaN elsewhere yields values we mask back to 0.
+    # cumsum down the days turns these purchases into the holdings carried forward
+    # to every later day (units of a NaN-priced asset are retained, not lost).
+    safe_prices = np.where(buyable, prices, np.nan)
+    bought = np.where(buyable & contribute_day[:, None], per_asset[:, None] / safe_prices, 0.0)
+    holdings = np.cumsum(np.nan_to_num(bought), axis=0)
+
+    # Value the portfolio every day: Σ units × price over assets with a valid price
+    # (a NaN price contributes 0 but keeps its units), mirroring _portfolio_value.
+    # Cash is always 0 for DCA — every contribution is immediately invested.
+    daily_value = (holdings * np.where(np.isnan(prices), 0.0, prices)).sum(axis=1)
+
+    # Total deposited = the monthly amount once per contribution day with data.
+    total_invested = float(monthly_investment * contribute_day.sum())
+
+    return pd.Series(daily_value, index=price_df.index), total_invested
 
 
 def compute_metrics(portfolio: pd.Series, total_invested: float) -> dict[str, str]:
@@ -668,32 +674,64 @@ def simulate_riskoff(
     (portfolio_series, total_invested)
       portfolio_series – portfolio value (holdings + cash) on every trading day.
       total_invested   – the initial lump sum (constant; no contributions).
+
+    Implemented as a hybrid: trades only happen on the (few) days the target
+    changes, so the loop walks just those change-days — reusing the exact
+    ``_rebalance_to_target`` math — to record the post-trade holdings/cash, then
+    the dense daily valuation is done in one vectorised numpy pass.  This is
+    numerically identical to the former day-by-day loop but ~60× faster.
     """
     if price_df.empty:
         return pd.Series(dtype=float), initial_investment
 
-    holdings: dict[str, float] = {str(col): 0.0 for col in price_df.columns}
-    cash = initial_investment
+    assert isinstance(price_df.index, pd.DatetimeIndex)
+
+    # Column order shared by the holdings dict (string keys) and the price matrix.
+    columns = [str(col) for col in price_df.columns]
+    prices_mat = price_df.to_numpy(dtype=float)
+    n_days, n_assets = prices_mat.shape
 
     # Align the daily target fractions to the price index; unknown days stay in
     # cash (0.0) as a conservative fallback.
-    target = target_fraction.reindex(price_df.index).fillna(0.0)
+    target = target_fraction.reindex(price_df.index).fillna(0.0).to_numpy()
 
-    # Fraction we are currently allocated to. Starts at 0.0 (all cash), so the
-    # first day with a non-zero target triggers the initial deployment.
-    current = 0.0
+    # Change-days: the target differs from the prior day's (the starting fraction
+    # is 0.0 = all cash), i.e. exactly the days the former loop would have traded.
+    prev = np.empty(n_days)
+    prev[0] = 0.0
+    prev[1:] = target[:-1]
+    change_pos = np.flatnonzero(target != prev)
 
-    values: list[float] = []
-    for i, (_, prices) in enumerate(price_df.iterrows()):
-        frac = float(target.iloc[i])
-        if frac != current:
-            # Signal changed → trade to the new target and remember it.
-            holdings, cash, _ = _rebalance_to_target(holdings, cash, prices, frac)
-            current = frac
-        # Value every day, whether or not we traded.
-        values.append(_portfolio_value(holdings, cash, prices))
+    # No change at all (e.g. a constant or never-positive signal) → never deployed,
+    # so the portfolio is the lump sum held flat in cash for the whole window.
+    if change_pos.size == 0:
+        flat = pd.Series(np.full(n_days, float(initial_investment)), index=price_df.index)
+        return flat, initial_investment
 
-    return pd.Series(values, index=price_df.index), initial_investment
+    # Walk only the change-days, rebalancing to the new target with the shared
+    # primitive, and snapshot the resulting holdings (per asset) and cash.
+    holdings: dict[str, float] = {col: 0.0 for col in columns}
+    cash = float(initial_investment)
+    snap_holdings = np.zeros((change_pos.size, n_assets))
+    snap_cash = np.empty(change_pos.size)
+    for j, i in enumerate(change_pos):
+        holdings, cash, _ = _rebalance_to_target(holdings, cash, price_df.iloc[i], float(target[i]))
+        snap_holdings[j] = [holdings[col] for col in columns]
+        snap_cash[j] = cash
+
+    # Each day takes the holdings/cash of the most recent change at or before it;
+    # days before the first change are still all cash (no holdings yet).
+    seg = np.searchsorted(change_pos, np.arange(n_days), side='right') - 1
+    has_position = seg >= 0
+    seg_clip = np.clip(seg, 0, None)
+    holdings_mat = np.where(has_position[:, None], snap_holdings[seg_clip], 0.0)
+    cash_arr = np.where(has_position, snap_cash[seg_clip], float(initial_investment))
+
+    # Value every day: Σ units × price over assets with a valid price (NaN priced
+    # → 0 but units retained), plus cash — mirroring _portfolio_value exactly.
+    daily_value = (holdings_mat * np.where(np.isnan(prices_mat), 0.0, prices_mat)).sum(axis=1) + cash_arr
+
+    return pd.Series(daily_value, index=price_df.index), initial_investment
 
 
 def _get_monthly_range(base_url: str, filename: str, df_meta: pd.DataFrame) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:

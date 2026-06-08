@@ -575,6 +575,19 @@ class TestRiskOffPureFunctions:
         )
         assert _max_drawdown(protect) > _max_drawdown(hold)
 
+    def test_simulate_riskoff_cash_out_then_redeploy(self):
+        # Deploy → sell to cash → hold cash → redeploy: multiple change segments,
+        # exercising the vectorised engine's per-segment holdings/cash fill.
+        idx = pd.date_range('2020-01-31', periods=6, freq='ME', tz='UTC')
+        prices = pd.DataFrame({'A': [100.0, 120.0, 150.0, 90.0, 80.0, 200.0]}, index=idx)
+        target = pd.Series([1.0, 1.0, 0.0, 0.0, 1.0, 1.0], index=idx)
+        portfolio, _ = simulate_riskoff(prices, target, initial_investment=10_000.0)
+        # Deploy 100 sh @100; hold to 120 → 12,000; sell all @150 → 15,000 cash;
+        # hold cash through 90; redeploy 15,000 @80 = 187.5 sh; hold to 200 → 37,500.
+        assert portfolio.tolist() == pytest.approx(
+            [10_000.0, 12_000.0, 15_000.0, 15_000.0, 15_000.0, 37_500.0]
+        )
+
 
 # ---------------------------------------------------------------------------
 # Layer 7 – per-plugin order-event generators (the strategy-specific halves

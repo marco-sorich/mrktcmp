@@ -123,6 +123,25 @@ class TestSimulateDca:
         increases = int((portfolio.diff().fillna(0.0) > 0).sum())
         assert increases == 3
 
+    def test_nan_price_gap_retains_units_and_revalues_when_price_returns(self):
+        # BTC is priced, then has a NaN gap, then is priced again. Its units must
+        # be retained through the gap (contributing 0 while NaN) and revalued once
+        # the price returns — the key edge case of the vectorised cumsum engine.
+        df = pd.DataFrame(
+            {'AAPL': [100.0, 100.0, 100.0], 'BTC': [200.0, np.nan, 200.0]},
+            index=_MONTHLY_IDX[:3],
+        )
+        portfolio, total = simulate_dca(df, monthly_investment=1000.0)
+        # Month 1: 500 AAPL (5 sh) + 500 BTC (2.5 sh) → 1,000.
+        assert portfolio.iloc[0] == pytest.approx(1000.0)
+        # Month 2: BTC NaN → full 1,000 into AAPL (now 15 sh). BTC's 2.5 units are
+        # retained but not valued (NaN) → 15 × 100 = 1,500.
+        assert portfolio.iloc[1] == pytest.approx(1500.0)
+        # Month 3: BTC priced again → its retained units revalue; this month adds
+        # 5 AAPL (→20) + 2.5 BTC (→5): 20 × 100 + 5 × 200 = 3,000.
+        assert portfolio.iloc[2] == pytest.approx(3000.0)
+        assert total == pytest.approx(3000.0)
+
 
 # ---------------------------------------------------------------------------
 # compute_metrics

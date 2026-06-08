@@ -58,14 +58,14 @@ def _dca_order_events(
     # DCA because each contribution is immediately and fully invested.
     holdings: dict[str, float] = {str(col): 0.0 for col in price_df.columns}
 
-    # True on each month's last trading day → the single day we contribute.
-    contribute_day = _is_month_end_trading_day(price_df.index)
+    # Iterate only the month-end rows (the single contribution day each month)
+    # rather than every trading day: nothing changes in between, so the days we
+    # skipped emitted no event anyway.
+    month_end_rows = price_df.loc[_is_month_end_trading_day(price_df.index)]
+    assert isinstance(month_end_rows.index, pd.DatetimeIndex)
 
     events: list[OrderEvent] = []
-    for i, (_, prices) in enumerate(price_df.iterrows()):
-        if not contribute_day[i]:
-            continue
-
+    for i, (_, prices) in enumerate(month_end_rows.iterrows()):
         # Assets actually buyable this day (valid, positive price).
         available = {
             str(c): float(p) for c, p in prices.items() if pd.notna(p) and p > 0
@@ -82,7 +82,7 @@ def _dca_order_events(
             holdings[col] += per_asset / price
 
         events.append(OrderEvent(
-            date=price_df.index[i],
+            date=month_end_rows.index[i],
             side='Buy',
             value_before=value_before,
             inflow=monthly_investment,
