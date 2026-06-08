@@ -17,7 +17,7 @@ from src.callbacks.backtesting import (   # noqa: E402
     run_backtest_callback, update_date_range_slider, update_date_display,
     _build_slider_marks,
 )
-from src.components import _render_basket_list, _metrics_table  # noqa: E402
+from src.components import _render_basket_list, _metrics_table, _order_table  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -240,6 +240,24 @@ _PORTFOLIO_STUB = pd.Series(
 )
 _METRICS_STUB = {'Total Return': '+50.0%', 'CAGR': '10.0%'}
 
+# A single finalized OrderRow (all 13 keys) used to exercise _order_table.
+# period_return is None so the em-dash ('—') rendering path is covered.
+_ORDERS_STUB = [{
+    'date': pd.Timestamp('2022-01-31', tz='UTC'),
+    'side': 'Buy',
+    'value_before': 0.0,
+    'inflow': 1000.0,
+    'assets_after': 1000.0,
+    'cash_after': 0.0,
+    'value_after': 1000.0,
+    'net_deposits': 1000.0,
+    'pnl_abs': 0.0,
+    'pnl_pct': 0.0,
+    'equity_exposure': 1.0,
+    'cash_quote': 0.0,
+    'period_return': None,
+}]
+
 BASKET_A = [BASKET_ITEM_AAPL]
 BASKET_B = [BASKET_ITEM_GOOGL]
 
@@ -253,7 +271,7 @@ _STRATEGY_CFG = {'strategy': 'DCA', 'params': {'monthly_investment': 1000.0}}
 
 class TestRunBacktestCallback:
     def test_both_baskets_empty_returns_status_message(self):
-        _, style, _, status = run_backtest_callback(
+        _, style, _, status, _, _ = run_backtest_callback(
             1, [], [], _SLIDER_VAL, _DATE_STORE, None, None)
         assert 'basket' in status
         assert style['display'] == 'none'
@@ -261,7 +279,7 @@ class TestRunBacktestCallback:
     def test_no_base_url_returns_error_status(self):
         with patch.object(config_module, 'base_url', None), \
              patch.object(config_module, 'df', SAMPLE_DF):
-            _, style, _, status = run_backtest_callback(
+            _, style, _, status, _, _ = run_backtest_callback(
                 1, BASKET_A, [], _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
         assert 'data source' in status
         assert style['display'] == 'none'
@@ -269,7 +287,7 @@ class TestRunBacktestCallback:
     def test_empty_date_store_returns_error_status(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF):
-            _, style, _, status = run_backtest_callback(
+            _, style, _, status, _, _ = run_backtest_callback(
                 1, BASKET_A, [], _SLIDER_VAL, [], _STRATEGY_CFG, _STRATEGY_CFG)
         assert 'date range' in status.lower()
         assert style['display'] == 'none'
@@ -277,8 +295,8 @@ class TestRunBacktestCallback:
     def test_no_data_returned_shows_error_status(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF), \
-             patch('src.callbacks.backtesting.run_backtest', return_value=(None, None)):
-            _, style, _, status = run_backtest_callback(
+             patch('src.callbacks.backtesting.run_backtest', return_value=(None, None, None)):
+            _, style, _, status, _, _ = run_backtest_callback(
                 1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
         assert style['display'] == 'none'
         assert 'No data' in status
@@ -286,27 +304,47 @@ class TestRunBacktestCallback:
     def test_successful_run_makes_chart_visible(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF), \
-             patch('src.callbacks.backtesting.run_backtest', return_value=(_PORTFOLIO_STUB, _METRICS_STUB)):
-            _, style, _, _ = run_backtest_callback(
+             patch('src.callbacks.backtesting.run_backtest',
+                   return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _ORDERS_STUB)):
+            _, style, _, _, _, _ = run_backtest_callback(
                 1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
         assert style['display'] == 'block'
 
     def test_successful_run_returns_plotly_figure(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF), \
-             patch('src.callbacks.backtesting.run_backtest', return_value=(_PORTFOLIO_STUB, _METRICS_STUB)):
-            fig, _, _, _ = run_backtest_callback(
+             patch('src.callbacks.backtesting.run_backtest',
+                   return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _ORDERS_STUB)):
+            fig, _, _, _, _, _ = run_backtest_callback(
                 1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
         assert isinstance(fig, go.Figure)
+
+    def test_successful_run_populates_order_tables(self):
+        from dash import html
+        with patch.object(config_module, 'base_url', 'http://x'), \
+             patch.object(config_module, 'df', SAMPLE_DF), \
+             patch('src.callbacks.backtesting.run_backtest',
+                   return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _ORDERS_STUB)):
+            *_, orders_a, orders_b = run_backtest_callback(
+                1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
+        # Both baskets ran → both panes hold a rendered order table, not the
+        # 'No orders.' placeholder.
+        assert isinstance(orders_a, html.Div)
+        assert isinstance(orders_b, html.Div)
+        assert 'Buy' in str(orders_a)
 
     def test_only_basket_a_filled_also_succeeds(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF), \
-             patch('src.callbacks.backtesting.run_backtest', return_value=(_PORTFOLIO_STUB, _METRICS_STUB)):
-            fig, style, _, status = run_backtest_callback(
+             patch('src.callbacks.backtesting.run_backtest',
+                   return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _ORDERS_STUB)):
+            fig, style, _, status, _, orders_b = run_backtest_callback(
                 1, BASKET_A, [], _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, None)
         assert style['display'] == 'block'
         assert 'complete' in status
+        # Basket B was empty → its pane shows the placeholder, not a table.
+        from dash import html
+        assert isinstance(orders_b, html.P)
 
 
 # ---------------------------------------------------------------------------
@@ -481,3 +519,37 @@ class TestMetricsTable:
         result = _metrics_table(metrics_a, metrics_b)
         rendered = str(result)
         assert '—' in rendered
+
+
+# ---------------------------------------------------------------------------
+# _order_table
+# ---------------------------------------------------------------------------
+
+class TestOrderTable:
+    def test_none_returns_paragraph(self):
+        from dash import html
+        result = _order_table(None)
+        assert isinstance(result, html.P)
+
+    def test_empty_list_returns_paragraph(self):
+        from dash import html
+        result = _order_table([])
+        assert isinstance(result, html.P)
+
+    def test_returns_div_wrapping_table_with_headers(self):
+        from dash import html
+        result = _order_table(_ORDERS_STUB)
+        assert isinstance(result, html.Div)
+        # The scroll wrapper holds a single <table>.
+        assert isinstance(result.children, html.Table)
+        rendered = str(result)
+        assert 'Date' in rendered
+        assert 'Buy/Sell' in rendered
+
+    def test_formatted_values_and_em_dash_for_none(self):
+        result = _order_table(_ORDERS_STUB)
+        rendered = str(result)
+        assert 'Buy' in rendered           # side value rendered verbatim
+        assert '2022-01-31' in rendered    # date formatted as YYYY-MM-DD
+        assert '1,000' in rendered         # currency uses a thousands separator
+        assert '—' in rendered             # period_return is None → em-dash

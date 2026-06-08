@@ -7,6 +7,8 @@ from unittest.mock import patch
 os.environ.pop("BASE_URL", None)
 
 from src.backtest import (  # noqa: E402
+    OrderEvent,
+    build_order_log,
     simulate_dca,
     compute_metrics,
     run_backtest,
@@ -183,19 +185,22 @@ class TestRunBacktest:
     _END = pd.Timestamp('2023-12-31', tz='UTC')
 
     def test_empty_filenames_returns_none_none(self):
-        p, m = run_backtest(BASE_URL, [], self._START, self._END, SAMPLE_META)
-        assert p is None and m is None
+        p, m, o = run_backtest(BASE_URL, [], self._START, self._END, SAMPLE_META)
+        assert p is None and m is None and o is None
 
     def test_no_base_url_returns_none_none(self):
-        p, m = run_backtest(None, ['aapl.parquet'], self._START, self._END, SAMPLE_META)
-        assert p is None and m is None
+        p, m, o = run_backtest(None, ['aapl.parquet'], self._START, self._END, SAMPLE_META)
+        assert p is None and m is None and o is None
 
     def test_successful_run_returns_portfolio_and_metrics_dict(self):
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0, n_days=2000)):
-            p, m = run_backtest(BASE_URL, ['aapl.parquet'], self._START, self._END, SAMPLE_META)
+            p, m, o = run_backtest(BASE_URL, ['aapl.parquet'], self._START, self._END, SAMPLE_META)
         assert p is not None
         assert isinstance(m, dict)
         assert 'CAGR' in m
+        # The built-in DCA path (strategy=None) is a back-compat entry point not
+        # used by the UI, so it produces no order log.
+        assert o is None
 
     def test_date_window_filters_portfolio_length(self):
         # 5 years of daily data; request only 2 years. The curve is now daily,
@@ -208,7 +213,7 @@ class TestRunBacktest:
         )
         start = now - pd.DateOffset(years=2)
         with patch('src.backtest.pd.read_parquet', return_value=ohlcv):
-            p, _ = run_backtest(BASE_URL, ['aapl.parquet'], start, now, SAMPLE_META)
+            p, _, _ = run_backtest(BASE_URL, ['aapl.parquet'], start, now, SAMPLE_META)
         assert p is not None
         # ~2 years of daily rows (month-windowed): clearly daily, well over the
         # ~24 a monthly curve would have, and below ~3 years' worth.
@@ -217,12 +222,12 @@ class TestRunBacktest:
     def test_start_after_end_returns_none_none(self):
         # Invalid range: start > end → empty DataFrame → (None, None).
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0, n_days=2000)):
-            p, m = run_backtest(
+            p, m, o = run_backtest(
                 BASE_URL, ['aapl.parquet'],
                 self._END, self._START,   # intentionally reversed
                 SAMPLE_META,
             )
-        assert p is None and m is None
+        assert p is None and m is None and o is None
 
     def test_both_bounds_respected(self):
         # Data spans 5 years; request the middle year → only ~12 months.
@@ -235,10 +240,78 @@ class TestRunBacktest:
         start = now - pd.DateOffset(years=3)
         end = now - pd.DateOffset(years=2)
         with patch('src.backtest.pd.read_parquet', return_value=ohlcv):
-            p, _ = run_backtest(BASE_URL, ['aapl.parquet'], start, end, SAMPLE_META)
+            p, _, _ = run_backtest(BASE_URL, ['aapl.parquet'], start, end, SAMPLE_META)
         assert p is not None
         # Middle year spans ~13 calendar months of daily rows (month-windowed).
         assert 360 <= len(p) <= 420
+
+
+# ---------------------------------------------------------------------------
+# build_order_log (generic, strategy-agnostic builder)
+# ---------------------------------------------------------------------------
+
+class TestBuildOrderLog:
+    """Feeds synthetic OrderEvents to the generic builder and checks the derived
+    columns, which are computed identically for every strategy."""
+
+    def _events(self):
+        # Two fully-invested buys (each with a fresh inflow), then a pure
+        # rebalance to all-cash (no inflow). value_before on row 1 is 1,200 so a
+        # non-trivial period return (drift) can be asserted.
+        ts = pd.Timestamp
+        return [
+            OrderEvent(date=ts('2020-01-31', tz='UTC'), side='Buy',
+                       value_before=0.0, inflow=1000.0, assets_after=1000.0, cash_after=0.0),
+            OrderEvent(date=ts('2020-02-29', tz='UTC'), side='Buy',
+                       value_before=1200.0, inflow=1000.0, assets_after=2200.0, cash_after=0.0),
+            OrderEvent(date=ts('2020-03-31', tz='UTC'), side='Sell',
+                       value_before=2200.0, inflow=0.0, assets_after=0.0, cash_after=2200.0),
+        ]
+
+    def test_empty_events_return_empty_list(self):
+        assert build_order_log([], initial_capital=0.0) == []
+
+    def test_value_after_is_assets_plus_cash(self):
+        rows = build_order_log(self._events(), initial_capital=0.0)
+        for r in rows:
+            assert r['value_after'] == pytest.approx(r['assets_after'] + r['cash_after'])
+
+    def test_net_deposits_accumulates_inflows_from_initial_capital(self):
+        rows = build_order_log(self._events(), initial_capital=500.0)
+        # seed 500 + inflows 1000, 1000, 0
+        assert [r['net_deposits'] for r in rows] == pytest.approx([1500.0, 2500.0, 2500.0])
+
+    def test_pnl_abs_is_value_after_minus_net_deposits(self):
+        rows = build_order_log(self._events(), initial_capital=0.0)
+        # row0: 1000-1000=0; row1: 2200-2000=200; row2: 2200-2000=200
+        assert [r['pnl_abs'] for r in rows] == pytest.approx([0.0, 200.0, 200.0])
+
+    def test_pnl_pct_is_pnl_over_net_deposits(self):
+        rows = build_order_log(self._events(), initial_capital=0.0)
+        assert rows[1]['pnl_pct'] == pytest.approx(200.0 / 2000.0)
+
+    def test_equity_exposure_and_cash_quote_sum_to_one(self):
+        rows = build_order_log(self._events(), initial_capital=0.0)
+        for r in rows:
+            assert r['equity_exposure'] + r['cash_quote'] == pytest.approx(1.0)
+        # Fully invested on the buys, fully in cash after the final sell.
+        assert rows[0]['equity_exposure'] == pytest.approx(1.0)
+        assert rows[2]['cash_quote'] == pytest.approx(1.0)
+
+    def test_period_return_none_on_first_row_then_reflects_drift(self):
+        rows = build_order_log(self._events(), initial_capital=0.0)
+        assert rows[0]['period_return'] is None
+        # row1: value_before 1,200 / prev value_after 1,000 − 1 = +0.20
+        assert rows[1]['period_return'] == pytest.approx(0.2)
+
+    def test_zero_denominators_guard_ratio_columns_to_none(self):
+        # All-zero seed/inflow/value → every ratio's denominator is 0 → None.
+        ev = [OrderEvent(date=pd.Timestamp('2020-01-31', tz='UTC'), side='Buy',
+                         value_before=0.0, inflow=0.0, assets_after=0.0, cash_after=0.0)]
+        rows = build_order_log(ev, initial_capital=0.0)
+        assert rows[0]['pnl_pct'] is None
+        assert rows[0]['equity_exposure'] is None
+        assert rows[0]['cash_quote'] is None
 
 
 # ---------------------------------------------------------------------------

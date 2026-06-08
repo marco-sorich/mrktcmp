@@ -34,6 +34,10 @@ import dash_bootstrap_components as dbc
 # initialised when components.py is first imported.
 import src.config as _config
 
+# OrderRow is the finalized order-log row type produced by build_order_log;
+# imported here only so _order_table can be type-annotated with it.
+from src.backtest import OrderRow
+
 # Shared style dicts imported from styles.py so all components stay visually
 # consistent without duplicating the same dict literals.
 from src.styles import _BASKET_ITEM_STYLE, _BTN_SMALL, _METRIC_TABLE_STYLE
@@ -371,3 +375,77 @@ def _metrics_table(metrics_a, metrics_b):
     ]
 
     return html.Table(rows, style=_METRIC_TABLE_STYLE)
+
+
+# ---------------------------------------------------------------------------
+# Helper: render the per-order transaction table
+# ---------------------------------------------------------------------------
+
+# Column specification for the order table: (OrderRow key, header label,
+# value formatter).  The order here is the left-to-right column order in the
+# rendered table.  Each formatter receives the already-non-None value (None is
+# rendered as an em-dash by _order_table before the formatter runs):
+#   • currency columns use thousands separators and no decimals (e.g. 12,500);
+#     profit/loss adds an explicit sign so gains/losses read at a glance;
+#   • percentage columns scale by 100 and show one decimal (e.g. 66.7%);
+#     P&L and period return add an explicit sign.
+# Mirrors the formatting conventions of compute_metrics() in backtest.py.
+_ORDER_COLUMNS = [
+    ('date', 'Date', lambda v: v.strftime('%Y-%m-%d')),
+    ('side', 'Buy/Sell', str),
+    ('value_before', 'Value before', lambda v: f'{v:,.0f}'),
+    ('inflow', 'Inflow', lambda v: f'{v:,.0f}'),
+    ('assets_after', 'Assets value', lambda v: f'{v:,.0f}'),
+    ('cash_after', 'Cash value', lambda v: f'{v:,.0f}'),
+    ('value_after', 'Value after', lambda v: f'{v:,.0f}'),
+    ('net_deposits', 'Net deposits', lambda v: f'{v:,.0f}'),
+    ('pnl_abs', 'P&L (€)', lambda v: f'{v:+,.0f}'),
+    ('pnl_pct', 'P&L (%)', lambda v: f'{v * 100:+.1f}%'),
+    ('equity_exposure', 'Equity exposure', lambda v: f'{v * 100:.1f}%'),
+    ('cash_quote', 'Cash quota', lambda v: f'{v * 100:.1f}%'),
+    ('period_return', 'Period return', lambda v: f'{v * 100:+.1f}%'),
+]
+
+
+def _order_table(orders: list[OrderRow] | None) -> html.Div | html.P:
+    """Build the per-order transaction table for one basket.
+
+    One row per buy/sell order, one column per entry in _ORDER_COLUMNS.  The
+    table is wrapped in a scrollable Div (sized and made sticky-header /
+    sticky-first-column by the .order-table / .order-table-wrapper rules in
+    layout.css) so long order logs stay navigable.
+
+    Parameters
+    ----------
+    orders – list of OrderRow dicts (from build_order_log), or None/empty when
+             the basket produced no result.
+
+    Returns
+    -------
+    html.P placeholder when there are no orders, otherwise an html.Div wrapping
+    the html.Table.
+    """
+    # Empty / missing → a plain placeholder, mirroring _metrics_table.
+    if not orders:
+        return html.P('No orders.', style={'color': '#aaa'})
+
+    # Header row: one <th> per column, in _ORDER_COLUMNS order.
+    header = html.Tr([html.Th(label) for _key, label, _fmt in _ORDER_COLUMNS])
+
+    # One <tr> per order; each cell formatted by its column's formatter, with a
+    # missing (None) value shown as an em-dash.
+    body = [
+        html.Tr([
+            html.Td('—' if row[key] is None else fmt(row[key]))
+            for key, _label, fmt in _ORDER_COLUMNS
+        ])
+        for row in orders
+    ]
+
+    return html.Div(
+        html.Table(
+            [html.Thead(header), html.Tbody(body)],
+            className='order-table',
+        ),
+        className='order-table-wrapper',
+    )

@@ -17,8 +17,13 @@ import pandas as pd
 
 from src.backtest import (
     INITIAL_INVESTMENT,
+    OrderEvent,
+    OrderRow,
+    _portfolio_value,
+    _rebalance_to_target,
     _window_by_month,
     build_equal_weight_index,
+    build_order_log,
     compute_metrics,
     compute_riskoff_signals,
     load_daily_closes,
@@ -26,6 +31,74 @@ from src.backtest import (
 )
 from src.strategies.base import BacktestStrategy, ConfigParam
 from src.strategies.registry import register
+
+
+def _riskoff_order_events(
+    price_df: pd.DataFrame,
+    target_fraction: pd.Series,
+    initial_investment: float = INITIAL_INVESTMENT,
+) -> list[OrderEvent]:
+    """Record one OrderEvent per Risk-Off rebalance (each time the target changes).
+
+    This is the Risk-Off-specific half of the order log; the generic derived
+    columns are added afterwards by ``backtest.build_order_log``.  It mirrors the
+    change-driven trading of ``simulate_riskoff``: the lump sum starts as cash
+    and, on every day the daily target invested fraction *changes*, the basket is
+    rebalanced to it.  Each such day is captured as an event whose side is 'Buy'
+    when the target rose (more invested) or 'Sell' when it fell (more cash);
+    there is no fresh money, so inflow is always 0.
+
+    Parameters
+    ----------
+    price_df           – windowed daily closes, one column per asset.
+    target_fraction    – per-day target invested fraction (0..1); reindexed onto
+                         price_df exactly as simulate_riskoff does.
+    initial_investment – one-off lump sum held as cash at the start.
+
+    Returns
+    -------
+    Chronological list of OrderEvents (empty when price_df is empty).
+    """
+    if price_df.empty:
+        return []
+
+    assert isinstance(price_df.index, pd.DatetimeIndex)
+
+    holdings: dict[str, float] = {str(col): 0.0 for col in price_df.columns}
+    cash = initial_investment
+
+    # Align the daily targets to the price index; unknown days stay in cash.
+    target = target_fraction.reindex(price_df.index).fillna(0.0)
+
+    # Fraction currently allocated; starts at 0.0 (all cash) so the first
+    # non-zero target triggers the initial deployment.
+    current = 0.0
+
+    events: list[OrderEvent] = []
+    for i, (_, prices) in enumerate(price_df.iterrows()):
+        frac = float(target.iloc[i])
+        if frac == current:
+            continue
+
+        # Worth before the trade, and the direction of the rebalance.
+        value_before = _portfolio_value(holdings, cash, prices)
+        side = 'Buy' if frac > current else 'Sell'
+
+        # Rebalance to the new target at today's prices, then record the split
+        # (assets_after excludes cash; cash_after is the post-trade cash).
+        holdings, cash, _ = _rebalance_to_target(holdings, cash, prices, frac)
+        current = frac
+
+        events.append(OrderEvent(
+            date=price_df.index[i],
+            side=side,
+            value_before=value_before,
+            inflow=0.0,
+            assets_after=_portfolio_value(holdings, 0.0, prices),
+            cash_after=cash,
+        ))
+
+    return events
 
 
 @register
@@ -88,7 +161,7 @@ class RiskOffStrategy(BacktestStrategy):
         end_date: pd.Timestamp,
         df_meta: pd.DataFrame,
         params: dict[str, int | float | str],
-    ) -> tuple[pd.Series | None, dict[str, str] | None]:
+    ) -> tuple[pd.Series | None, dict[str, str] | None, list[OrderRow] | None]:
         # Merge caller-supplied values with schema defaults.
         resolved = self.resolve_params(params)
 
@@ -102,7 +175,7 @@ class RiskOffStrategy(BacktestStrategy):
         #    The extra history gives the long look-back signals enough warm-up.
         daily_df = load_daily_closes(base_url, filenames, df_meta)
         if daily_df.empty:
-            return None, None
+            return None, None, None
 
         index = build_equal_weight_index(daily_df)
         signals = compute_riskoff_signals(index, sma_window, first_n_days)
@@ -112,7 +185,7 @@ class RiskOffStrategy(BacktestStrategy):
         #    the signals computed above.
         price_df = _window_by_month(daily_df, start_date, end_date)
         if price_df.empty:
-            return None, None
+            return None, None, None
 
         # Forward-fill short price gaps (≤5 trading days, ≈ one week), as in DCA.
         price_df = price_df.ffill(limit=5)
@@ -127,8 +200,16 @@ class RiskOffStrategy(BacktestStrategy):
         metrics = compute_metrics(portfolio, total_invested)
 
         # compute_metrics returns {} when the series is too short (<3 months);
-        # treat that as a failure so callers get either a full result or (None, None).
+        # treat that as a failure so callers get a full result or (None, None, None).
         if not metrics:
-            return None, None
+            return None, None, None
 
-        return portfolio, metrics
+        # Build this strategy's order log: Risk-Off-specific rebalance events
+        # (above) handed to the generic builder.  The whole lump sum is present
+        # from the start, so it seeds the net-deposits basis as initial_capital.
+        order_log = build_order_log(
+            _riskoff_order_events(price_df, target_fraction, initial_investment),
+            initial_capital=initial_investment,
+        )
+
+        return portfolio, metrics, order_log

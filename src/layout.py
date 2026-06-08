@@ -21,6 +21,10 @@
 #       Graph, RangeSlider, RadioItems, and Store.
 from dash import html, dcc
 
+# dbc: Dash Bootstrap Components – used here for the Tabs that switch between
+# the two baskets' order tables.
+import dash_bootstrap_components as dbc
+
 # ---------------------------------------------------------------------------
 # Internal imports
 # ---------------------------------------------------------------------------
@@ -150,6 +154,23 @@ def create_layout():
             ),
             html.Div(id='bt-metrics', className='bt-metrics-wrapper'),
         ], className='results-container'),
+
+        # Order (transaction) tables – one per basket, switchable via tabs and
+        # placed below the chart + metrics. A distinct id ('bt-orders-tabs', not
+        # 'main-tabs') avoids inheriting the orphaned #main-tabs icon rules in
+        # layout.css. dbc.Tabs keeps both panes in the DOM, so the run callback
+        # can populate both basket ids in one go. Each pane starts with an empty
+        # placeholder rendered by _order_table(None).
+        html.Div([
+            html.H3('Orders', style={'marginBottom': '8px'}),
+            dbc.Tabs(
+                id='bt-orders-tabs',
+                children=[
+                    dbc.Tab(html.Div(id='bt-orders-a'), label='Basket A'),
+                    dbc.Tab(html.Div(id='bt-orders-b'), label='Basket B'),
+                ],
+            ),
+        ], style={'marginTop': '20px'}),
 
         # Hidden result store (reserved for future drill-down
         # interactions, e.g. clicking a month to inspect it).

@@ -21,7 +21,7 @@ import logging
 # imports from backtest.py, so importing BacktestStrategy here unconditionally
 # would create a cycle.  Under TYPE_CHECKING the import is only evaluated by
 # static analysis tools (mypy), not at runtime.
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 if TYPE_CHECKING:
     from src.strategies.base import BacktestStrategy
 
@@ -274,6 +274,140 @@ def compute_metrics(portfolio: pd.Series, total_invested: float) -> dict[str, st
         'End Value': f"{final_value:,.0f}",
         'Profit/Loss': f"{final_value - total_invested:+,.0f}",
     }
+
+
+# ---------------------------------------------------------------------------
+# Order log – generic, strategy-agnostic builder
+#
+# Every strategy records what it *did* (the buy/sell trades it placed) as a list
+# of raw OrderEvents; this module then turns those events into fully-populated
+# OrderRows by deriving the columns that are computed the same way for *all*
+# strategies (running net deposits, profit/loss, exposure, cash quota, period
+# return).  Keeping only this generic step here means a new strategy adds its
+# order log entirely within its own plugin file: it emits OrderEvents (the part
+# that is genuinely strategy-specific) and calls build_order_log() — backtest.py
+# never needs to change.
+# ---------------------------------------------------------------------------
+
+
+class OrderEvent(TypedDict):
+    """One raw trade as recorded by a strategy, before derived columns are added.
+
+    Fields
+    ------
+    date         – trading day on which the trade happened.
+    side         – 'Buy' or 'Sell' (human-readable, rendered verbatim).
+    value_before – total portfolio worth at this day's prices *before* the trade.
+    inflow       – fresh external money added on this trade (a DCA contribution);
+                   0.0 for pure re-allocations such as a Risk-Off rebalance.
+    assets_after – worth of the held assets (excluding cash) *after* the trade.
+    cash_after   – uninvested cash *after* the trade.
+    """
+
+    date: pd.Timestamp
+    side: str
+    value_before: float
+    inflow: float
+    assets_after: float
+    cash_after: float
+
+
+class OrderRow(TypedDict):
+    """A finalized order-log row: the raw OrderEvent plus all derived columns.
+
+    The derived columns (everything from value_after down) are filled in by
+    build_order_log and have an identical meaning for every strategy, so the UI
+    can render one uniform table no matter which strategy produced it.  The
+    ratio columns are Optional: they are None (rendered as '—') whenever their
+    denominator would be zero.
+    """
+
+    date: pd.Timestamp
+    side: str
+    value_before: float
+    inflow: float
+    assets_after: float
+    cash_after: float
+    value_after: float             # assets_after + cash_after
+    net_deposits: float            # running sum of all external money put in
+    pnl_abs: float                 # value_after − net_deposits (profit/loss, €)
+    pnl_pct: float | None          # pnl_abs / net_deposits
+    equity_exposure: float | None  # assets_after / value_after (invested share)
+    cash_quote: float | None       # cash_after / value_after (= 1 − exposure)
+    period_return: float | None    # value_before / previous value_after − 1
+
+
+def build_order_log(events: list[OrderEvent], initial_capital: float) -> list[OrderRow]:
+    """Turn a strategy's raw OrderEvents into fully-populated OrderRows.
+
+    This is the *only* order-log logic in backtest.py and is completely
+    strategy-agnostic: it walks the events in chronological order and derives
+    every column that is computed the same way for all strategies.  Strategies
+    differ only in *how they fill the OrderEvents* (see each plugin), not in how
+    those events become rows.
+
+    Parameters
+    ----------
+    events          – chronological raw trades produced by a strategy.
+    initial_capital – external money already present before the first event
+                      (the Risk-Off lump sum; 0.0 for DCA, which adds all of its
+                      money through per-event inflows).  Seeds the net-deposits
+                      tally.
+
+    Returns
+    -------
+    One OrderRow per event, in the same order.  Empty when *events* is empty.
+    """
+    rows: list[OrderRow] = []
+
+    # Running total of external money put in (lump sum + every inflow so far);
+    # the basis against which absolute and relative P&L are measured.
+    net_deposits = initial_capital
+
+    # Worth of the portfolio at the *previous* event's close, used to express
+    # each row's period return (market drift since the last trade).  None before
+    # the first event, so that first row reports no period return.
+    prev_value_after: float | None = None
+
+    for ev in events:
+        # Total worth after the trade, and the updated deposit basis.
+        value_after = ev['assets_after'] + ev['cash_after']
+        net_deposits += ev['inflow']
+
+        # Profit/loss versus everything paid in (absolute € and relative %).
+        pnl_abs = value_after - net_deposits
+        pnl_pct = pnl_abs / net_deposits if net_deposits > 0 else None
+
+        # How the portfolio is split between assets and cash after the trade.
+        equity_exposure = ev['assets_after'] / value_after if value_after > 0 else None
+        cash_quote = ev['cash_after'] / value_after if value_after > 0 else None
+
+        # Market drift since the previous trade: this trade's pre-trade worth
+        # relative to the previous trade's post-trade worth.
+        period_return = (
+            ev['value_before'] / prev_value_after - 1.0
+            if prev_value_after is not None and prev_value_after > 0 else None
+        )
+
+        rows.append(OrderRow(
+            date=ev['date'],
+            side=ev['side'],
+            value_before=ev['value_before'],
+            inflow=ev['inflow'],
+            assets_after=ev['assets_after'],
+            cash_after=ev['cash_after'],
+            value_after=value_after,
+            net_deposits=net_deposits,
+            pnl_abs=pnl_abs,
+            pnl_pct=pnl_pct,
+            equity_exposure=equity_exposure,
+            cash_quote=cash_quote,
+            period_return=period_return,
+        ))
+
+        prev_value_after = value_after
+
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -665,7 +799,7 @@ def run_backtest(
     df_meta: pd.DataFrame,
     strategy: "BacktestStrategy | None" = None,
     strategy_params: dict[str, int | float | str] | None = None,
-) -> tuple[pd.Series | None, dict[str, str] | None]:
+) -> tuple[pd.Series | None, dict[str, str] | None, list[OrderRow] | None]:
     """Orchestrate a backtest for a single basket of assets.
 
     When *strategy* is provided the call is delegated entirely to that plugin,
@@ -694,12 +828,15 @@ def run_backtest(
 
     Returns
     -------
-    (portfolio_series, metrics_dict) on success, or (None, None) on failure.
+    (portfolio_series, metrics_dict, order_log) on success, or
+    (None, None, None) on failure.  The built-in DCA path (strategy=None) is a
+    legacy/back-compat entry point not used by the UI, so it returns None for
+    the order log; the per-strategy order logs are produced by the plugins.
     """
     # Delegate to a strategy plugin when one is supplied.
     if strategy is not None:
         if not filenames or not base_url:
-            return None, None
+            return None, None, None
         return strategy.run(
             base_url, filenames, start_date, end_date, df_meta,
             strategy_params or {},
@@ -707,18 +844,18 @@ def run_backtest(
 
     # Bail out immediately if the caller provided nothing useful.
     if not filenames or not base_url:
-        return None, None
+        return None, None, None
 
     # Load all assets' daily close prices into a single aligned DataFrame.
     price_df = load_daily_closes(base_url, filenames, df_meta)
     if price_df.empty:
-        return None, None
+        return None, None, None
 
     # Keep only the calendar months of the requested window (both month bounds
     # inclusive); empty asset columns within the window are dropped.
     price_df = _window_by_month(price_df, start_date, end_date)
     if price_df.empty:
-        return None, None
+        return None, None, None
 
     # Forward-fill fills a NaN price by carrying the previous valid price
     # forward. This handles short gaps such as weekends, exchange holidays or
@@ -728,4 +865,4 @@ def run_backtest(
     price_df = price_df.ffill(limit=5)
 
     portfolio, total_invested = simulate_dca(price_df)
-    return portfolio, compute_metrics(portfolio, total_invested)
+    return portfolio, compute_metrics(portfolio, total_invested), None

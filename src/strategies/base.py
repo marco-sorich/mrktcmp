@@ -11,9 +11,16 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import pandas as pd
+
+# OrderRow is referenced only inside a type annotation (run's return type).
+# Importing it under TYPE_CHECKING keeps base.py free of any runtime dependency
+# on backtest.py, and `from __future__ import annotations` (above) keeps every
+# annotation a string, so the name is never evaluated at runtime.
+if TYPE_CHECKING:
+    from src.backtest import OrderRow
 
 
 @dataclass
@@ -133,7 +140,7 @@ class BacktestStrategy(ABC):
         end_date: pd.Timestamp,
         df_meta: pd.DataFrame,
         params: dict[str, int | float | str],
-    ) -> tuple[pd.Series | None, dict[str, str] | None]:
+    ) -> tuple[pd.Series | None, dict[str, str] | None, list[OrderRow] | None]:
         """Execute the backtest for one basket and return results.
 
         Parameters
@@ -149,8 +156,20 @@ class BacktestStrategy(ABC):
 
         Returns
         -------
-        (portfolio_series, metrics_dict) on success, or (None, None) on failure.
+        (portfolio_series, metrics_dict, order_log) on success, or
+        (None, None, None) on failure.
         portfolio_series – daily portfolio value as a pandas Series.
         metrics_dict     – exactly the same 9 keys as compute_metrics() returns.
+        order_log        – list of OrderRow (one per buy/sell), or None.
+
+        Building the order log
+        ----------------------
+        The order log is the strategy's *own* record of the trades it placed, so
+        it is built inside this method — that is the natural extension point for
+        a new strategy.  Produce a list of ``backtest.OrderEvent`` (the part that
+        is genuinely strategy-specific: when you trade, the side, the inflow, and
+        the resulting asset/cash split) and pass it to the generic
+        ``backtest.build_order_log(events, initial_capital)``, which derives all
+        the shared columns.  See dca.py / riskoff.py for worked examples.
         """
         ...

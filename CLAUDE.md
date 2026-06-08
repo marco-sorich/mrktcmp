@@ -68,18 +68,19 @@ Two strategies share this module; all parquet I/O happens here. Both engines run
 - DCA: `run_backtest()` → `load_daily_closes()` → `_window_by_month()` → `simulate_dca()` → `compute_metrics()`. `simulate_dca()` contributes once per month — on each month's last trading day (`_is_month_end_trading_day()`) — but values daily.
 - Risk-Off: `load_daily_closes()` (full daily history for look-back) → `build_equal_weight_index()` → `compute_riskoff_signals()` (three booleans `_sma_trend_signal`/`_ytd_return_signal`/`_first_n_days_signal`, summed to a 0..3 positive-signal count, ÷3 = daily target fraction) → `simulate_riskoff()`. Signals are evaluated daily and `simulate_riskoff()` buys/sells to the new target (via `_rebalance_to_target()`) **only on the day the target changes**, holding (and letting the fraction drift) in between.
 - `compute_metrics()` is shared by both (daily returns annualised with √252; CAGR from the calendar span; for the lump-sum path `total_invested` is the initial investment). It returns **9** metric keys (no Best/Worst Month) and rejects windows spanning fewer than three calendar months. `get_common_date_range()` finds the overlapping history across both baskets (the date slider stays month-granular).
+- Order log (generic): `build_order_log(events, initial_capital)` turns a strategy's raw `OrderEvent`s into finalized `OrderRow`s (13 columns — the raw trade plus derived value-after, running net deposits, P&L €/%, equity exposure, cash quota, period return). This is the **only** order-log code here and is strategy-agnostic; each strategy emits its own `OrderEvent`s inside its plugin. `run_backtest()` now returns a 3-tuple `(series, metrics, order_log)`; its built-in DCA path (strategy=None, not used by the UI) returns `order_log=None`.
 
 **`src/strategies/` — strategy plugin system**
-`base.py` defines the `BacktestStrategy` ABC and the `ConfigParam` dataclass (GUI-rendered, self-validating params). `registry.py` holds the `@register` decorator and `get_strategy()`/`list_strategies()`/`get_all_strategy_info()`. Plugins are thin orchestrators over `backtest.py`: `dca.py` (DCA) and `riskoff.py` (Risk-Off Signale). `__init__.py` imports every plugin module so importing the package registers all strategies. Each `run()` returns `(pd.Series | None, dict | None)` with the same 9 metric keys as `compute_metrics()`.
+`base.py` defines the `BacktestStrategy` ABC and the `ConfigParam` dataclass (GUI-rendered, self-validating params). `registry.py` holds the `@register` decorator and `get_strategy()`/`list_strategies()`/`get_all_strategy_info()`. Plugins are thin orchestrators over `backtest.py`: `dca.py` (DCA) and `riskoff.py` (Risk-Off Signale). `__init__.py` imports every plugin module so importing the package registers all strategies. Each `run()` returns `(pd.Series | None, dict | None, list[OrderRow] | None)` — the same 9 metric keys as `compute_metrics()` plus the strategy's order log. A plugin builds that log from its **own** strategy-specific events generator (`_dca_order_events()` / `_riskoff_order_events()`, which reuse the shared `_is_month_end_trading_day`/`_portfolio_value`/`_rebalance_to_target` primitives) fed to the generic `build_order_log()`, so adding a strategy and its order log touches only that plugin file — never `backtest.py`.
 
 **`src/callbacks/`**
-- `backtesting.py`: basket management, date range slider, `run_backtest` orchestration
+- `backtesting.py`: basket management, date range slider, `run_backtest` orchestration (its run callback renders the chart, metrics table, status, and both baskets' order tables — 6 outputs)
 - `__init__.py` imports `backtesting` so that importing the package registers all callbacks
 
 **UI building blocks**
-- `layout.py`: top-level layout only, calls `_basket_ui()` from `components.py`
-- `components.py`: `_basket_ui`, `_render_basket_list`, `_metrics_table`
-- `styles.py`: shared inline style dicts
+- `layout.py`: top-level layout only, calls `_basket_ui()` from `components.py`; below the chart/metrics it adds `dbc.Tabs` (id `bt-orders-tabs`, not `main-tabs`) holding the per-basket order tables (`bt-orders-a`/`bt-orders-b`)
+- `components.py`: `_basket_ui`, `_render_basket_list`, `_metrics_table`, `_order_table` (per-order transaction table driven by the `_ORDER_COLUMNS` spec)
+- `styles.py`: shared inline style dicts; the order table's 80vh scroll box with sticky header + sticky first column lives in `assets/layout.css` (`.order-table`/`.order-table-wrapper`)
 
 **Data flow**
 - On startup: `master.parquet` → `config.df` (asset catalogue with symbol, name, exchange, asset_class, filename, interval)
