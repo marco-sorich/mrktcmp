@@ -412,52 +412,50 @@ _ORDER_COLUMNS = [
 ]
 
 
-def _order_table_markup(orders: list[OrderRow] | None) -> str | None:
-    """Build the per-order transaction table as a native HTML string (or None).
+def _order_rows(orders: list[OrderRow] | None) -> "list[dict[str, str]] | None":
+    """Format an order log into display rows: a list of {column label: text}.
 
-    Emitting the table as **native HTML** (rendered later via a single
-    ``dcc.Markdown``) avoids the *seconds* of client-side rendering that a grid
-    of html.Tr/html.Td costs — dash-renderer would instantiate every one of the
-    rows × columns cells as its own React component.  Returning a plain string
-    also lets the run callback stash both baskets' tables in a ``dcc.Store`` so
-    the active one can be (re-)rendered into a single always-visible div on tab
-    change (see render_order_table) — sidestepping the dbc.Tabs pane that does
-    not repaint callback-injected content until a tab switch.
-
-    Each cell is formatted with the _ORDER_COLUMNS formatters (None → em-dash)
-    and HTML-escaped.  Returns None when there are no orders.
+    Each cell uses its _ORDER_COLUMNS formatter (None → em-dash).  The result is
+    plain JSON (all strings, keyed by the human column label) so it can live in a
+    dcc.Store and feed **both** the rendered table (_order_table_component) and
+    the CSV / Excel download (download_orders) from one source.  Returns None
+    when there are no orders.
     """
     if not orders:
         return None
+    return [
+        {label: ('—' if row[key] is None else fmt(row[key]))
+         for key, label, fmt in _ORDER_COLUMNS}
+        for row in orders
+    ]
 
-    # Header row.
-    head = ''.join(f'<th>{_html_escape(label)}</th>' for _key, label, _fmt in _ORDER_COLUMNS)
 
-    # One <tr> per order; each cell formatted by its column's formatter, with a
-    # missing (None) value shown as an em-dash.  Values are HTML-escaped.
+def _order_table_component(rows: "list[dict[str, str]] | None") -> "dcc.Markdown | html.P":
+    """Render formatted order rows (from _order_rows, typically via a dcc.Store)
+    as a native HTML table inside a single ``dcc.Markdown``.
+
+    Emitting native HTML (one component) avoids the *seconds* of client-side
+    rendering that a grid of html.Tr/html.Td costs — dash-renderer would
+    instantiate every one of the rows × columns cells as its own React
+    component — and, being plain HTML, it needs no JS layout measurement, so it
+    paints first-time even inside the tabs UI.  dangerously_allow_html renders
+    the raw <table>; the content is machine-generated and HTML-escaped, so it is
+    safe.  None/empty rows yield the 'No orders.' placeholder.
+    """
+    if not rows:
+        return html.P('No orders.', style={'color': '#aaa'})
+
+    labels = [label for _key, label, _fmt in _ORDER_COLUMNS]
+    head = ''.join(f'<th>{_html_escape(label)}</th>' for label in labels)
     body = ''.join(
         '<tr>' + ''.join(
-            f'<td>{"—" if row[key] is None else _html_escape(fmt(row[key]))}</td>'
-            for key, _label, fmt in _ORDER_COLUMNS
+            f'<td>{_html_escape(str(row.get(label, "")))}</td>' for label in labels
         ) + '</tr>'
-        for row in orders
+        for row in rows
     )
-
-    return (
+    markup = (
         '<div class="order-table-wrapper">'
         f'<table class="order-table"><thead><tr>{head}</tr></thead>'
         f'<tbody>{body}</tbody></table></div>'
     )
-
-
-def _order_table_component(markup: str | None) -> "dcc.Markdown | html.P":
-    """Wrap pre-built order-table HTML (from _order_table_markup, possibly stored
-    in a dcc.Store) into a renderable component.
-
-    dangerously_allow_html renders the raw <table>; the content is fully
-    machine-generated and HTML-escaped, so it is safe.  An empty/None markup
-    yields the 'No orders.' placeholder, mirroring _metrics_table.
-    """
-    if not markup:
-        return html.P('No orders.', style={'color': '#aaa'})
     return dcc.Markdown(markup, dangerously_allow_html=True)

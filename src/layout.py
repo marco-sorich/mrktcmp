@@ -165,7 +165,25 @@ def create_layout():
         # user toggled Basket B → Basket A.  Rendering into an always-visible div
         # paints first-time, exactly like the chart and metrics above.
         html.Div([
-            html.H3('Orders', style={'marginBottom': '8px'}),
+            # Heading row: title on the left, download menu right-aligned.
+            html.Div([
+                html.H3('Orders', style={'margin': 0}),
+                # A download-icon button that drops down to CSV / Excel; the
+                # download_orders callback exports the active basket's table.
+                dbc.DropdownMenu(
+                    label=html.I(className='bi bi-download'),
+                    children=[
+                        dbc.DropdownMenuItem('CSV', id='bt-dl-csv', n_clicks=0),
+                        dbc.DropdownMenuItem('Excel (.xlsx)', id='bt-dl-xlsx', n_clicks=0),
+                    ],
+                    id='bt-orders-dl-menu',
+                    size='sm',
+                    color='light',
+                    align_end=True,                      # menu hugs the right edge
+                    toggle_style={'border': '1px solid #ccc'},
+                ),
+            ], style={'display': 'flex', 'justifyContent': 'space-between',
+                      'alignItems': 'center', 'marginBottom': '8px'}),
             dbc.Tabs(
                 id='bt-orders-tabs',
                 active_tab='a',
@@ -174,9 +192,11 @@ def create_layout():
                     dbc.Tab(label='Basket B', tab_id='b'),
                 ],
             ),
-            # Holds each basket's order-table HTML ({'a': ..., 'b': ...}); the run
-            # callback writes it, render_order_table reads it.
+            # Holds each basket's display rows ({'a': [...], 'b': [...]}); the run
+            # callback writes it; render_order_table and download_orders read it.
             dcc.Store(id='bt-orders-store', data={}),
+            # Hidden target that streams the CSV/Excel file to the browser.
+            dcc.Download(id='bt-orders-dl-data'),
             # The active basket's table is (re-)rendered here on tab/data change.
             html.Div(id='bt-orders-content', style={'marginTop': '8px'}),
         ], style={'marginTop': '20px'}),

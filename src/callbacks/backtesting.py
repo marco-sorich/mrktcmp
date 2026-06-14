@@ -75,7 +75,7 @@ import plotly.graph_objects as go
 #              id dict shares a given 'type' key. Used to listen to every
 #              remove button in a basket at once without knowing in advance
 #              how many there will be.
-from dash import Input, Output, State, callback, no_update, ALL, MATCH
+from dash import Input, Output, State, callback, no_update, ALL, MATCH, dcc
 
 # dash.callback_context: provides runtime information about the callback
 # that just fired (which Input triggered it, what its new value is, etc.).
@@ -101,7 +101,7 @@ from src.utils import log_time
 # are also needed elsewhere (e.g. layout.py builds _basket_ui panels).
 from src.components import (
     _render_basket_list, _metrics_table, _build_strategy_params_ui,
-    _order_table_markup, _order_table_component,
+    _ORDER_COLUMNS, _order_rows, _order_table_component,
 )
 
 # The DCA simulation engine. run_backtest orchestrates data loading, the
@@ -930,9 +930,10 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     # Build the side-by-side metrics table and assemble the status message.
     metrics_div = _metrics_table(metrics_a, metrics_b)
 
-    # Build each basket's per-order table HTML (None for an empty/failed basket)
-    # and stash both in the store; render_order_table renders the active one.
-    orders_store = {'a': _order_table_markup(orders_a), 'b': _order_table_markup(orders_b)}
+    # Format each basket's order log into display rows (None for an empty/failed
+    # basket) and stash both in the store.  render_order_table renders the active
+    # one into the page; download_orders exports it as CSV / Excel.
+    orders_store = {'a': _order_rows(orders_a), 'b': _order_rows(orders_b)}
 
     # Server-side cost of assembling the figure + metric/order tables. If this is
     # small but the user still waits seconds, the time is the browser rendering
@@ -977,3 +978,40 @@ def render_order_table(active_tab, orders_store):
     """
     store = orders_store or {}
     return _order_table_component(store.get(active_tab or 'a'))
+
+
+# ---------------------------------------------------------------------------
+# Callback: download the active basket's order table as CSV / Excel
+# ---------------------------------------------------------------------------
+
+@callback(
+    Output('bt-orders-dl-data', 'data'),
+    Input('bt-dl-csv', 'n_clicks'),    # 'CSV' menu item
+    Input('bt-dl-xlsx', 'n_clicks'),   # 'Excel' menu item
+    State('bt-orders-tabs', 'active_tab'),
+    State('bt-orders-store', 'data'),
+    prevent_initial_call=True,
+)
+@log_time
+def download_orders(n_csv, n_xlsx, active_tab, orders_store):
+    """Send the active basket's order table to the browser as CSV or Excel.
+
+    The order rows already live (display-formatted) in bt-orders-store, so no
+    recomputation is needed; the requested format is read from the triggering
+    menu item.  An empty/absent basket downloads nothing.
+    """
+    tab = active_tab or 'a'
+    rows = (orders_store or {}).get(tab)
+    if not rows:
+        return no_update
+
+    # Columns in the same left-to-right order as the on-screen table.
+    labels = [label for _key, label, _fmt in _ORDER_COLUMNS]
+    df = pd.DataFrame(rows, columns=labels)
+    basket = 'A' if tab == 'a' else 'B'
+
+    if dash.callback_context.triggered_id == 'bt-dl-xlsx':
+        return dcc.send_data_frame(
+            df.to_excel, f'orders_basket_{basket}.xlsx', index=False,
+            sheet_name=f'Basket {basket}')
+    return dcc.send_data_frame(df.to_csv, f'orders_basket_{basket}.csv', index=False)

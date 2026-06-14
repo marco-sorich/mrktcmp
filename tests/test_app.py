@@ -15,10 +15,10 @@ with patch("dotenv.load_dotenv"):
 from src.callbacks.backtesting import (   # noqa: E402
     _bt_assetclass_options, _bt_asset_search, _manage_basket,
     run_backtest_callback, update_date_range_slider, update_date_display,
-    _build_slider_marks, _downsample_for_plot, render_order_table,
+    _build_slider_marks, _downsample_for_plot, render_order_table, download_orders,
 )
 from src.components import (  # noqa: E402
-    _render_basket_list, _metrics_table, _order_table_markup, _order_table_component,
+    _render_basket_list, _metrics_table, _order_rows, _order_table_component,
 )
 
 # ---------------------------------------------------------------------------
@@ -328,9 +328,9 @@ class TestRunBacktestCallback:
                    return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _ORDERS_STUB)):
             *_, orders_store = run_backtest_callback(
                 1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
-        # Both baskets ran → the store carries each basket's table HTML markup.
-        assert '<td>Buy</td>' in orders_store['a']
-        assert '<td>Buy</td>' in orders_store['b']
+        # Both baskets ran → the store carries each basket's display rows.
+        assert orders_store['a'][0]['Buy/Sell'] == 'Buy'
+        assert orders_store['b'][0]['Buy/Sell'] == 'Buy'
 
     def test_only_basket_a_filled_also_succeeds(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
@@ -341,22 +341,22 @@ class TestRunBacktestCallback:
                 1, BASKET_A, [], _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, None)
         assert style['display'] == 'block'
         assert 'complete' in status
-        # Basket B was empty → its stored markup is None (placeholder on render).
+        # Basket B was empty → its stored rows are None (placeholder on render).
         assert orders_store['b'] is None
-        assert '<td>Buy</td>' in orders_store['a']
+        assert orders_store['a'][0]['Buy/Sell'] == 'Buy'
 
 
 class TestRenderOrderTable:
-    def test_active_basket_markup_rendered_as_markdown(self):
+    def test_active_basket_rows_rendered_as_markdown(self):
         from dash import dcc
-        store = {'a': '<table class="order-table"><td>Buy</td></table>', 'b': None}
+        store = {'a': _order_rows(_ORDERS_STUB), 'b': None}
         comp = render_order_table('a', store)
         assert isinstance(comp, dcc.Markdown)
         assert '<td>Buy</td>' in comp.children
 
     def test_empty_or_missing_shows_placeholder(self):
         from dash import html
-        store = {'a': '<table>x</table>', 'b': None}
+        store = {'a': _order_rows(_ORDERS_STUB), 'b': None}
         assert isinstance(render_order_table('b', store), html.P)   # B empty → placeholder
         assert isinstance(render_order_table('a', None), html.P)    # no store yet
         assert isinstance(render_order_table(None, {}), html.P)     # defaults to 'a', empty
@@ -541,33 +541,57 @@ class TestMetricsTable:
 # ---------------------------------------------------------------------------
 
 class TestOrderTable:
-    def test_markup_none_for_empty(self):
-        assert _order_table_markup(None) is None
-        assert _order_table_markup([]) is None
+    def test_rows_none_for_empty(self):
+        assert _order_rows(None) is None
+        assert _order_rows([]) is None
 
-    def test_markup_is_native_table_with_headers_and_rows(self):
-        markup = _order_table_markup(_ORDERS_STUB)
-        # A native HTML table string (rendered later as one dcc.Markdown) rather
-        # than hundreds of html.Tr/html.Td, so a long order log renders fast.
-        assert '<table class="order-table">' in markup
-        assert '<th>Date</th>' in markup
-        assert '<th>Buy/Sell</th>' in markup
-        assert markup.count('<tr>') == len(_ORDERS_STUB) + 1   # header + one row per order
+    def test_rows_are_formatted_keyed_by_column_label(self):
+        rows = _order_rows(_ORDERS_STUB)
+        assert len(rows) == len(_ORDERS_STUB)
+        row = rows[0]
+        assert row['Buy/Sell'] == 'Buy'            # side value rendered verbatim
+        assert row['Date'] == '2022-01-31'         # date formatted as YYYY-MM-DD
+        assert row['Inflow'] == '1,000'            # currency uses a thousands separator
+        assert row['Period return'] == '—'         # period_return is None → em-dash
 
-    def test_markup_formatted_values_and_em_dash_for_none(self):
-        markup = _order_table_markup(_ORDERS_STUB)
-        assert '<td>Buy</td>' in markup            # side value rendered verbatim
-        assert '<td>2022-01-31</td>' in markup     # date formatted as YYYY-MM-DD
-        assert '<td>1,000</td>' in markup          # currency uses a thousands separator
-        assert '<td>—</td>' in markup              # period_return is None → em-dash
-        assert 'P&amp;L (€)' in markup             # '&' in the header is HTML-escaped
-
-    def test_component_wraps_markup_or_placeholder(self):
+    def test_component_renders_rows_as_native_table(self):
         from dash import dcc, html
-        assert isinstance(_order_table_component(None), html.P)            # empty → placeholder
-        comp = _order_table_component('<table class="order-table"></table>')
+        assert isinstance(_order_table_component(None), html.P)   # empty → placeholder
+        comp = _order_table_component(_order_rows(_ORDERS_STUB))
+        # A single dcc.Markdown holding a native HTML table (one component) rather
+        # than hundreds of html.Tr/html.Td, so a long order log renders fast.
         assert isinstance(comp, dcc.Markdown)
-        assert 'order-table' in comp.children
+        markup = comp.children
+        assert '<table class="order-table">' in markup
+        assert '<th>Date</th>' in markup and '<th>Buy/Sell</th>' in markup
+        assert '<td>Buy</td>' in markup and '<td>2022-01-31</td>' in markup
+        assert '<td>—</td>' in markup              # None → em-dash
+        assert 'P&amp;L (€)' in markup             # '&' in the header is HTML-escaped
+        assert markup.count('<tr>') == len(_ORDERS_STUB) + 1   # header + one per order
+
+
+class TestDownloadOrders:
+    def test_csv_export_of_active_basket(self):
+        with patch('dash.callback_context') as ctx:
+            ctx.triggered_id = 'bt-dl-csv'
+            out = download_orders(1, 0, 'a', {'a': _order_rows(_ORDERS_STUB), 'b': None})
+        assert out['filename'] == 'orders_basket_A.csv'
+        assert 'Buy' in out['content']        # data present
+        assert 'Date' in out['content']       # header row present
+
+    def test_xlsx_export_is_base64(self):
+        with patch('dash.callback_context') as ctx:
+            ctx.triggered_id = 'bt-dl-xlsx'
+            out = download_orders(0, 1, 'a', {'a': _order_rows(_ORDERS_STUB), 'b': None})
+        assert out['filename'] == 'orders_basket_A.xlsx'
+        assert out.get('base64') is True
+
+    def test_empty_basket_downloads_nothing(self):
+        from dash import no_update
+        with patch('dash.callback_context') as ctx:
+            ctx.triggered_id = 'bt-dl-csv'
+            out = download_orders(1, 0, 'b', {'a': _order_rows(_ORDERS_STUB), 'b': None})
+        assert out is no_update
 
 
 # ---------------------------------------------------------------------------
