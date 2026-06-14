@@ -24,6 +24,7 @@ from src.backtest import (
 )
 from src.strategies.base import BacktestStrategy, ConfigParam
 from src.strategies.registry import register
+from src.utils import log_duration
 
 
 def _dca_order_events(
@@ -145,7 +146,8 @@ class DCAStrategy(BacktestStrategy):
         # Load the full daily history, then keep only the calendar months of
         # the requested window so the chosen start/end *months* are fully
         # included regardless of exact trading-day boundaries.
-        price_df = load_daily_closes(base_url, filenames, df_meta)
+        with log_duration('dca: load_daily_closes'):
+            price_df = load_daily_closes(base_url, filenames, df_meta)
         if price_df.empty:
             return None, None, None
 
@@ -158,20 +160,25 @@ class DCAStrategy(BacktestStrategy):
         # simulation or carrying delisted assets indefinitely.
         price_df = price_df.ffill(limit=5)
 
-        portfolio, total_invested = simulate_dca(price_df, monthly_investment)
-        metrics = compute_metrics(portfolio, total_invested)
+        # The windowed row count is exactly the number of points later plotted.
+        with log_duration(f'dca: simulate+metrics+orderlog ({price_df.shape[0]} rows)'):
+            portfolio, total_invested = simulate_dca(price_df, monthly_investment)
+            metrics = compute_metrics(portfolio, total_invested)
 
-        # compute_metrics returns {} when portfolio is too short (< 3 months)
-        # or total_invested is zero.  Treat that as a failure so callers always
-        # receive either a fully-populated result or (None, None, None).
+            # compute_metrics returns {} when portfolio is too short (< 3 months)
+            # or total_invested is zero; build the order log only for a valid run.
+            # DCA seeds no initial capital — all money enters through the
+            # per-contribution inflows — so initial_capital is 0.
+            order_log = (
+                build_order_log(
+                    _dca_order_events(price_df, monthly_investment), initial_capital=0.0
+                )
+                if metrics else None
+            )
+
+        # Treat empty metrics as a failure so callers always receive either a
+        # fully-populated result or (None, None, None).
         if not metrics:
             return None, None, None
-
-        # Build this strategy's order log: DCA-specific events (above) handed to
-        # the generic builder.  DCA seeds no initial capital — all money enters
-        # through the per-contribution inflows — so initial_capital is 0.
-        order_log = build_order_log(
-            _dca_order_events(price_df, monthly_investment), initial_capital=0.0
-        )
 
         return portfolio, metrics, order_log

@@ -17,6 +17,10 @@
 # logger (instead of print) lets callers control output format and level.
 import logging
 
+# time: high-resolution timers (perf_counter) used to log how long the parquet
+# reads take — these are the network-I/O hot spots, invisible to @log_time.
+import time
+
 # TYPE_CHECKING guard avoids a circular import at runtime: strategies/dca.py
 # imports from backtest.py, so importing BacktestStrategy here unconditionally
 # would create a cycle.  Under TYPE_CHECKING the import is only evaluated by
@@ -458,6 +462,7 @@ def load_daily_closes(base_url: str, filenames: list[str], df_meta: pd.DataFrame
     """
     # Accumulate individual daily price series here before combining them.
     series = {}
+    t_total = time.perf_counter()
 
     for filename in filenames:
         try:
@@ -468,7 +473,11 @@ def load_daily_closes(base_url: str, filenames: list[str], df_meta: pd.DataFrame
 
             symbol = meta.iloc[0]['symbol']
 
+            # Time the parquet read in isolation: this is the network fetch (the
+            # whole OHLCV file), the prime suspect for multi-second runs.
+            t_read = time.perf_counter()
             ohlcv = pd.read_parquet(f"{base_url}/{filename}")
+            read_ms = (time.perf_counter() - t_read) * 1000
             close = ohlcv['Close']
 
             # Normalise to UTC so all series share a common timezone, matching
@@ -479,8 +488,12 @@ def load_daily_closes(base_url: str, filenames: list[str], df_meta: pd.DataFrame
             else:
                 close.index = close.index.tz_convert('UTC')
 
-            # Drop rows with no close (gaps before listing). Keep daily cadence.
+            # Drop rows with no close (gaps before listing). Keep the file's
+            # native cadence (NOT resampled to daily — intraday files stay
+            # intraday, which is why the row count below matters for speed).
             close = close.dropna()
+            log.debug('[perf] load_daily_closes read %s: %d rows in %.1fms',
+                      filename, len(close), read_ms)
             if not close.empty:
                 series[symbol] = close
 
@@ -493,7 +506,11 @@ def load_daily_closes(base_url: str, filenames: list[str], df_meta: pd.DataFrame
 
     # Outer-join on the date index and sort chronologically so rolling windows
     # and as-of look-ups operate on a monotonically increasing index.
-    return pd.DataFrame(series).sort_index()
+    combined = pd.DataFrame(series).sort_index()
+    log.debug('[perf] load_daily_closes total: %d files -> %d rows x %d cols in %.1fms',
+              len(filenames), combined.shape[0], combined.shape[1],
+              (time.perf_counter() - t_total) * 1000)
+    return combined
 
 
 def build_equal_weight_index(daily_df: pd.DataFrame) -> pd.Series:
@@ -758,7 +775,11 @@ def _get_monthly_range(base_url: str, filename: str, df_meta: pd.DataFrame) -> t
         # columns=['Close'] tells pyarrow to read only the Close column from
         # the Parquet file, skipping Open/High/Low/Volume. This is much faster
         # than loading the full OHLCV dataset when we only need date bounds.
+        # This read fires once per asset on every basket change (slider refresh).
+        t_read = time.perf_counter()
         ohlcv = pd.read_parquet(f"{base_url}/{filename}", columns=['Close'])
+        log.debug('[perf] _get_monthly_range read %s: %.1fms', filename,
+                  (time.perf_counter() - t_read) * 1000)
         close = ohlcv['Close']
         assert isinstance(close.index, pd.DatetimeIndex)
         if close.index.tz is None:

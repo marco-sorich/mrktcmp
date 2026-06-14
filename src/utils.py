@@ -16,6 +16,13 @@ import functools
 # long callbacks take to execute.
 import time
 
+# contextlib.contextmanager: turns a simple generator into a `with`-block
+# context manager, used below for log_duration (timing a block of code).
+import contextlib
+
+# Iterator: the return type of a @contextmanager generator (it yields once).
+from collections.abc import Iterator
+
 # ---------------------------------------------------------------------------
 # Internal imports
 # ---------------------------------------------------------------------------
@@ -71,3 +78,32 @@ def log_time(func):
         _config.log.debug(f'{func.__name__} callback time: {(time.time() - t0)*1000:,.2f}ms')
         return result
     return wrapper
+
+
+# ---------------------------------------------------------------------------
+# Context manager: time an individual phase *inside* a callback or helper
+# ---------------------------------------------------------------------------
+
+@contextlib.contextmanager
+def log_duration(label: str) -> Iterator[None]:
+    """Log the wall-clock duration of a ``with`` block at DEBUG level.
+
+    Where @log_time measures a whole callback, this times the individual
+    *phases* within one (data load, simulation, figure build, …) so a slow
+    step can be pinpointed without a profiler.  Every line is prefixed with
+    ``[perf]`` so the timing output is easy to filter.
+
+        with log_duration('load parquet'):
+            price_df = load_daily_closes(...)
+
+    Parameters
+    ----------
+    label : str – human-readable name of the timed phase.
+    """
+    # perf_counter is a monotonic high-resolution clock — better than time()
+    # for measuring short durations (it never jumps backwards).
+    t0 = time.perf_counter()
+    try:
+        yield
+    finally:
+        _config.log.debug('[perf] %s: %.1fms', label, (time.perf_counter() - t0) * 1000)

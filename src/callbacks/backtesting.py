@@ -43,6 +43,11 @@
 
 from typing import Any
 
+# time: high-resolution timer (perf_counter) to log how long the server spends
+# building the figure + tables — distinct from the client-side render that
+# happens in the browser after this callback returns (invisible to @log_time).
+import time
+
 # ---------------------------------------------------------------------------
 # Third-party imports
 # ---------------------------------------------------------------------------
@@ -828,6 +833,18 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
         return (empty_chart, hidden, '', 'No data available for the selected period.',
                 empty_orders, empty_orders)
 
+    # --- diagnostics: how much is about to be serialised to the browser? ---
+    # The figure point count (= portfolio length) is the prime suspect for a
+    # slow *client-side* render: that happens in the browser AFTER this callback
+    # returns, so it never appears in this callback's @log_time total.
+    n_pts_a = len(portfolio_a) if portfolio_a is not None else 0
+    n_pts_b = len(portfolio_b) if portfolio_b is not None else 0
+    n_ord_a = len(orders_a) if orders_a else 0
+    n_ord_b = len(orders_b) if orders_b else 0
+    _config.log.debug('[perf] render input: A=%d points / %d orders, B=%d points / %d orders',
+                      n_pts_a, n_ord_a, n_pts_b, n_ord_b)
+    _t_render = time.perf_counter()
+
     # Build the portfolio value chart.
     fig = go.Figure()
 
@@ -880,6 +897,12 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     # basket → _order_table renders the 'No orders.' placeholder).
     orders_a_table = _order_table(orders_a)
     orders_b_table = _order_table(orders_b)
+
+    # Server-side cost of assembling the figure + metric/order tables. If this is
+    # small but the user still waits seconds, the time is the browser rendering
+    # the payload sized by the point/order counts logged above.
+    _config.log.debug('[perf] build figure+tables: %.1fms',
+                      (time.perf_counter() - _t_render) * 1000)
 
     name_a = (strategy_config_a or {}).get('strategy') or 'DCA'
     name_b = (strategy_config_b or {}).get('strategy') or 'DCA'

@@ -31,6 +31,7 @@ from src.backtest import (
 )
 from src.strategies.base import BacktestStrategy, ConfigParam
 from src.strategies.registry import register
+from src.utils import log_duration
 
 
 def _riskoff_order_events(
@@ -179,12 +180,16 @@ class RiskOffStrategy(BacktestStrategy):
 
         # 1. Full daily history (no window) → equal-weight index → signals.
         #    The extra history gives the long look-back signals enough warm-up.
-        daily_df = load_daily_closes(base_url, filenames, df_meta)
+        with log_duration('riskoff: load_daily_closes'):
+            daily_df = load_daily_closes(base_url, filenames, df_meta)
         if daily_df.empty:
             return None, None, None
 
-        index = build_equal_weight_index(daily_df)
-        signals = compute_riskoff_signals(index, sma_window, first_n_days)
+        # Signals run over the FULL history (not the window), so their cost scales
+        # with the raw row count — logged here to separate it from data loading.
+        with log_duration(f'riskoff: index+signals ({daily_df.shape[0]} rows)'):
+            index = build_equal_weight_index(daily_df)
+            signals = compute_riskoff_signals(index, sma_window, first_n_days)
 
         # 2. Daily closes restricted to the requested window's calendar months.
         #    Derived from the *same* daily_df so its index aligns exactly with
@@ -200,22 +205,25 @@ class RiskOffStrategy(BacktestStrategy):
         #    the windowed price index. Days before any signal history (NaN) map
         #    to 0.0 (fully in cash). simulate_riskoff trades only when this
         #    fraction changes (same-day execution), holding in between.
-        target_fraction = (signals / 3.0).reindex(price_df.index).fillna(0.0)
+        #    The windowed row count is exactly the number of points later plotted.
+        with log_duration(f'riskoff: simulate+metrics+orderlog ({price_df.shape[0]} rows)'):
+            target_fraction = (signals / 3.0).reindex(price_df.index).fillna(0.0)
+            portfolio, total_invested = simulate_riskoff(price_df, target_fraction, initial_investment)
+            metrics = compute_metrics(portfolio, total_invested)
 
-        portfolio, total_invested = simulate_riskoff(price_df, target_fraction, initial_investment)
-        metrics = compute_metrics(portfolio, total_invested)
+            # Build the order log only for a valid run.  The whole lump sum is
+            # present from the start, so it seeds net-deposits as initial_capital.
+            order_log = (
+                build_order_log(
+                    _riskoff_order_events(price_df, target_fraction, initial_investment),
+                    initial_capital=initial_investment,
+                )
+                if metrics else None
+            )
 
         # compute_metrics returns {} when the series is too short (<3 months);
         # treat that as a failure so callers get a full result or (None, None, None).
         if not metrics:
             return None, None, None
-
-        # Build this strategy's order log: Risk-Off-specific rebalance events
-        # (above) handed to the generic builder.  The whole lump sum is present
-        # from the start, so it seeds the net-deposits basis as initial_capital.
-        order_log = build_order_log(
-            _riskoff_order_events(price_df, target_fraction, initial_investment),
-            initial_capital=initial_investment,
-        )
 
         return portfolio, metrics, order_log
