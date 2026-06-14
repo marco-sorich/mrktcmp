@@ -21,8 +21,13 @@
 #       html.Button, html.H3, html.Table, html.Tr, html.Th, html.Td …).
 # dcc:  "Dash Core Components" – interactive widgets like Dropdown,
 #       RadioItems, and Store that go beyond plain HTML.
-from dash import html, dcc, dash_table
+from dash import html, dcc
 import dash_bootstrap_components as dbc
+
+# escape: HTML-escape cell text (e.g. the '&' in the 'P&L (€)' header) before it
+# goes into the raw-HTML order table rendered via dcc.Markdown.  Aliased so it
+# does not shadow Dash's `html` component module imported above.
+from html import escape as _html_escape
 
 # ---------------------------------------------------------------------------
 # Internal imports
@@ -407,20 +412,22 @@ _ORDER_COLUMNS = [
 ]
 
 
-def _order_table(orders: list[OrderRow] | None) -> "dash_table.DataTable | html.P":
+def _order_table(orders: list[OrderRow] | None) -> "dcc.Markdown | html.P":
     """Build the per-order transaction table for one basket.
 
-    Rendered as a single *virtualized* ``dash_table.DataTable`` rather than a
-    grid of html.Tr/html.Td components.  A long order log (hundreds of monthly
-    contributions over a multi-year window) otherwise costs *seconds* of
-    client-side rendering: dash-renderer instantiates every one of the
-    rows × columns cells as its own React component.  The DataTable is a single
-    component that ships its rows as a compact data prop and only renders the
-    rows currently in view, while keeping the header and the first (Date) column
-    fixed and fitting the 80vh results area.
+    Emitted as **native HTML** inside a single ``dcc.Markdown`` component rather
+    than a grid of html.Tr/html.Td components.  A long order log (hundreds of
+    monthly contributions over a multi-year window) otherwise costs *seconds* of
+    client-side rendering, because dash-renderer instantiates every one of the
+    rows × columns cells as its own React component.  One Markdown component
+    avoids that overhead, and a plain HTML table needs no JS layout measurement —
+    so (unlike dash_table.DataTable's virtualization / fixed_rows / fixed_columns)
+    it renders correctly on the first paint even while mounted inside the
+    not-yet-sized dbc.Tabs pane.  Sticky header + first column come from the
+    stable ``.order-table`` CSS in assets/layout.css.
 
-    Each cell is pre-formatted to a string with the _ORDER_COLUMNS formatters
-    (None → em-dash) so the displayed text is identical to the previous table.
+    Each cell is formatted with the _ORDER_COLUMNS formatters (None → em-dash)
+    and HTML-escaped so the displayed text is identical to the previous table.
 
     Parameters
     ----------
@@ -429,46 +436,32 @@ def _order_table(orders: list[OrderRow] | None) -> "dash_table.DataTable | html.
 
     Returns
     -------
-    html.P placeholder when there are no orders, otherwise a dash_table.DataTable.
+    html.P placeholder when there are no orders, otherwise a dcc.Markdown holding
+    the rendered table.
     """
     # Empty / missing → a plain placeholder, mirroring _metrics_table.
     if not orders:
         return html.P('No orders.', style={'color': '#aaa'})
 
-    # One dict per order: every cell pre-formatted to a string (None → em-dash)
-    # so the DataTable simply displays text identical to the old html.Table.
-    data = [
-        {key: ('—' if row[key] is None else fmt(row[key]))
-         for key, _label, fmt in _ORDER_COLUMNS}
-        for row in orders
-    ]
-    columns = [{'name': label, 'id': key} for key, label, _fmt in _ORDER_COLUMNS]
+    # Header row.
+    head = ''.join(f'<th>{_html_escape(label)}</th>' for _key, label, _fmt in _ORDER_COLUMNS)
 
-    return dash_table.DataTable(
-        data=data,
-        columns=columns,
-        # All rows rendered (page_action='none') but as a *single* DataTable
-        # component, so dash-renderer no longer instantiates one component per
-        # cell — the root cause of the multi-second render.  Virtualization is
-        # intentionally NOT used: with a percentage (80vh) height it computes
-        # zero visible rows in Safari and renders an empty body.  fixed_rows /
-        # fixed_columns keep the header and the Date column pinned while scrolling.
-        fixed_rows={'headers': True},
-        fixed_columns={'headers': True, 'data': 1},
-        page_action='none',
-        style_table={'height': '80vh', 'overflowY': 'auto',
-                     'overflowX': 'auto', 'minWidth': '100%'},
-        # Deterministic per-column widths: fixed_columns mis-sizes (and so the
-        # frozen Date column would overlap the next one) unless cell widths are
-        # explicit.  120px fits every header without wrapping.
-        style_cell={'fontSize': '13px', 'padding': '4px 10px', 'textAlign': 'right',
-                    'whiteSpace': 'nowrap', 'fontFamily': 'inherit',
-                    'border': 'none', 'borderBottom': '1px solid #eee',
-                    'minWidth': '130px', 'width': '130px', 'maxWidth': '130px'},
-        style_header={'fontWeight': 'bold', 'backgroundColor': '#f0f0f0', 'border': 'none'},
-        # Text columns (Date, Buy/Sell) read better left-aligned; numbers stay right.
-        style_cell_conditional=[
-            {'if': {'column_id': 'date'}, 'textAlign': 'left'},
-            {'if': {'column_id': 'side'}, 'textAlign': 'left'},
-        ],
+    # One <tr> per order; each cell formatted by its column's formatter, with a
+    # missing (None) value shown as an em-dash.  Values are HTML-escaped.
+    body = ''.join(
+        '<tr>' + ''.join(
+            f'<td>{"—" if row[key] is None else _html_escape(fmt(row[key]))}</td>'
+            for key, _label, fmt in _ORDER_COLUMNS
+        ) + '</tr>'
+        for row in orders
     )
+
+    table_html = (
+        '<div class="order-table-wrapper">'
+        f'<table class="order-table"><thead><tr>{head}</tr></thead>'
+        f'<tbody>{body}</tbody></table></div>'
+    )
+
+    # dangerously_allow_html renders the raw <table>; the content is fully
+    # machine-generated and HTML-escaped above (no user input), so it is safe.
+    return dcc.Markdown(table_html, dangerously_allow_html=True)

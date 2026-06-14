@@ -327,11 +327,11 @@ class TestRunBacktestCallback:
             *_, orders_a, orders_b = run_backtest_callback(
                 1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
         # Both baskets ran → both panes hold a rendered order table (a
-        # DataTable), not the 'No orders.' placeholder.
-        from dash import dash_table
-        assert isinstance(orders_a, dash_table.DataTable)
-        assert isinstance(orders_b, dash_table.DataTable)
-        assert orders_a.data[0]['side'] == 'Buy'
+        # dcc.Markdown native table), not the 'No orders.' placeholder.
+        from dash import dcc
+        assert isinstance(orders_a, dcc.Markdown)
+        assert isinstance(orders_b, dcc.Markdown)
+        assert '<td>Buy</td>' in orders_a.children
 
     def test_only_basket_a_filled_also_succeeds(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
@@ -536,25 +536,27 @@ class TestOrderTable:
         result = _order_table([])
         assert isinstance(result, html.P)
 
-    def test_returns_datatable_with_headers(self):
-        from dash import dash_table
+    def test_returns_markdown_native_table_with_headers(self):
+        from dash import dcc
         result = _order_table(_ORDERS_STUB)
-        # A single virtualized DataTable (one component) rather than hundreds of
-        # html.Tr/html.Td, so a long order log renders in milliseconds.
-        assert isinstance(result, dash_table.DataTable)
-        names = [c['name'] for c in result.columns]
-        assert 'Date' in names
-        assert 'Buy/Sell' in names
-        assert len(result.data) == len(_ORDERS_STUB)   # one data row per order
+        # A single dcc.Markdown holding a native HTML table (one component) rather
+        # than hundreds of html.Tr/html.Td, so a long order log renders fast and
+        # appears first-paint inside the tabs.
+        assert isinstance(result, dcc.Markdown)
+        markup = result.children
+        assert '<table class="order-table">' in markup
+        assert '<th>Date</th>' in markup
+        assert '<th>Buy/Sell</th>' in markup
+        assert markup.count('<tr>') == len(_ORDERS_STUB) + 1   # header + one row per order
 
     def test_formatted_values_and_em_dash_for_none(self):
         result = _order_table(_ORDERS_STUB)
-        # Cells are pre-formatted to strings keyed by column id.
-        row = result.data[0]
-        assert row['side'] == 'Buy'            # side value rendered verbatim
-        assert row['date'] == '2022-01-31'     # date formatted as YYYY-MM-DD
-        assert row['inflow'] == '1,000'        # currency uses a thousands separator
-        assert row['period_return'] == '—'     # period_return is None → em-dash
+        markup = result.children
+        assert '<td>Buy</td>' in markup            # side value rendered verbatim
+        assert '<td>2022-01-31</td>' in markup     # date formatted as YYYY-MM-DD
+        assert '<td>1,000</td>' in markup          # currency uses a thousands separator
+        assert '<td>—</td>' in markup              # period_return is None → em-dash
+        assert 'P&amp;L (€)' in markup             # '&' in the header is HTML-escaped
 
 
 # ---------------------------------------------------------------------------

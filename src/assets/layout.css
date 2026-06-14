@@ -23,10 +23,68 @@
 }
 
 
-/* The per-order table is a dash_table.DataTable (see components._order_table),
-   which is styled via its own style_* props and renders only the rows in view;
-   it needs no custom CSS here (the old html.Table .order-table rules were
-   removed when the verbose-DOM table was replaced for performance). */
+/* --- Order (transaction) table -------------------------------------------- */
+/* The table is emitted as native HTML inside a single dcc.Markdown component
+   (components._order_table) — one component renders fast, and native HTML needs
+   no JS layout measurement so it shows first-paint inside the dbc.Tabs. Sticky
+   header + first column use plain, version-stable CSS below. */
+
+/* 80%-of-viewport scroll area; both axes scroll when the table overflows. */
+.order-table-wrapper {
+    height: 80vh;
+    overflow: auto;
+    margin-top: 8px;
+    border: 1px solid #e0e0e0;
+}
+
+/* Separate (not collapsed) borders are required so position: sticky cells keep
+   their borders while scrolling. */
+.order-table {
+    border-collapse: separate;
+    border-spacing: 0;
+    width: 100%;
+    font-size: 13px;
+    white-space: nowrap;
+}
+
+.order-table th,
+.order-table td {
+    padding: 4px 10px;
+    text-align: right;
+    border-bottom: 1px solid #eee;
+}
+
+/* Sticky header row: pinned to the top while the body scrolls vertically. */
+.order-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: #f0f0f0;
+}
+
+/* Sticky first column (Date): pinned to the left while scrolling across. */
+.order-table th:first-child,
+.order-table td:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: #fff;
+    border-right: 1px solid #e0e0e0;
+}
+
+/* The top-left corner belongs to both sticky regions → highest stacking order. */
+.order-table thead th:first-child {
+    z-index: 3;
+    background: #f0f0f0;
+}
+
+/* Text columns (Date, Buy/Sell) read better left-aligned; numbers stay right. */
+.order-table th:first-child,
+.order-table td:first-child,
+.order-table th:nth-child(2),
+.order-table td:nth-child(2) {
+    text-align: left;
+}
 
 
 #main-tabs .nav-item .nav-link::before {
