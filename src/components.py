@@ -447,9 +447,12 @@ def _order_table(orders: list[OrderRow] | None) -> "dash_table.DataTable | html.
     return dash_table.DataTable(
         data=data,
         columns=columns,
-        # virtualization renders only the rows near the viewport; fixed_rows /
+        # All rows rendered (page_action='none') but as a *single* DataTable
+        # component, so dash-renderer no longer instantiates one component per
+        # cell — the root cause of the multi-second render.  Virtualization is
+        # intentionally NOT used: with a percentage (80vh) height it computes
+        # zero visible rows in Safari and renders an empty body.  fixed_rows /
         # fixed_columns keep the header and the Date column pinned while scrolling.
-        virtualization=True,
         fixed_rows={'headers': True},
         fixed_columns={'headers': True, 'data': 1},
         page_action='none',
