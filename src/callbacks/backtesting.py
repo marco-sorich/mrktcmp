@@ -723,6 +723,35 @@ def update_strategy_config_b(strategy_name: str | None, param_values: list) -> d
 
 
 # ---------------------------------------------------------------------------
+# Helper: thin a daily curve for plotting (client render is the bottleneck)
+# ---------------------------------------------------------------------------
+
+# Max points drawn per chart trace.  A multi-year *daily* curve has thousands
+# of points, but the chart is only ~1-2k pixels wide, so drawing every point
+# just bloats the JSON payload and the browser's SVG render (the dominant cost
+# of a run) with no visible difference.  Only the plotted curve is thinned —
+# every metric is still computed on the full-resolution series.
+_MAX_PLOT_POINTS = 2000
+
+
+def _downsample_for_plot(series: pd.Series, max_points: int = _MAX_PLOT_POINTS) -> pd.Series:
+    """Reduce *series* to at most *max_points* points for plotting, keeping shape.
+
+    Returns the series unchanged when it is already small enough.  Otherwise it
+    keeps every k-th point (k chosen so the result is ~max_points) and always
+    appends the final point so the curve still ends on the true last value.
+    """
+    n = len(series)
+    if n <= max_points:
+        return series
+    step = (n // max_points) + 1
+    thinned = series.iloc[::step]
+    if thinned.index[-1] != series.index[-1]:
+        thinned = pd.concat([thinned, series.iloc[[-1]]])
+    return thinned
+
+
+# ---------------------------------------------------------------------------
 # Callback: run the DCA backtest and render results
 # ---------------------------------------------------------------------------
 
@@ -850,18 +879,21 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
 
     if portfolio_a is not None:
         # go.Scatter draws a line chart. round(2) avoids floating-point noise
-        # in hover tooltips (e.g. 1000.0000000002 → 1000.0).
+        # in hover tooltips (e.g. 1000.0000000002 → 1000.0).  The curve is
+        # thinned to ~_MAX_PLOT_POINTS first (see _downsample_for_plot).
+        plot_a = _downsample_for_plot(portfolio_a)
         fig.add_trace(go.Scatter(
-            x=portfolio_a.index,       # x-axis: daily dates
-            y=portfolio_a.round(2),    # y-axis: portfolio value in EUR
+            x=plot_a.index,       # x-axis: daily dates
+            y=plot_a.round(2),    # y-axis: portfolio value in EUR
             name='Basket A',
             line=dict(color='#1a56db', width=2),  # blue line, 2px thick
         ))
 
     if portfolio_b is not None:
+        plot_b = _downsample_for_plot(portfolio_b)
         fig.add_trace(go.Scatter(
-            x=portfolio_b.index,
-            y=portfolio_b.round(2),
+            x=plot_b.index,
+            y=plot_b.round(2),
             name='Basket B',
             line=dict(color='#c0392b', width=2),  # red line
         ))

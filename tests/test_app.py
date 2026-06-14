@@ -15,7 +15,7 @@ with patch("dotenv.load_dotenv"):
 from src.callbacks.backtesting import (   # noqa: E402
     _bt_assetclass_options, _bt_asset_search, _manage_basket,
     run_backtest_callback, update_date_range_slider, update_date_display,
-    _build_slider_marks,
+    _build_slider_marks, _downsample_for_plot,
 )
 from src.components import _render_basket_list, _metrics_table, _order_table  # noqa: E402
 
@@ -320,18 +320,18 @@ class TestRunBacktestCallback:
         assert isinstance(fig, go.Figure)
 
     def test_successful_run_populates_order_tables(self):
-        from dash import html
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF), \
              patch('src.callbacks.backtesting.run_backtest',
                    return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _ORDERS_STUB)):
             *_, orders_a, orders_b = run_backtest_callback(
                 1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
-        # Both baskets ran → both panes hold a rendered order table, not the
-        # 'No orders.' placeholder.
-        assert isinstance(orders_a, html.Div)
-        assert isinstance(orders_b, html.Div)
-        assert 'Buy' in str(orders_a)
+        # Both baskets ran → both panes hold a rendered order table (a
+        # DataTable), not the 'No orders.' placeholder.
+        from dash import dash_table
+        assert isinstance(orders_a, dash_table.DataTable)
+        assert isinstance(orders_b, dash_table.DataTable)
+        assert orders_a.data[0]['side'] == 'Buy'
 
     def test_only_basket_a_filled_also_succeeds(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
@@ -536,20 +536,42 @@ class TestOrderTable:
         result = _order_table([])
         assert isinstance(result, html.P)
 
-    def test_returns_div_wrapping_table_with_headers(self):
-        from dash import html
+    def test_returns_datatable_with_headers(self):
+        from dash import dash_table
         result = _order_table(_ORDERS_STUB)
-        assert isinstance(result, html.Div)
-        # The scroll wrapper holds a single <table>.
-        assert isinstance(result.children, html.Table)
-        rendered = str(result)
-        assert 'Date' in rendered
-        assert 'Buy/Sell' in rendered
+        # A single virtualized DataTable (one component) rather than hundreds of
+        # html.Tr/html.Td, so a long order log renders in milliseconds.
+        assert isinstance(result, dash_table.DataTable)
+        names = [c['name'] for c in result.columns]
+        assert 'Date' in names
+        assert 'Buy/Sell' in names
+        assert len(result.data) == len(_ORDERS_STUB)   # one data row per order
 
     def test_formatted_values_and_em_dash_for_none(self):
         result = _order_table(_ORDERS_STUB)
-        rendered = str(result)
-        assert 'Buy' in rendered           # side value rendered verbatim
-        assert '2022-01-31' in rendered    # date formatted as YYYY-MM-DD
-        assert '1,000' in rendered         # currency uses a thousands separator
-        assert '—' in rendered             # period_return is None → em-dash
+        # Cells are pre-formatted to strings keyed by column id.
+        row = result.data[0]
+        assert row['side'] == 'Buy'            # side value rendered verbatim
+        assert row['date'] == '2022-01-31'     # date formatted as YYYY-MM-DD
+        assert row['inflow'] == '1,000'        # currency uses a thousands separator
+        assert row['period_return'] == '—'     # period_return is None → em-dash
+
+
+# ---------------------------------------------------------------------------
+# _downsample_for_plot
+# ---------------------------------------------------------------------------
+
+class TestDownsampleForPlot:
+    def test_short_series_returned_unchanged(self):
+        s = pd.Series(range(100), index=pd.date_range('2020-01-01', periods=100, freq='D'))
+        # Already small enough → same object, no copy.
+        assert _downsample_for_plot(s, max_points=2000) is s
+
+    def test_long_series_thinned_but_endpoints_kept(self):
+        n = 7000
+        s = pd.Series(range(n), index=pd.date_range('2000-01-01', periods=n, freq='D'))
+        out = _downsample_for_plot(s, max_points=2000)
+        assert len(out) <= 2001                 # ~max_points (+ appended last point)
+        assert out.index[0] == s.index[0]       # first point preserved
+        assert out.index[-1] == s.index[-1]     # final point always preserved
+        assert out.iloc[-1] == s.iloc[-1]

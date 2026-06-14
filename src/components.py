@@ -21,7 +21,7 @@
 #       html.Button, html.H3, html.Table, html.Tr, html.Th, html.Td …).
 # dcc:  "Dash Core Components" – interactive widgets like Dropdown,
 #       RadioItems, and Store that go beyond plain HTML.
-from dash import html, dcc
+from dash import html, dcc, dash_table
 import dash_bootstrap_components as dbc
 
 # ---------------------------------------------------------------------------
@@ -407,13 +407,20 @@ _ORDER_COLUMNS = [
 ]
 
 
-def _order_table(orders: list[OrderRow] | None) -> html.Div | html.P:
+def _order_table(orders: list[OrderRow] | None) -> "dash_table.DataTable | html.P":
     """Build the per-order transaction table for one basket.
 
-    One row per buy/sell order, one column per entry in _ORDER_COLUMNS.  The
-    table is wrapped in a scrollable Div (sized and made sticky-header /
-    sticky-first-column by the .order-table / .order-table-wrapper rules in
-    layout.css) so long order logs stay navigable.
+    Rendered as a single *virtualized* ``dash_table.DataTable`` rather than a
+    grid of html.Tr/html.Td components.  A long order log (hundreds of monthly
+    contributions over a multi-year window) otherwise costs *seconds* of
+    client-side rendering: dash-renderer instantiates every one of the
+    rows × columns cells as its own React component.  The DataTable is a single
+    component that ships its rows as a compact data prop and only renders the
+    rows currently in view, while keeping the header and the first (Date) column
+    fixed and fitting the 80vh results area.
+
+    Each cell is pre-formatted to a string with the _ORDER_COLUMNS formatters
+    (None → em-dash) so the displayed text is identical to the previous table.
 
     Parameters
     ----------
@@ -422,30 +429,43 @@ def _order_table(orders: list[OrderRow] | None) -> html.Div | html.P:
 
     Returns
     -------
-    html.P placeholder when there are no orders, otherwise an html.Div wrapping
-    the html.Table.
+    html.P placeholder when there are no orders, otherwise a dash_table.DataTable.
     """
     # Empty / missing → a plain placeholder, mirroring _metrics_table.
     if not orders:
         return html.P('No orders.', style={'color': '#aaa'})
 
-    # Header row: one <th> per column, in _ORDER_COLUMNS order.
-    header = html.Tr([html.Th(label) for _key, label, _fmt in _ORDER_COLUMNS])
-
-    # One <tr> per order; each cell formatted by its column's formatter, with a
-    # missing (None) value shown as an em-dash.
-    body = [
-        html.Tr([
-            html.Td('—' if row[key] is None else fmt(row[key]))
-            for key, _label, fmt in _ORDER_COLUMNS
-        ])
+    # One dict per order: every cell pre-formatted to a string (None → em-dash)
+    # so the DataTable simply displays text identical to the old html.Table.
+    data = [
+        {key: ('—' if row[key] is None else fmt(row[key]))
+         for key, _label, fmt in _ORDER_COLUMNS}
         for row in orders
     ]
+    columns = [{'name': label, 'id': key} for key, label, _fmt in _ORDER_COLUMNS]
 
-    return html.Div(
-        html.Table(
-            [html.Thead(header), html.Tbody(body)],
-            className='order-table',
-        ),
-        className='order-table-wrapper',
+    return dash_table.DataTable(
+        data=data,
+        columns=columns,
+        # virtualization renders only the rows near the viewport; fixed_rows /
+        # fixed_columns keep the header and the Date column pinned while scrolling.
+        virtualization=True,
+        fixed_rows={'headers': True},
+        fixed_columns={'headers': True, 'data': 1},
+        page_action='none',
+        style_table={'height': '80vh', 'overflowY': 'auto',
+                     'overflowX': 'auto', 'minWidth': '100%'},
+        # Deterministic per-column widths: fixed_columns mis-sizes (and so the
+        # frozen Date column would overlap the next one) unless cell widths are
+        # explicit.  120px fits every header without wrapping.
+        style_cell={'fontSize': '13px', 'padding': '4px 10px', 'textAlign': 'right',
+                    'whiteSpace': 'nowrap', 'fontFamily': 'inherit',
+                    'border': 'none', 'borderBottom': '1px solid #eee',
+                    'minWidth': '130px', 'width': '130px', 'maxWidth': '130px'},
+        style_header={'fontWeight': 'bold', 'backgroundColor': '#f0f0f0', 'border': 'none'},
+        # Text columns (Date, Buy/Sell) read better left-aligned; numbers stay right.
+        style_cell_conditional=[
+            {'if': {'column_id': 'date'}, 'textAlign': 'left'},
+            {'if': {'column_id': 'side'}, 'textAlign': 'left'},
+        ],
     )

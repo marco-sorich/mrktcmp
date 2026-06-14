@@ -74,13 +74,13 @@ Two strategies share this module; all parquet I/O happens here. Both engines run
 `base.py` defines the `BacktestStrategy` ABC and the `ConfigParam` dataclass (GUI-rendered, self-validating params). `registry.py` holds the `@register` decorator and `get_strategy()`/`list_strategies()`/`get_all_strategy_info()`. Plugins are thin orchestrators over `backtest.py`: `dca.py` (DCA) and `riskoff.py` (Risk-Off Signale). `__init__.py` imports every plugin module so importing the package registers all strategies. Each `run()` returns `(pd.Series | None, dict | None, list[OrderRow] | None)` — the same 9 metric keys as `compute_metrics()` plus the strategy's order log. A plugin builds that log from its **own** strategy-specific events generator (`_dca_order_events()` / `_riskoff_order_events()`, which reuse the shared `_is_month_end_trading_day`/`_portfolio_value`/`_rebalance_to_target` primitives) fed to the generic `build_order_log()`, so adding a strategy and its order log touches only that plugin file — never `backtest.py`.
 
 **`src/callbacks/`**
-- `backtesting.py`: basket management, date range slider, `run_backtest` orchestration (its run callback renders the chart, metrics table, status, and both baskets' order tables — 6 outputs)
+- `backtesting.py`: basket management, date range slider, `run_backtest` orchestration (its run callback renders the chart, metrics table, status, and both baskets' order tables — 6 outputs). The daily value curve is thinned to ~2000 points by `_downsample_for_plot()` before plotting (the chart is only ~1-2k px wide; metrics use the full series) to keep the JSON payload and browser SVG render small.
 - `__init__.py` imports `backtesting` so that importing the package registers all callbacks
 
 **UI building blocks**
 - `layout.py`: top-level layout only, calls `_basket_ui()` from `components.py`; below the chart/metrics it adds `dbc.Tabs` (id `bt-orders-tabs`, not `main-tabs`) holding the per-basket order tables (`bt-orders-a`/`bt-orders-b`)
-- `components.py`: `_basket_ui`, `_render_basket_list`, `_metrics_table`, `_order_table` (per-order transaction table driven by the `_ORDER_COLUMNS` spec)
-- `styles.py`: shared inline style dicts; the order table's 80vh scroll box with sticky header + sticky first column lives in `assets/layout.css` (`.order-table`/`.order-table-wrapper`)
+- `components.py`: `_basket_ui`, `_render_basket_list`, `_metrics_table`, `_order_table` (per-order transaction table driven by the `_ORDER_COLUMNS` spec). `_order_table` renders a **single virtualized `dash_table.DataTable`** (cells pre-formatted to strings via `_ORDER_COLUMNS`, fixed header + fixed first column, 80vh) — not a grid of `html.Tr`/`html.Td`. A long order log as thousands of individual Dash components costs *seconds* of client-side render (dash-renderer per-component overhead); the DataTable ships rows as one compact `data` prop and only renders the rows in view.
+- `styles.py`: shared inline style dicts. The metrics table is an `html.Table`; the order DataTable styles itself via its `style_*` props (no custom CSS). `assets/layout.css` holds only the results-container/chart layout rules.
 
 **Data flow**
 - On startup: `master.parquet` → `config.df` (asset catalogue with symbol, name, exchange, asset_class, filename, interval)
