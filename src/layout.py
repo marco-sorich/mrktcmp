@@ -21,6 +21,10 @@
 #       Graph, RangeSlider, RadioItems, and Store.
 from dash import html, dcc
 
+# dbc: Dash Bootstrap Components – the Tabs here only *select* the active basket;
+# the table itself is rendered into a separate always-visible div (see below).
+import dash_bootstrap_components as dbc
+
 # ---------------------------------------------------------------------------
 # Internal imports
 # ---------------------------------------------------------------------------
@@ -151,22 +155,30 @@ def create_layout():
             html.Div(id='bt-metrics', className='bt-metrics-wrapper'),
         ], className='results-container'),
 
-        # Order (transaction) tables – one per basket, stacked in always-visible
-        # divs below the chart + metrics (deliberately NOT a dbc.Tabs pane).
-        # A Bootstrap tab pane is display:none until activated, and Safari does
-        # not repaint content that a callback injects into the *active* pane
-        # until a tab switch forces a reflow — which left the freshly rendered
-        # order table blank until the user toggled Basket B → Basket A.
-        # Always-visible divs render first-paint, exactly like the chart and
-        # metrics above.  The run callback fills both bt-orders-a / bt-orders-b.
+        # Order (transaction) tables – one per basket.  The dbc.Tabs only *pick*
+        # the active basket (tab_id 'a'/'b'); the table is rendered by
+        # render_order_table into bt-orders-content, a single ALWAYS-VISIBLE div.
+        # The table is deliberately NOT placed inside the tab panes: a Bootstrap
+        # tab pane is display:none until activated, and Safari does not repaint
+        # content a callback injects into the active pane until a tab switch
+        # forces a reflow — which left the freshly rendered table blank until the
+        # user toggled Basket B → Basket A.  Rendering into an always-visible div
+        # paints first-time, exactly like the chart and metrics above.
         html.Div([
             html.H3('Orders', style={'marginBottom': '8px'}),
-            html.H4('Basket A', style={'color': '#1a56db', 'fontSize': '15px',
-                                       'margin': '8px 0 4px'}),
-            html.Div(id='bt-orders-a'),
-            html.H4('Basket B', style={'color': '#c0392b', 'fontSize': '15px',
-                                       'margin': '20px 0 4px'}),
-            html.Div(id='bt-orders-b'),
+            dbc.Tabs(
+                id='bt-orders-tabs',
+                active_tab='a',
+                children=[
+                    dbc.Tab(label='Basket A', tab_id='a'),
+                    dbc.Tab(label='Basket B', tab_id='b'),
+                ],
+            ),
+            # Holds each basket's order-table HTML ({'a': ..., 'b': ...}); the run
+            # callback writes it, render_order_table reads it.
+            dcc.Store(id='bt-orders-store', data={}),
+            # The active basket's table is (re-)rendered here on tab/data change.
+            html.Div(id='bt-orders-content', style={'marginTop': '8px'}),
         ], style={'marginTop': '20px'}),
 
         # Hidden result store (reserved for future drill-down

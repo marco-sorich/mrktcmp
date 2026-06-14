@@ -412,36 +412,23 @@ _ORDER_COLUMNS = [
 ]
 
 
-def _order_table(orders: list[OrderRow] | None) -> "dcc.Markdown | html.P":
-    """Build the per-order transaction table for one basket.
+def _order_table_markup(orders: list[OrderRow] | None) -> str | None:
+    """Build the per-order transaction table as a native HTML string (or None).
 
-    Emitted as **native HTML** inside a single ``dcc.Markdown`` component rather
-    than a grid of html.Tr/html.Td components.  A long order log (hundreds of
-    monthly contributions over a multi-year window) otherwise costs *seconds* of
-    client-side rendering, because dash-renderer instantiates every one of the
-    rows × columns cells as its own React component.  One Markdown component
-    avoids that overhead, and a plain HTML table needs no JS layout measurement —
-    so (unlike dash_table.DataTable's virtualization / fixed_rows / fixed_columns)
-    it renders correctly on the first paint even while mounted inside the
-    not-yet-sized dbc.Tabs pane.  Sticky header + first column come from the
-    stable ``.order-table`` CSS in assets/layout.css.
+    Emitting the table as **native HTML** (rendered later via a single
+    ``dcc.Markdown``) avoids the *seconds* of client-side rendering that a grid
+    of html.Tr/html.Td costs — dash-renderer would instantiate every one of the
+    rows × columns cells as its own React component.  Returning a plain string
+    also lets the run callback stash both baskets' tables in a ``dcc.Store`` so
+    the active one can be (re-)rendered into a single always-visible div on tab
+    change (see render_order_table) — sidestepping the dbc.Tabs pane that does
+    not repaint callback-injected content until a tab switch.
 
     Each cell is formatted with the _ORDER_COLUMNS formatters (None → em-dash)
-    and HTML-escaped so the displayed text is identical to the previous table.
-
-    Parameters
-    ----------
-    orders – list of OrderRow dicts (from build_order_log), or None/empty when
-             the basket produced no result.
-
-    Returns
-    -------
-    html.P placeholder when there are no orders, otherwise a dcc.Markdown holding
-    the rendered table.
+    and HTML-escaped.  Returns None when there are no orders.
     """
-    # Empty / missing → a plain placeholder, mirroring _metrics_table.
     if not orders:
-        return html.P('No orders.', style={'color': '#aaa'})
+        return None
 
     # Header row.
     head = ''.join(f'<th>{_html_escape(label)}</th>' for _key, label, _fmt in _ORDER_COLUMNS)
@@ -456,12 +443,21 @@ def _order_table(orders: list[OrderRow] | None) -> "dcc.Markdown | html.P":
         for row in orders
     )
 
-    table_html = (
+    return (
         '<div class="order-table-wrapper">'
         f'<table class="order-table"><thead><tr>{head}</tr></thead>'
         f'<tbody>{body}</tbody></table></div>'
     )
 
-    # dangerously_allow_html renders the raw <table>; the content is fully
-    # machine-generated and HTML-escaped above (no user input), so it is safe.
-    return dcc.Markdown(table_html, dangerously_allow_html=True)
+
+def _order_table_component(markup: str | None) -> "dcc.Markdown | html.P":
+    """Wrap pre-built order-table HTML (from _order_table_markup, possibly stored
+    in a dcc.Store) into a renderable component.
+
+    dangerously_allow_html renders the raw <table>; the content is fully
+    machine-generated and HTML-escaped, so it is safe.  An empty/None markup
+    yields the 'No orders.' placeholder, mirroring _metrics_table.
+    """
+    if not markup:
+        return html.P('No orders.', style={'color': '#aaa'})
+    return dcc.Markdown(markup, dangerously_allow_html=True)

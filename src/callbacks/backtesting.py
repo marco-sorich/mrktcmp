@@ -100,7 +100,8 @@ from src.utils import log_time
 # These live in components.py because they build Dash component trees that
 # are also needed elsewhere (e.g. layout.py builds _basket_ui panels).
 from src.components import (
-    _render_basket_list, _metrics_table, _build_strategy_params_ui, _order_table,
+    _render_basket_list, _metrics_table, _build_strategy_params_ui,
+    _order_table_markup, _order_table_component,
 )
 
 # The DCA simulation engine. run_backtest orchestrates data loading, the
@@ -760,8 +761,11 @@ def _downsample_for_plot(series: pd.Series, max_points: int = _MAX_PLOT_POINTS) 
     Output('bt-chart', 'style'),        # show/hide the chart container
     Output('bt-metrics', 'children'),   # the metrics comparison table
     Output('bt-status', 'children'),    # status / error message text
-    Output('bt-orders-a', 'children'),  # basket A order (transaction) table
-    Output('bt-orders-b', 'children'),  # basket B order (transaction) table
+    # Both baskets' order tables, as native-HTML strings keyed 'a'/'b'.  A
+    # separate callback (render_order_table) renders the active tab's table into
+    # the always-visible bt-orders-content div, so the table never lives inside a
+    # display:none Bootstrap tab pane (which Safari fails to repaint on update).
+    Output('bt-orders-store', 'data'),
     Input('bt-run', 'n_clicks'),        # fires when the Run button is clicked
     State('bt-basket-store-a', 'data'),          # basket A contents (read, not trigger)
     State('bt-basket-store-b', 'data'),          # basket B contents
@@ -782,7 +786,8 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
       3. Run the backtest for each non-empty basket via run_backtest().
       4. Plot both portfolios on a single line chart.
       5. Build the side-by-side metrics comparison table.
-      6. Build each basket's per-order (transaction) table.
+      6. Stash both baskets' per-order table HTML in the orders store (the active
+         one is rendered into the page by render_order_table).
 
     Parameters
     ----------
@@ -797,32 +802,32 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
 
     Returns
     -------
-    (figure, chart_style, metrics_children, status_text, orders_a, orders_b)
+    (figure, chart_style, metrics_children, status_text, orders_store)
       figure          : go.Figure with A and/or B portfolio value traces.
       chart_style     : dict – {'display': 'block'} or {'display': 'none'}.
       metrics_children: Dash component – the comparison table or empty string.
       status_text     : str – summary or error message shown below the button.
-      orders_a        : Dash component – basket A's order table (or placeholder).
-      orders_b        : Dash component – basket B's order table (or placeholder).
+      orders_store    : dict {'a': html|None, 'b': html|None} – each basket's
+                        order-table HTML; render_order_table shows the active one.
     """
     empty_chart = go.Figure()
-    empty_orders = _order_table(None)               # 'No orders.' placeholder
+    empty_orders: dict = {}                          # empty orders-store payload
     hidden = {'width': '100%', 'display': 'none'}   # hide the chart div
     visible = {'width': '100%', 'display': 'block'}  # show the chart div
 
     # Require at least one basket to have assets before running.
     if not basket_a and not basket_b:
-        return empty_chart, hidden, '', 'Please fill at least one basket.', empty_orders, empty_orders
+        return empty_chart, hidden, '', 'Please fill at least one basket.', empty_orders
 
     if not _config.base_url or _config.df is None:
-        return empty_chart, hidden, '', 'No data source available.', empty_orders, empty_orders
+        return empty_chart, hidden, '', 'No data source available.', empty_orders
 
     # Guard: the date slider must have been populated by update_date_range_slider
     # before the user can run. If it has not (e.g. all files failed to load),
     # we cannot resolve the slider positions to actual Timestamps.
     if date_store is None or slider_value is None or len(date_store) < 2:
         return (empty_chart, hidden, '', 'No date range available. Add assets first.',
-                empty_orders, empty_orders)
+                empty_orders)
 
     # Convert the slider's integer positions back to pandas Timestamps.
     # slider_value is [i0, i1]; date_store[i0] is an ISO string like
@@ -860,7 +865,7 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     # If both backtests failed (e.g. all parquet files missing), abort.
     if portfolio_a is None and portfolio_b is None:
         return (empty_chart, hidden, '', 'No data available for the selected period.',
-                empty_orders, empty_orders)
+                empty_orders)
 
     # --- diagnostics: how much is about to be serialised to the browser? ---
     # The figure point count (= portfolio length) is the prime suspect for a
@@ -925,10 +930,9 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     # Build the side-by-side metrics table and assemble the status message.
     metrics_div = _metrics_table(metrics_a, metrics_b)
 
-    # Build each basket's per-order table (orders_x is None for an empty/failed
-    # basket → _order_table renders the 'No orders.' placeholder).
-    orders_a_table = _order_table(orders_a)
-    orders_b_table = _order_table(orders_b)
+    # Build each basket's per-order table HTML (None for an empty/failed basket)
+    # and stash both in the store; render_order_table renders the active one.
+    orders_store = {'a': _order_table_markup(orders_a), 'b': _order_table_markup(orders_b)}
 
     # Server-side cost of assembling the figure + metric/order tables. If this is
     # small but the user still waits seconds, the time is the browser rendering
@@ -946,5 +950,30 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     _config.log.info("Backtest completed: %d months, A=%s (%s), B=%s (%s)",
                      n_months, len(filenames_a), name_a, len(filenames_b), name_b)
 
-    # Return six values matching the six Output declarations above.
-    return fig, visible, metrics_div, status, orders_a_table, orders_b_table
+    # Return five values matching the five Output declarations above.
+    return fig, visible, metrics_div, status, orders_store
+
+
+# ---------------------------------------------------------------------------
+# Callback: render the active basket's order table into an always-visible div
+# ---------------------------------------------------------------------------
+
+@callback(
+    Output('bt-orders-content', 'children'),
+    Input('bt-orders-tabs', 'active_tab'),   # 'a' or 'b'
+    Input('bt-orders-store', 'data'),        # {'a': html|None, 'b': html|None}
+)
+@log_time
+def render_order_table(active_tab, orders_store):
+    """Render the selected basket's order table into the always-visible content div.
+
+    The order tables deliberately do NOT live inside the dbc.Tabs panes: a
+    Bootstrap tab pane is display:none until activated, and Safari does not
+    repaint content a callback injects into the active pane until a tab switch
+    forces a reflow.  Instead the tabs only choose the active basket; this
+    callback (re-)renders that basket's stored HTML into a single always-visible
+    div whenever the tab or the stored data changes — which paints reliably,
+    exactly like the chart and metrics.
+    """
+    store = orders_store or {}
+    return _order_table_component(store.get(active_tab or 'a'))

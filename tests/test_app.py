@@ -15,9 +15,11 @@ with patch("dotenv.load_dotenv"):
 from src.callbacks.backtesting import (   # noqa: E402
     _bt_assetclass_options, _bt_asset_search, _manage_basket,
     run_backtest_callback, update_date_range_slider, update_date_display,
-    _build_slider_marks, _downsample_for_plot,
+    _build_slider_marks, _downsample_for_plot, render_order_table,
 )
-from src.components import _render_basket_list, _metrics_table, _order_table  # noqa: E402
+from src.components import (  # noqa: E402
+    _render_basket_list, _metrics_table, _order_table_markup, _order_table_component,
+)
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -271,7 +273,7 @@ _STRATEGY_CFG = {'strategy': 'DCA', 'params': {'monthly_investment': 1000.0}}
 
 class TestRunBacktestCallback:
     def test_both_baskets_empty_returns_status_message(self):
-        _, style, _, status, _, _ = run_backtest_callback(
+        _, style, _, status, _ = run_backtest_callback(
             1, [], [], _SLIDER_VAL, _DATE_STORE, None, None)
         assert 'basket' in status
         assert style['display'] == 'none'
@@ -279,7 +281,7 @@ class TestRunBacktestCallback:
     def test_no_base_url_returns_error_status(self):
         with patch.object(config_module, 'base_url', None), \
              patch.object(config_module, 'df', SAMPLE_DF):
-            _, style, _, status, _, _ = run_backtest_callback(
+            _, style, _, status, _ = run_backtest_callback(
                 1, BASKET_A, [], _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
         assert 'data source' in status
         assert style['display'] == 'none'
@@ -287,7 +289,7 @@ class TestRunBacktestCallback:
     def test_empty_date_store_returns_error_status(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF):
-            _, style, _, status, _, _ = run_backtest_callback(
+            _, style, _, status, _ = run_backtest_callback(
                 1, BASKET_A, [], _SLIDER_VAL, [], _STRATEGY_CFG, _STRATEGY_CFG)
         assert 'date range' in status.lower()
         assert style['display'] == 'none'
@@ -296,7 +298,7 @@ class TestRunBacktestCallback:
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF), \
              patch('src.callbacks.backtesting.run_backtest', return_value=(None, None, None)):
-            _, style, _, status, _, _ = run_backtest_callback(
+            _, style, _, status, _ = run_backtest_callback(
                 1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
         assert style['display'] == 'none'
         assert 'No data' in status
@@ -306,7 +308,7 @@ class TestRunBacktestCallback:
              patch.object(config_module, 'df', SAMPLE_DF), \
              patch('src.callbacks.backtesting.run_backtest',
                    return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _ORDERS_STUB)):
-            _, style, _, _, _, _ = run_backtest_callback(
+            _, style, _, _, _ = run_backtest_callback(
                 1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
         assert style['display'] == 'block'
 
@@ -315,36 +317,49 @@ class TestRunBacktestCallback:
              patch.object(config_module, 'df', SAMPLE_DF), \
              patch('src.callbacks.backtesting.run_backtest',
                    return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _ORDERS_STUB)):
-            fig, _, _, _, _, _ = run_backtest_callback(
+            fig, _, _, _, _ = run_backtest_callback(
                 1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
         assert isinstance(fig, go.Figure)
 
-    def test_successful_run_populates_order_tables(self):
+    def test_successful_run_populates_orders_store(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF), \
              patch('src.callbacks.backtesting.run_backtest',
                    return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _ORDERS_STUB)):
-            *_, orders_a, orders_b = run_backtest_callback(
+            *_, orders_store = run_backtest_callback(
                 1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
-        # Both baskets ran → both panes hold a rendered order table (a
-        # dcc.Markdown native table), not the 'No orders.' placeholder.
-        from dash import dcc
-        assert isinstance(orders_a, dcc.Markdown)
-        assert isinstance(orders_b, dcc.Markdown)
-        assert '<td>Buy</td>' in orders_a.children
+        # Both baskets ran → the store carries each basket's table HTML markup.
+        assert '<td>Buy</td>' in orders_store['a']
+        assert '<td>Buy</td>' in orders_store['b']
 
     def test_only_basket_a_filled_also_succeeds(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF), \
              patch('src.callbacks.backtesting.run_backtest',
                    return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _ORDERS_STUB)):
-            fig, style, _, status, _, orders_b = run_backtest_callback(
+            fig, style, _, status, orders_store = run_backtest_callback(
                 1, BASKET_A, [], _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, None)
         assert style['display'] == 'block'
         assert 'complete' in status
-        # Basket B was empty → its pane shows the placeholder, not a table.
+        # Basket B was empty → its stored markup is None (placeholder on render).
+        assert orders_store['b'] is None
+        assert '<td>Buy</td>' in orders_store['a']
+
+
+class TestRenderOrderTable:
+    def test_active_basket_markup_rendered_as_markdown(self):
+        from dash import dcc
+        store = {'a': '<table class="order-table"><td>Buy</td></table>', 'b': None}
+        comp = render_order_table('a', store)
+        assert isinstance(comp, dcc.Markdown)
+        assert '<td>Buy</td>' in comp.children
+
+    def test_empty_or_missing_shows_placeholder(self):
         from dash import html
-        assert isinstance(orders_b, html.P)
+        store = {'a': '<table>x</table>', 'b': None}
+        assert isinstance(render_order_table('b', store), html.P)   # B empty → placeholder
+        assert isinstance(render_order_table('a', None), html.P)    # no store yet
+        assert isinstance(render_order_table(None, {}), html.P)     # defaults to 'a', empty
 
 
 # ---------------------------------------------------------------------------
@@ -526,37 +541,33 @@ class TestMetricsTable:
 # ---------------------------------------------------------------------------
 
 class TestOrderTable:
-    def test_none_returns_paragraph(self):
-        from dash import html
-        result = _order_table(None)
-        assert isinstance(result, html.P)
+    def test_markup_none_for_empty(self):
+        assert _order_table_markup(None) is None
+        assert _order_table_markup([]) is None
 
-    def test_empty_list_returns_paragraph(self):
-        from dash import html
-        result = _order_table([])
-        assert isinstance(result, html.P)
-
-    def test_returns_markdown_native_table_with_headers(self):
-        from dash import dcc
-        result = _order_table(_ORDERS_STUB)
-        # A single dcc.Markdown holding a native HTML table (one component) rather
-        # than hundreds of html.Tr/html.Td, so a long order log renders fast and
-        # appears first-paint inside the tabs.
-        assert isinstance(result, dcc.Markdown)
-        markup = result.children
+    def test_markup_is_native_table_with_headers_and_rows(self):
+        markup = _order_table_markup(_ORDERS_STUB)
+        # A native HTML table string (rendered later as one dcc.Markdown) rather
+        # than hundreds of html.Tr/html.Td, so a long order log renders fast.
         assert '<table class="order-table">' in markup
         assert '<th>Date</th>' in markup
         assert '<th>Buy/Sell</th>' in markup
         assert markup.count('<tr>') == len(_ORDERS_STUB) + 1   # header + one row per order
 
-    def test_formatted_values_and_em_dash_for_none(self):
-        result = _order_table(_ORDERS_STUB)
-        markup = result.children
+    def test_markup_formatted_values_and_em_dash_for_none(self):
+        markup = _order_table_markup(_ORDERS_STUB)
         assert '<td>Buy</td>' in markup            # side value rendered verbatim
         assert '<td>2022-01-31</td>' in markup     # date formatted as YYYY-MM-DD
         assert '<td>1,000</td>' in markup          # currency uses a thousands separator
         assert '<td>—</td>' in markup              # period_return is None → em-dash
         assert 'P&amp;L (€)' in markup             # '&' in the header is HTML-escaped
+
+    def test_component_wraps_markup_or_placeholder(self):
+        from dash import dcc, html
+        assert isinstance(_order_table_component(None), html.P)            # empty → placeholder
+        comp = _order_table_component('<table class="order-table"></table>')
+        assert isinstance(comp, dcc.Markdown)
+        assert 'order-table' in comp.children
 
 
 # ---------------------------------------------------------------------------
