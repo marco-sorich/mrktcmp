@@ -8,6 +8,7 @@ pyarrow
 dash-ag-grid
 python-dotenv
 dash_bootstrap_components
+openpyxl
 
 mypy==2.1.0
 pytest

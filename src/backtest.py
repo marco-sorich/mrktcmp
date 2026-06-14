@@ -17,11 +17,15 @@
 # logger (instead of print) lets callers control output format and level.
 import logging
 
+# time: high-resolution timers (perf_counter) used to log how long the parquet
+# reads take — these are the network-I/O hot spots, invisible to @log_time.
+import time
+
 # TYPE_CHECKING guard avoids a circular import at runtime: strategies/dca.py
 # imports from backtest.py, so importing BacktestStrategy here unconditionally
 # would create a cycle.  Under TYPE_CHECKING the import is only evaluated by
 # static analysis tools (mypy), not at runtime.
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 if TYPE_CHECKING:
     from src.strategies.base import BacktestStrategy
 
@@ -125,6 +129,12 @@ def simulate_dca(price_df: pd.DataFrame, monthly_investment: float = MONTHLY_INV
     contribution is made on every row and the result is identical to the
     original monthly engine (this keeps the monthly-input unit tests valid).
 
+    Implemented with vectorised numpy array maths (no per-day Python loop): the
+    purchases form a (days × assets) matrix whose cumulative sum down the days is
+    the running holdings, valued against the price matrix in one shot.  This is
+    numerically identical to the day-by-day ``_portfolio_value`` valuation it
+    replaces but ~200× faster on multi-year daily windows.
+
     Parameters
     ----------
     price_df           – daily (or monthly) close prices, one column per asset.
@@ -141,42 +151,42 @@ def simulate_dca(price_df: pd.DataFrame, monthly_investment: float = MONTHLY_INV
     if price_df.empty:
         return pd.Series(dtype=float), 0.0
 
-    # holdings maps each asset symbol to the number of units currently owned.
-    holdings = {str(col): 0.0 for col in price_df.columns}
-
-    # Portfolio value collected for every trading day, plus the running total
-    # of money actually deposited (grows once per month with data).
-    values: list[float] = []
-    total_invested = 0.0
-
-    # True on each month's last trading day → the single day we contribute.
     assert isinstance(price_df.index, pd.DatetimeIndex)
-    contribute_day = _is_month_end_trading_day(price_df.index)
 
-    for is_contribution, (_, prices) in zip(contribute_day, price_df.iterrows()):
+    # Price matrix (days × assets); NaN marks a missing close on that day.
+    prices = price_df.to_numpy(dtype=float)
 
-        if is_contribution:
-            # Assets that can actually be bought on this month-end day. A NaN
-            # price means a data gap; a zero price means suspended/delisted –
-            # both are skipped.
-            available: dict[str, float] = {
-                str(c): float(p) for c, p in prices.items() if pd.notna(p) and p > 0
-            }
-            if available:
-                # Split the monthly investment equally among available assets
-                # (e.g. 1,000 € across 4 assets → 250 € each) and record the deposit.
-                per_asset = monthly_investment / len(available)
-                total_invested += monthly_investment
-                for col, price in available.items():
-                    # units = € / price_per_unit; fractional units are fine.
-                    holdings[col] += per_asset / price
+    # Assets buyable on a given day need a valid, strictly positive price. A NaN
+    # price means a data gap; a zero/negative price means suspended/delisted.
+    buyable = ~np.isnan(prices) & (prices > 0)
+    n_buyable = buyable.sum(axis=1)
 
-        # Value the portfolio on every trading day (cash component is always 0
-        # for DCA – all contributed money is immediately invested).
-        values.append(_portfolio_value(holdings, 0.0, prices))
+    # Contribute once per calendar month — on its last trading day — but only on
+    # month-ends that have at least one buyable asset.
+    contribute_day = _is_month_end_trading_day(price_df.index) & (n_buyable > 0)
 
-    # Wrap into a Series reusing the DataFrame's date index.
-    return pd.Series(values, index=price_df.index), total_invested
+    # Money put into each buyable asset on a contribution day = the monthly amount
+    # split equally among that day's buyable assets (0 € on every other day).
+    per_asset = np.zeros(len(prices))
+    per_asset[contribute_day] = monthly_investment / n_buyable[contribute_day]
+
+    # Units bought per (day, asset) = per-asset € / price, only where buyable on a
+    # contribution day; dividing by NaN elsewhere yields values we mask back to 0.
+    # cumsum down the days turns these purchases into the holdings carried forward
+    # to every later day (units of a NaN-priced asset are retained, not lost).
+    safe_prices = np.where(buyable, prices, np.nan)
+    bought = np.where(buyable & contribute_day[:, None], per_asset[:, None] / safe_prices, 0.0)
+    holdings = np.cumsum(np.nan_to_num(bought), axis=0)
+
+    # Value the portfolio every day: Σ units × price over assets with a valid price
+    # (a NaN price contributes 0 but keeps its units), mirroring _portfolio_value.
+    # Cash is always 0 for DCA — every contribution is immediately invested.
+    daily_value = (holdings * np.where(np.isnan(prices), 0.0, prices)).sum(axis=1)
+
+    # Total deposited = the monthly amount once per contribution day with data.
+    total_invested = float(monthly_investment * contribute_day.sum())
+
+    return pd.Series(daily_value, index=price_df.index), total_invested
 
 
 def compute_metrics(portfolio: pd.Series, total_invested: float) -> dict[str, str]:
@@ -277,6 +287,140 @@ def compute_metrics(portfolio: pd.Series, total_invested: float) -> dict[str, st
 
 
 # ---------------------------------------------------------------------------
+# Order log – generic, strategy-agnostic builder
+#
+# Every strategy records what it *did* (the buy/sell trades it placed) as a list
+# of raw OrderEvents; this module then turns those events into fully-populated
+# OrderRows by deriving the columns that are computed the same way for *all*
+# strategies (running net deposits, profit/loss, exposure, cash quota, period
+# return).  Keeping only this generic step here means a new strategy adds its
+# order log entirely within its own plugin file: it emits OrderEvents (the part
+# that is genuinely strategy-specific) and calls build_order_log() — backtest.py
+# never needs to change.
+# ---------------------------------------------------------------------------
+
+
+class OrderEvent(TypedDict):
+    """One raw trade as recorded by a strategy, before derived columns are added.
+
+    Fields
+    ------
+    date         – trading day on which the trade happened.
+    side         – 'Buy' or 'Sell' (human-readable, rendered verbatim).
+    value_before – total portfolio worth at this day's prices *before* the trade.
+    inflow       – fresh external money added on this trade (a DCA contribution);
+                   0.0 for pure re-allocations such as a Risk-Off rebalance.
+    assets_after – worth of the held assets (excluding cash) *after* the trade.
+    cash_after   – uninvested cash *after* the trade.
+    """
+
+    date: pd.Timestamp
+    side: str
+    value_before: float
+    inflow: float
+    assets_after: float
+    cash_after: float
+
+
+class OrderRow(TypedDict):
+    """A finalized order-log row: the raw OrderEvent plus all derived columns.
+
+    The derived columns (everything from value_after down) are filled in by
+    build_order_log and have an identical meaning for every strategy, so the UI
+    can render one uniform table no matter which strategy produced it.  The
+    ratio columns are Optional: they are None (rendered as '—') whenever their
+    denominator would be zero.
+    """
+
+    date: pd.Timestamp
+    side: str
+    value_before: float
+    inflow: float
+    assets_after: float
+    cash_after: float
+    value_after: float             # assets_after + cash_after
+    net_deposits: float            # running sum of all external money put in
+    pnl_abs: float                 # value_after − net_deposits (profit/loss, €)
+    pnl_pct: float | None          # pnl_abs / net_deposits
+    equity_exposure: float | None  # assets_after / value_after (invested share)
+    cash_quote: float | None       # cash_after / value_after (= 1 − exposure)
+    period_return: float | None    # value_before / previous value_after − 1
+
+
+def build_order_log(events: list[OrderEvent], initial_capital: float) -> list[OrderRow]:
+    """Turn a strategy's raw OrderEvents into fully-populated OrderRows.
+
+    This is the *only* order-log logic in backtest.py and is completely
+    strategy-agnostic: it walks the events in chronological order and derives
+    every column that is computed the same way for all strategies.  Strategies
+    differ only in *how they fill the OrderEvents* (see each plugin), not in how
+    those events become rows.
+
+    Parameters
+    ----------
+    events          – chronological raw trades produced by a strategy.
+    initial_capital – external money already present before the first event
+                      (the Risk-Off lump sum; 0.0 for DCA, which adds all of its
+                      money through per-event inflows).  Seeds the net-deposits
+                      tally.
+
+    Returns
+    -------
+    One OrderRow per event, in the same order.  Empty when *events* is empty.
+    """
+    rows: list[OrderRow] = []
+
+    # Running total of external money put in (lump sum + every inflow so far);
+    # the basis against which absolute and relative P&L are measured.
+    net_deposits = initial_capital
+
+    # Worth of the portfolio at the *previous* event's close, used to express
+    # each row's period return (market drift since the last trade).  None before
+    # the first event, so that first row reports no period return.
+    prev_value_after: float | None = None
+
+    for ev in events:
+        # Total worth after the trade, and the updated deposit basis.
+        value_after = ev['assets_after'] + ev['cash_after']
+        net_deposits += ev['inflow']
+
+        # Profit/loss versus everything paid in (absolute € and relative %).
+        pnl_abs = value_after - net_deposits
+        pnl_pct = pnl_abs / net_deposits if net_deposits > 0 else None
+
+        # How the portfolio is split between assets and cash after the trade.
+        equity_exposure = ev['assets_after'] / value_after if value_after > 0 else None
+        cash_quote = ev['cash_after'] / value_after if value_after > 0 else None
+
+        # Market drift since the previous trade: this trade's pre-trade worth
+        # relative to the previous trade's post-trade worth.
+        period_return = (
+            ev['value_before'] / prev_value_after - 1.0
+            if prev_value_after is not None and prev_value_after > 0 else None
+        )
+
+        rows.append(OrderRow(
+            date=ev['date'],
+            side=ev['side'],
+            value_before=ev['value_before'],
+            inflow=ev['inflow'],
+            assets_after=ev['assets_after'],
+            cash_after=ev['cash_after'],
+            value_after=value_after,
+            net_deposits=net_deposits,
+            pnl_abs=pnl_abs,
+            pnl_pct=pnl_pct,
+            equity_exposure=equity_exposure,
+            cash_quote=cash_quote,
+            period_return=period_return,
+        ))
+
+        prev_value_after = value_after
+
+    return rows
+
+
+# ---------------------------------------------------------------------------
 # Risk-Off signal strategy engine
 #
 # A second, tactical strategy lives alongside DCA.  Instead of investing a
@@ -318,6 +462,7 @@ def load_daily_closes(base_url: str, filenames: list[str], df_meta: pd.DataFrame
     """
     # Accumulate individual daily price series here before combining them.
     series = {}
+    t_total = time.perf_counter()
 
     for filename in filenames:
         try:
@@ -328,7 +473,11 @@ def load_daily_closes(base_url: str, filenames: list[str], df_meta: pd.DataFrame
 
             symbol = meta.iloc[0]['symbol']
 
+            # Time the parquet read in isolation: this is the network fetch (the
+            # whole OHLCV file), the prime suspect for multi-second runs.
+            t_read = time.perf_counter()
             ohlcv = pd.read_parquet(f"{base_url}/{filename}")
+            read_ms = (time.perf_counter() - t_read) * 1000
             close = ohlcv['Close']
 
             # Normalise to UTC so all series share a common timezone, matching
@@ -339,8 +488,12 @@ def load_daily_closes(base_url: str, filenames: list[str], df_meta: pd.DataFrame
             else:
                 close.index = close.index.tz_convert('UTC')
 
-            # Drop rows with no close (gaps before listing). Keep daily cadence.
+            # Drop rows with no close (gaps before listing). Keep the file's
+            # native cadence (NOT resampled to daily — intraday files stay
+            # intraday, which is why the row count below matters for speed).
             close = close.dropna()
+            log.debug('[perf] load_daily_closes read %s: %d rows in %.1fms',
+                      filename, len(close), read_ms)
             if not close.empty:
                 series[symbol] = close
 
@@ -353,7 +506,11 @@ def load_daily_closes(base_url: str, filenames: list[str], df_meta: pd.DataFrame
 
     # Outer-join on the date index and sort chronologically so rolling windows
     # and as-of look-ups operate on a monotonically increasing index.
-    return pd.DataFrame(series).sort_index()
+    combined = pd.DataFrame(series).sort_index()
+    log.debug('[perf] load_daily_closes total: %d files -> %d rows x %d cols in %.1fms',
+              len(filenames), combined.shape[0], combined.shape[1],
+              (time.perf_counter() - t_total) * 1000)
+    return combined
 
 
 def build_equal_weight_index(daily_df: pd.DataFrame) -> pd.Series:
@@ -534,32 +691,64 @@ def simulate_riskoff(
     (portfolio_series, total_invested)
       portfolio_series – portfolio value (holdings + cash) on every trading day.
       total_invested   – the initial lump sum (constant; no contributions).
+
+    Implemented as a hybrid: trades only happen on the (few) days the target
+    changes, so the loop walks just those change-days — reusing the exact
+    ``_rebalance_to_target`` math — to record the post-trade holdings/cash, then
+    the dense daily valuation is done in one vectorised numpy pass.  This is
+    numerically identical to the former day-by-day loop but ~60× faster.
     """
     if price_df.empty:
         return pd.Series(dtype=float), initial_investment
 
-    holdings: dict[str, float] = {str(col): 0.0 for col in price_df.columns}
-    cash = initial_investment
+    assert isinstance(price_df.index, pd.DatetimeIndex)
+
+    # Column order shared by the holdings dict (string keys) and the price matrix.
+    columns = [str(col) for col in price_df.columns]
+    prices_mat = price_df.to_numpy(dtype=float)
+    n_days, n_assets = prices_mat.shape
 
     # Align the daily target fractions to the price index; unknown days stay in
     # cash (0.0) as a conservative fallback.
-    target = target_fraction.reindex(price_df.index).fillna(0.0)
+    target = target_fraction.reindex(price_df.index).fillna(0.0).to_numpy()
 
-    # Fraction we are currently allocated to. Starts at 0.0 (all cash), so the
-    # first day with a non-zero target triggers the initial deployment.
-    current = 0.0
+    # Change-days: the target differs from the prior day's (the starting fraction
+    # is 0.0 = all cash), i.e. exactly the days the former loop would have traded.
+    prev = np.empty(n_days)
+    prev[0] = 0.0
+    prev[1:] = target[:-1]
+    change_pos = np.flatnonzero(target != prev)
 
-    values: list[float] = []
-    for i, (_, prices) in enumerate(price_df.iterrows()):
-        frac = float(target.iloc[i])
-        if frac != current:
-            # Signal changed → trade to the new target and remember it.
-            holdings, cash, _ = _rebalance_to_target(holdings, cash, prices, frac)
-            current = frac
-        # Value every day, whether or not we traded.
-        values.append(_portfolio_value(holdings, cash, prices))
+    # No change at all (e.g. a constant or never-positive signal) → never deployed,
+    # so the portfolio is the lump sum held flat in cash for the whole window.
+    if change_pos.size == 0:
+        flat = pd.Series(np.full(n_days, float(initial_investment)), index=price_df.index)
+        return flat, initial_investment
 
-    return pd.Series(values, index=price_df.index), initial_investment
+    # Walk only the change-days, rebalancing to the new target with the shared
+    # primitive, and snapshot the resulting holdings (per asset) and cash.
+    holdings: dict[str, float] = {col: 0.0 for col in columns}
+    cash = float(initial_investment)
+    snap_holdings = np.zeros((change_pos.size, n_assets))
+    snap_cash = np.empty(change_pos.size)
+    for j, i in enumerate(change_pos):
+        holdings, cash, _ = _rebalance_to_target(holdings, cash, price_df.iloc[i], float(target[i]))
+        snap_holdings[j] = [holdings[col] for col in columns]
+        snap_cash[j] = cash
+
+    # Each day takes the holdings/cash of the most recent change at or before it;
+    # days before the first change are still all cash (no holdings yet).
+    seg = np.searchsorted(change_pos, np.arange(n_days), side='right') - 1
+    has_position = seg >= 0
+    seg_clip = np.clip(seg, 0, None)
+    holdings_mat = np.where(has_position[:, None], snap_holdings[seg_clip], 0.0)
+    cash_arr = np.where(has_position, snap_cash[seg_clip], float(initial_investment))
+
+    # Value every day: Σ units × price over assets with a valid price (NaN priced
+    # → 0 but units retained), plus cash — mirroring _portfolio_value exactly.
+    daily_value = (holdings_mat * np.where(np.isnan(prices_mat), 0.0, prices_mat)).sum(axis=1) + cash_arr
+
+    return pd.Series(daily_value, index=price_df.index), initial_investment
 
 
 def _get_monthly_range(base_url: str, filename: str, df_meta: pd.DataFrame) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
@@ -586,7 +775,11 @@ def _get_monthly_range(base_url: str, filename: str, df_meta: pd.DataFrame) -> t
         # columns=['Close'] tells pyarrow to read only the Close column from
         # the Parquet file, skipping Open/High/Low/Volume. This is much faster
         # than loading the full OHLCV dataset when we only need date bounds.
+        # This read fires once per asset on every basket change (slider refresh).
+        t_read = time.perf_counter()
         ohlcv = pd.read_parquet(f"{base_url}/{filename}", columns=['Close'])
+        log.debug('[perf] _get_monthly_range read %s: %.1fms', filename,
+                  (time.perf_counter() - t_read) * 1000)
         close = ohlcv['Close']
         assert isinstance(close.index, pd.DatetimeIndex)
         if close.index.tz is None:
@@ -665,7 +858,7 @@ def run_backtest(
     df_meta: pd.DataFrame,
     strategy: "BacktestStrategy | None" = None,
     strategy_params: dict[str, int | float | str] | None = None,
-) -> tuple[pd.Series | None, dict[str, str] | None]:
+) -> tuple[pd.Series | None, dict[str, str] | None, list[OrderRow] | None]:
     """Orchestrate a backtest for a single basket of assets.
 
     When *strategy* is provided the call is delegated entirely to that plugin,
@@ -694,12 +887,15 @@ def run_backtest(
 
     Returns
     -------
-    (portfolio_series, metrics_dict) on success, or (None, None) on failure.
+    (portfolio_series, metrics_dict, order_log) on success, or
+    (None, None, None) on failure.  The built-in DCA path (strategy=None) is a
+    legacy/back-compat entry point not used by the UI, so it returns None for
+    the order log; the per-strategy order logs are produced by the plugins.
     """
     # Delegate to a strategy plugin when one is supplied.
     if strategy is not None:
         if not filenames or not base_url:
-            return None, None
+            return None, None, None
         return strategy.run(
             base_url, filenames, start_date, end_date, df_meta,
             strategy_params or {},
@@ -707,18 +903,18 @@ def run_backtest(
 
     # Bail out immediately if the caller provided nothing useful.
     if not filenames or not base_url:
-        return None, None
+        return None, None, None
 
     # Load all assets' daily close prices into a single aligned DataFrame.
     price_df = load_daily_closes(base_url, filenames, df_meta)
     if price_df.empty:
-        return None, None
+        return None, None, None
 
     # Keep only the calendar months of the requested window (both month bounds
     # inclusive); empty asset columns within the window are dropped.
     price_df = _window_by_month(price_df, start_date, end_date)
     if price_df.empty:
-        return None, None
+        return None, None, None
 
     # Forward-fill fills a NaN price by carrying the previous valid price
     # forward. This handles short gaps such as weekends, exchange holidays or
@@ -728,4 +924,4 @@ def run_backtest(
     price_df = price_df.ffill(limit=5)
 
     portfolio, total_invested = simulate_dca(price_df)
-    return portfolio, compute_metrics(portfolio, total_invested)
+    return portfolio, compute_metrics(portfolio, total_invested), None

@@ -15,9 +15,11 @@ with patch("dotenv.load_dotenv"):
 from src.callbacks.backtesting import (   # noqa: E402
     _bt_assetclass_options, _bt_asset_search, _manage_basket,
     run_backtest_callback, update_date_range_slider, update_date_display,
-    _build_slider_marks,
+    _build_slider_marks, _downsample_for_plot, render_order_table, download_orders,
 )
-from src.components import _render_basket_list, _metrics_table  # noqa: E402
+from src.components import (  # noqa: E402
+    _render_basket_list, _metrics_table, _order_rows, _order_table_component,
+)
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -240,6 +242,24 @@ _PORTFOLIO_STUB = pd.Series(
 )
 _METRICS_STUB = {'Total Return': '+50.0%', 'CAGR': '10.0%'}
 
+# A single finalized OrderRow (all 13 keys) used to exercise _order_table.
+# period_return is None so the em-dash ('—') rendering path is covered.
+_ORDERS_STUB = [{
+    'date': pd.Timestamp('2022-01-31', tz='UTC'),
+    'side': 'Buy',
+    'value_before': 0.0,
+    'inflow': 1000.0,
+    'assets_after': 1000.0,
+    'cash_after': 0.0,
+    'value_after': 1000.0,
+    'net_deposits': 1000.0,
+    'pnl_abs': 0.0,
+    'pnl_pct': 0.0,
+    'equity_exposure': 1.0,
+    'cash_quote': 0.0,
+    'period_return': None,
+}]
+
 BASKET_A = [BASKET_ITEM_AAPL]
 BASKET_B = [BASKET_ITEM_GOOGL]
 
@@ -253,7 +273,7 @@ _STRATEGY_CFG = {'strategy': 'DCA', 'params': {'monthly_investment': 1000.0}}
 
 class TestRunBacktestCallback:
     def test_both_baskets_empty_returns_status_message(self):
-        _, style, _, status = run_backtest_callback(
+        _, style, _, status, _ = run_backtest_callback(
             1, [], [], _SLIDER_VAL, _DATE_STORE, None, None)
         assert 'basket' in status
         assert style['display'] == 'none'
@@ -261,7 +281,7 @@ class TestRunBacktestCallback:
     def test_no_base_url_returns_error_status(self):
         with patch.object(config_module, 'base_url', None), \
              patch.object(config_module, 'df', SAMPLE_DF):
-            _, style, _, status = run_backtest_callback(
+            _, style, _, status, _ = run_backtest_callback(
                 1, BASKET_A, [], _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
         assert 'data source' in status
         assert style['display'] == 'none'
@@ -269,7 +289,7 @@ class TestRunBacktestCallback:
     def test_empty_date_store_returns_error_status(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF):
-            _, style, _, status = run_backtest_callback(
+            _, style, _, status, _ = run_backtest_callback(
                 1, BASKET_A, [], _SLIDER_VAL, [], _STRATEGY_CFG, _STRATEGY_CFG)
         assert 'date range' in status.lower()
         assert style['display'] == 'none'
@@ -277,8 +297,8 @@ class TestRunBacktestCallback:
     def test_no_data_returned_shows_error_status(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF), \
-             patch('src.callbacks.backtesting.run_backtest', return_value=(None, None)):
-            _, style, _, status = run_backtest_callback(
+             patch('src.callbacks.backtesting.run_backtest', return_value=(None, None, None)):
+            _, style, _, status, _ = run_backtest_callback(
                 1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
         assert style['display'] == 'none'
         assert 'No data' in status
@@ -286,27 +306,60 @@ class TestRunBacktestCallback:
     def test_successful_run_makes_chart_visible(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF), \
-             patch('src.callbacks.backtesting.run_backtest', return_value=(_PORTFOLIO_STUB, _METRICS_STUB)):
-            _, style, _, _ = run_backtest_callback(
+             patch('src.callbacks.backtesting.run_backtest',
+                   return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _ORDERS_STUB)):
+            _, style, _, _, _ = run_backtest_callback(
                 1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
         assert style['display'] == 'block'
 
     def test_successful_run_returns_plotly_figure(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF), \
-             patch('src.callbacks.backtesting.run_backtest', return_value=(_PORTFOLIO_STUB, _METRICS_STUB)):
-            fig, _, _, _ = run_backtest_callback(
+             patch('src.callbacks.backtesting.run_backtest',
+                   return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _ORDERS_STUB)):
+            fig, _, _, _, _ = run_backtest_callback(
                 1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
         assert isinstance(fig, go.Figure)
+
+    def test_successful_run_populates_orders_store(self):
+        with patch.object(config_module, 'base_url', 'http://x'), \
+             patch.object(config_module, 'df', SAMPLE_DF), \
+             patch('src.callbacks.backtesting.run_backtest',
+                   return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _ORDERS_STUB)):
+            *_, orders_store = run_backtest_callback(
+                1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
+        # Both baskets ran → the store carries each basket's display rows.
+        assert orders_store['a'][0]['Buy/Sell'] == 'Buy'
+        assert orders_store['b'][0]['Buy/Sell'] == 'Buy'
 
     def test_only_basket_a_filled_also_succeeds(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF), \
-             patch('src.callbacks.backtesting.run_backtest', return_value=(_PORTFOLIO_STUB, _METRICS_STUB)):
-            fig, style, _, status = run_backtest_callback(
+             patch('src.callbacks.backtesting.run_backtest',
+                   return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _ORDERS_STUB)):
+            fig, style, _, status, orders_store = run_backtest_callback(
                 1, BASKET_A, [], _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, None)
         assert style['display'] == 'block'
         assert 'complete' in status
+        # Basket B was empty → its stored rows are None (placeholder on render).
+        assert orders_store['b'] is None
+        assert orders_store['a'][0]['Buy/Sell'] == 'Buy'
+
+
+class TestRenderOrderTable:
+    def test_active_basket_rows_rendered_as_markdown(self):
+        from dash import dcc
+        store = {'a': _order_rows(_ORDERS_STUB), 'b': None}
+        comp = render_order_table('a', store)
+        assert isinstance(comp, dcc.Markdown)
+        assert '<td>Buy</td>' in comp.children
+
+    def test_empty_or_missing_shows_placeholder(self):
+        from dash import html
+        store = {'a': _order_rows(_ORDERS_STUB), 'b': None}
+        assert isinstance(render_order_table('b', store), html.P)   # B empty → placeholder
+        assert isinstance(render_order_table('a', None), html.P)    # no store yet
+        assert isinstance(render_order_table(None, {}), html.P)     # defaults to 'a', empty
 
 
 # ---------------------------------------------------------------------------
@@ -481,3 +534,81 @@ class TestMetricsTable:
         result = _metrics_table(metrics_a, metrics_b)
         rendered = str(result)
         assert '—' in rendered
+
+
+# ---------------------------------------------------------------------------
+# _order_table
+# ---------------------------------------------------------------------------
+
+class TestOrderTable:
+    def test_rows_none_for_empty(self):
+        assert _order_rows(None) is None
+        assert _order_rows([]) is None
+
+    def test_rows_are_formatted_keyed_by_column_label(self):
+        rows = _order_rows(_ORDERS_STUB)
+        assert len(rows) == len(_ORDERS_STUB)
+        row = rows[0]
+        assert row['Buy/Sell'] == 'Buy'            # side value rendered verbatim
+        assert row['Date'] == '2022-01-31'         # date formatted as YYYY-MM-DD
+        assert row['Inflow'] == '1,000'            # currency uses a thousands separator
+        assert row['Period return'] == '—'         # period_return is None → em-dash
+
+    def test_component_renders_rows_as_native_table(self):
+        from dash import dcc, html
+        assert isinstance(_order_table_component(None), html.P)   # empty → placeholder
+        comp = _order_table_component(_order_rows(_ORDERS_STUB))
+        # A single dcc.Markdown holding a native HTML table (one component) rather
+        # than hundreds of html.Tr/html.Td, so a long order log renders fast.
+        assert isinstance(comp, dcc.Markdown)
+        markup = comp.children
+        assert '<table class="order-table">' in markup
+        assert '<th>Date</th>' in markup and '<th>Buy/Sell</th>' in markup
+        assert '<td>Buy</td>' in markup and '<td>2022-01-31</td>' in markup
+        assert '<td>—</td>' in markup              # None → em-dash
+        assert 'P&amp;L (€)' in markup             # '&' in the header is HTML-escaped
+        assert markup.count('<tr>') == len(_ORDERS_STUB) + 1   # header + one per order
+
+
+class TestDownloadOrders:
+    def test_csv_export_of_active_basket(self):
+        with patch('dash.callback_context') as ctx:
+            ctx.triggered_id = 'bt-dl-csv'
+            out = download_orders(1, 0, 'a', {'a': _order_rows(_ORDERS_STUB), 'b': None})
+        assert out['filename'] == 'orders_basket_A.csv'
+        assert 'Buy' in out['content']        # data present
+        assert 'Date' in out['content']       # header row present
+
+    def test_xlsx_export_is_base64(self):
+        with patch('dash.callback_context') as ctx:
+            ctx.triggered_id = 'bt-dl-xlsx'
+            out = download_orders(0, 1, 'a', {'a': _order_rows(_ORDERS_STUB), 'b': None})
+        assert out['filename'] == 'orders_basket_A.xlsx'
+        assert out.get('base64') is True
+
+    def test_empty_basket_downloads_nothing(self):
+        from dash import no_update
+        with patch('dash.callback_context') as ctx:
+            ctx.triggered_id = 'bt-dl-csv'
+            out = download_orders(1, 0, 'b', {'a': _order_rows(_ORDERS_STUB), 'b': None})
+        assert out is no_update
+
+
+# ---------------------------------------------------------------------------
+# _downsample_for_plot
+# ---------------------------------------------------------------------------
+
+class TestDownsampleForPlot:
+    def test_short_series_returned_unchanged(self):
+        s = pd.Series(range(100), index=pd.date_range('2020-01-01', periods=100, freq='D'))
+        # Already small enough → same object, no copy.
+        assert _downsample_for_plot(s, max_points=2000) is s
+
+    def test_long_series_thinned_but_endpoints_kept(self):
+        n = 7000
+        s = pd.Series(range(n), index=pd.date_range('2000-01-01', periods=n, freq='D'))
+        out = _downsample_for_plot(s, max_points=2000)
+        assert len(out) <= 2001                 # ~max_points (+ appended last point)
+        assert out.index[0] == s.index[0]       # first point preserved
+        assert out.index[-1] == s.index[-1]     # final point always preserved
+        assert out.iloc[-1] == s.iloc[-1]

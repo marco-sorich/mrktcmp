@@ -21,6 +21,10 @@
 #       Graph, RangeSlider, RadioItems, and Store.
 from dash import html, dcc
 
+# dbc: Dash Bootstrap Components – the Tabs here only *select* the active basket;
+# the table itself is rendered into a separate always-visible div (see below).
+import dash_bootstrap_components as dbc
+
 # ---------------------------------------------------------------------------
 # Internal imports
 # ---------------------------------------------------------------------------
@@ -150,6 +154,52 @@ def create_layout():
             ),
             html.Div(id='bt-metrics', className='bt-metrics-wrapper'),
         ], className='results-container'),
+
+        # Order (transaction) tables – one per basket.  The dbc.Tabs only *pick*
+        # the active basket (tab_id 'a'/'b'); the table is rendered by
+        # render_order_table into bt-orders-content, a single ALWAYS-VISIBLE div.
+        # The table is deliberately NOT placed inside the tab panes: a Bootstrap
+        # tab pane is display:none until activated, and Safari does not repaint
+        # content a callback injects into the active pane until a tab switch
+        # forces a reflow — which left the freshly rendered table blank until the
+        # user toggled Basket B → Basket A.  Rendering into an always-visible div
+        # paints first-time, exactly like the chart and metrics above.
+        html.Div([
+            # Heading row: title on the left, download menu right-aligned.
+            html.Div([
+                html.H3('Orders', style={'margin': 0}),
+                # A download-icon button that drops down to CSV / Excel; the
+                # download_orders callback exports the active basket's table.
+                dbc.DropdownMenu(
+                    label=html.I(className='bi bi-download'),
+                    children=[
+                        dbc.DropdownMenuItem('CSV', id='bt-dl-csv', n_clicks=0),
+                        dbc.DropdownMenuItem('Excel (.xlsx)', id='bt-dl-xlsx', n_clicks=0),
+                    ],
+                    id='bt-orders-dl-menu',
+                    size='sm',
+                    color='light',
+                    align_end=True,                      # menu hugs the right edge
+                    toggle_style={'border': '1px solid #ccc'},
+                ),
+            ], style={'display': 'flex', 'justifyContent': 'space-between',
+                      'alignItems': 'center', 'marginBottom': '8px'}),
+            dbc.Tabs(
+                id='bt-orders-tabs',
+                active_tab='a',
+                children=[
+                    dbc.Tab(label='Basket A', tab_id='a'),
+                    dbc.Tab(label='Basket B', tab_id='b'),
+                ],
+            ),
+            # Holds each basket's display rows ({'a': [...], 'b': [...]}); the run
+            # callback writes it; render_order_table and download_orders read it.
+            dcc.Store(id='bt-orders-store', data={}),
+            # Hidden target that streams the CSV/Excel file to the browser.
+            dcc.Download(id='bt-orders-dl-data'),
+            # The active basket's table is (re-)rendered here on tab/data change.
+            html.Div(id='bt-orders-content', style={'marginTop': '8px'}),
+        ], style={'marginTop': '20px'}),
 
         # Hidden result store (reserved for future drill-down
         # interactions, e.g. clicking a month to inspect it).

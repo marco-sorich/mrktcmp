@@ -9,8 +9,8 @@ os.environ.pop("BASE_URL", None)
 import src.strategies.registry as _registry_module  # noqa: E402
 from src.strategies.base import BacktestStrategy, ConfigParam  # noqa: E402
 from src.strategies.registry import get_strategy, list_strategies, register  # noqa: E402
-from src.strategies.dca import DCAStrategy  # noqa: E402
-from src.strategies.riskoff import RiskOffStrategy  # noqa: E402
+from src.strategies.dca import DCAStrategy, _dca_order_events  # noqa: E402
+from src.strategies.riskoff import RiskOffStrategy, _riskoff_order_events  # noqa: E402
 from src.backtest import (  # noqa: E402
     INITIAL_INVESTMENT,
     build_equal_weight_index,
@@ -222,17 +222,19 @@ class TestDCAStrategy:
     def test_run_with_empty_params_uses_defaults(self):
         strategy = DCAStrategy()
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
-            portfolio, metrics = strategy.run(
+            portfolio, metrics, orders = strategy.run(
                 BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META, params={}
             )
         assert portfolio is not None
         assert isinstance(metrics, dict)
         assert set(metrics.keys()) == _EXPECTED_METRIC_KEYS
+        # A successful run also produces a (non-empty) order log.
+        assert orders is not None and len(orders) > 0
 
     def test_run_returns_9_metric_keys(self):
         strategy = DCAStrategy()
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
-            _, metrics = strategy.run(
+            _, metrics, _ = strategy.run(
                 BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META, params={}
             )
         assert metrics is not None
@@ -240,33 +242,35 @@ class TestDCAStrategy:
 
     def test_run_with_empty_filenames_returns_none_none(self):
         strategy = DCAStrategy()
-        portfolio, metrics = strategy.run(
+        portfolio, metrics, orders = strategy.run(
             BASE_URL, [], _START, _END, SAMPLE_META, params={}
         )
         assert portfolio is None
         assert metrics is None
+        assert orders is None
 
     def test_run_with_too_short_date_range_returns_none_none(self):
-        # Only 1 month of data → compute_metrics needs ≥3 → run() returns (None, None).
+        # Only 1 month of data → compute_metrics needs ≥3 → run() returns 3×None.
         strategy = DCAStrategy()
         start = pd.Timestamp('2020-06-30', tz='UTC')
         end = pd.Timestamp('2020-06-30', tz='UTC')
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
-            portfolio, metrics = strategy.run(
+            portfolio, metrics, orders = strategy.run(
                 BASE_URL, ['aapl.parquet'], start, end, SAMPLE_META, params={}
             )
         assert portfolio is None
         assert metrics is None
+        assert orders is None
 
     def test_custom_monthly_investment_halves_invested_total(self):
         # At the same constant price, halving the monthly investment halves the
         # invested total.  Use that relationship to verify params are respected.
         strategy = DCAStrategy()
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
-            _, m_default = strategy.run(
+            _, m_default, _ = strategy.run(
                 BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META, params={}
             )
-            _, m_half = strategy.run(
+            _, m_half, _ = strategy.run(
                 BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META,
                 params={'monthly_investment': 500.0},
             )
@@ -292,17 +296,19 @@ class TestRunBacktestBackwardCompat:
     def test_five_positional_args_still_work(self):
         # Existing callers pass exactly 5 positional args; must not break.
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
-            p, m = run_backtest(
+            p, m, o = run_backtest(
                 BASE_URL, ['aapl.parquet'], self._START, self._END, SAMPLE_META
             )
         assert p is not None
         assert isinstance(m, dict)
         assert set(m.keys()) == _EXPECTED_METRIC_KEYS
+        # Built-in DCA path (no strategy) produces no order log.
+        assert o is None
 
     def test_with_strategy_plugin_returns_correct_structure(self):
         strategy = DCAStrategy()
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
-            p, m = run_backtest(
+            p, m, o = run_backtest(
                 BASE_URL, ['aapl.parquet'], self._START, self._END, SAMPLE_META,
                 strategy=strategy,
                 strategy_params={'monthly_investment': 500.0},
@@ -310,16 +316,18 @@ class TestRunBacktestBackwardCompat:
         assert p is not None
         assert isinstance(m, dict)
         assert set(m.keys()) == _EXPECTED_METRIC_KEYS
+        # Routing through a plugin DOES produce an order log.
+        assert o is not None and len(o) > 0
 
     def test_strategy_params_honoured_in_run_backtest(self):
         strategy = DCAStrategy()
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
-            _, m_default = run_backtest(
+            _, m_default, _ = run_backtest(
                 BASE_URL, ['aapl.parquet'], self._START, self._END, SAMPLE_META,
                 strategy=strategy,
                 strategy_params={},
             )
-            _, m_half = run_backtest(
+            _, m_half, _ = run_backtest(
                 BASE_URL, ['aapl.parquet'], self._START, self._END, SAMPLE_META,
                 strategy=strategy,
                 strategy_params={'monthly_investment': 500.0},
@@ -332,11 +340,11 @@ class TestRunBacktestBackwardCompat:
 
     def test_strategy_with_no_filenames_returns_none_none(self):
         strategy = DCAStrategy()
-        p, m = run_backtest(
+        p, m, o = run_backtest(
             BASE_URL, [], self._START, self._END, SAMPLE_META,
             strategy=strategy,
         )
-        assert p is None and m is None
+        assert p is None and m is None and o is None
 
 
 # ---------------------------------------------------------------------------
@@ -371,38 +379,40 @@ class TestRiskOffStrategy:
     def test_run_returns_exactly_9_metric_keys(self):
         strategy = RiskOffStrategy()
         with patch('src.backtest.pd.read_parquet', return_value=_daily_rising()):
-            portfolio, metrics = strategy.run(
+            portfolio, metrics, orders = strategy.run(
                 BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META, params={}
             )
         assert portfolio is not None
         assert isinstance(metrics, dict)
         assert set(metrics.keys()) == _EXPECTED_METRIC_KEYS
         assert len(metrics) == 9
+        # A rising market deploys the lump sum → at least one (Buy) order.
+        assert orders is not None and len(orders) >= 1
 
     def test_run_with_empty_filenames_returns_none_none(self):
         strategy = RiskOffStrategy()
-        portfolio, metrics = strategy.run(
+        portfolio, metrics, orders = strategy.run(
             BASE_URL, [], _START, _END, SAMPLE_META, params={}
         )
-        assert portfolio is None and metrics is None
+        assert portfolio is None and metrics is None and orders is None
 
     def test_run_with_too_short_date_range_returns_none_none(self):
-        # Only 1 month in the window → compute_metrics needs ≥3 → (None, None).
+        # Only 1 month in the window → compute_metrics needs ≥3 → 3×None.
         strategy = RiskOffStrategy()
         start = pd.Timestamp('2020-06-30', tz='UTC')
         end = pd.Timestamp('2020-06-30', tz='UTC')
         with patch('src.backtest.pd.read_parquet', return_value=_daily_rising()):
-            portfolio, metrics = strategy.run(
+            portfolio, metrics, orders = strategy.run(
                 BASE_URL, ['aapl.parquet'], start, end, SAMPLE_META, params={}
             )
-        assert portfolio is None and metrics is None
+        assert portfolio is None and metrics is None and orders is None
 
     def test_constant_price_stays_in_cash(self):
         # Flat market → every signal negative → 0 % invested → value never moves
         # from the initial lump sum, so Total Return is ~0 % and End == Invested.
         strategy = RiskOffStrategy()
         with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
-            portfolio, metrics = strategy.run(
+            portfolio, metrics, orders = strategy.run(
                 BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META, params={}
             )
         assert metrics is not None
@@ -412,13 +422,15 @@ class TestRiskOffStrategy:
         assert invested == pytest.approx(end_value)
         # The lump sum used should be the configured default.
         assert invested == pytest.approx(float(INITIAL_INVESTMENT))
+        # Never invested → the target fraction never changes → no orders at all.
+        assert orders == []
 
     def test_rising_market_is_fully_invested(self):
         # Steady uptrend → all signals positive → behaves like buy-and-hold:
         # the portfolio grows well above the invested lump sum.
         strategy = RiskOffStrategy()
         with patch('src.backtest.pd.read_parquet', return_value=_daily_rising()):
-            portfolio, metrics = strategy.run(
+            portfolio, metrics, orders = strategy.run(
                 BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META, params={}
             )
         assert metrics is not None
@@ -426,12 +438,14 @@ class TestRiskOffStrategy:
         end_value = float(metrics['End Value'].replace(',', ''))
         assert end_value > invested
         assert metrics['Total Return'].startswith('+')
+        # Deploying into the basket is recorded as a Buy in the order log.
+        assert orders is not None and orders[0]['side'] == 'Buy'
 
     def test_custom_initial_investment_scales_invested(self):
         # The reported 'Invested' equals the configured lump sum.
         strategy = RiskOffStrategy()
         with patch('src.backtest.pd.read_parquet', return_value=_daily_rising()):
-            _, metrics = strategy.run(
+            _, metrics, _ = strategy.run(
                 BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META,
                 params={'initial_investment': 25_000.0},
             )
@@ -560,3 +574,94 @@ class TestRiskOffPureFunctions:
             prices, pd.Series([1.0, 1.0, 1.0, 0.0, 0.0, 0.0], index=idx), initial_investment=10_000.0
         )
         assert _max_drawdown(protect) > _max_drawdown(hold)
+
+    def test_simulate_riskoff_cash_out_then_redeploy(self):
+        # Deploy → sell to cash → hold cash → redeploy: multiple change segments,
+        # exercising the vectorised engine's per-segment holdings/cash fill.
+        idx = pd.date_range('2020-01-31', periods=6, freq='ME', tz='UTC')
+        prices = pd.DataFrame({'A': [100.0, 120.0, 150.0, 90.0, 80.0, 200.0]}, index=idx)
+        target = pd.Series([1.0, 1.0, 0.0, 0.0, 1.0, 1.0], index=idx)
+        portfolio, _ = simulate_riskoff(prices, target, initial_investment=10_000.0)
+        # Deploy 100 sh @100; hold to 120 → 12,000; sell all @150 → 15,000 cash;
+        # hold cash through 90; redeploy 15,000 @80 = 187.5 sh; hold to 200 → 37,500.
+        assert portfolio.tolist() == pytest.approx(
+            [10_000.0, 12_000.0, 15_000.0, 15_000.0, 15_000.0, 37_500.0]
+        )
+
+
+# ---------------------------------------------------------------------------
+# Layer 7 – per-plugin order-event generators (the strategy-specific halves
+# of the order log; the generic finalize step is tested in test_backtest.py)
+# ---------------------------------------------------------------------------
+
+class TestDcaOrderEvents:
+    def test_empty_frame_returns_no_events(self):
+        assert _dca_order_events(pd.DataFrame(), 1000.0) == []
+
+    def test_one_buy_event_per_month_end(self):
+        # 3 calendar months of daily constant-price data → 3 contribution days.
+        idx = pd.date_range('2020-01-01', '2020-03-31', freq='D', tz='UTC')
+        price = pd.DataFrame({'AAPL': 100.0}, index=idx)
+        events = _dca_order_events(price, 1000.0)
+        assert len(events) == 3
+        # Every DCA contribution is a Buy with the fixed inflow and no cash
+        # (DCA is always fully invested).
+        assert all(e['side'] == 'Buy' for e in events)
+        assert all(e['inflow'] == pytest.approx(1000.0) for e in events)
+        assert all(e['cash_after'] == pytest.approx(0.0) for e in events)
+
+    def test_first_event_has_zero_value_before(self):
+        idx = pd.date_range('2020-01-01', '2020-03-31', freq='D', tz='UTC')
+        price = pd.DataFrame({'AAPL': 100.0}, index=idx)
+        events = _dca_order_events(price, 1000.0)
+        # Nothing held before the first contribution.
+        assert events[0]['value_before'] == pytest.approx(0.0)
+        # After it, one month's money is invested at the constant price.
+        assert events[0]['assets_after'] == pytest.approx(1000.0)
+
+    def test_event_dates_are_month_ends(self):
+        idx = pd.date_range('2020-01-01', '2020-03-31', freq='D', tz='UTC')
+        price = pd.DataFrame({'AAPL': 100.0}, index=idx)
+        events = _dca_order_events(price, 1000.0)
+        assert [e['date'].month for e in events] == [1, 2, 3]
+        assert [e['date'].day for e in events] == [31, 29, 31]  # 2020 is a leap year
+
+
+class TestRiskOffOrderEvents:
+    _IDX = pd.date_range('2020-01-31', periods=4, freq='ME', tz='UTC')
+
+    def test_empty_frame_returns_no_events(self):
+        assert _riskoff_order_events(pd.DataFrame(), pd.Series(dtype=float), 10_000.0) == []
+
+    def test_constant_zero_target_never_trades(self):
+        price = pd.DataFrame({'A': [100.0, 110.0, 120.0, 130.0]}, index=self._IDX)
+        target = pd.Series(0.0, index=self._IDX)
+        assert _riskoff_order_events(price, target, 10_000.0) == []
+
+    def test_buy_then_sell_on_target_changes(self):
+        # Target 0 → 1 (buy) → 1 → 0 (sell). Price doubles before the sell.
+        price = pd.DataFrame({'A': [100.0, 100.0, 200.0, 200.0]}, index=self._IDX)
+        target = pd.Series([0.0, 1.0, 1.0, 0.0], index=self._IDX)
+        events = _riskoff_order_events(price, target, 10_000.0)
+        assert len(events) == 2
+        buy, sell = events
+        assert buy['side'] == 'Buy'
+        assert sell['side'] == 'Sell'
+        # Fully invested after the buy (no cash); fully in cash after the sell.
+        assert buy['cash_after'] == pytest.approx(0.0)
+        assert buy['assets_after'] == pytest.approx(10_000.0)
+        assert sell['assets_after'] == pytest.approx(0.0)
+        assert sell['cash_after'] == pytest.approx(20_000.0)  # holdings doubled
+        # No fresh money ever enters a Risk-Off rebalance.
+        assert all(e['inflow'] == pytest.approx(0.0) for e in events)
+
+    def test_partial_target_splits_between_assets_and_cash(self):
+        # A 0 → 0.5 change invests half the lump sum, leaving half in cash.
+        price = pd.DataFrame({'A': [100.0, 100.0, 100.0, 100.0]}, index=self._IDX)
+        target = pd.Series([0.0, 0.5, 0.5, 0.5], index=self._IDX)
+        events = _riskoff_order_events(price, target, 10_000.0)
+        assert len(events) == 1
+        (ev,) = events
+        assert ev['side'] == 'Buy'
+        assert ev['assets_after'] == pytest.approx(5_000.0)
+        assert ev['cash_after'] == pytest.approx(5_000.0)

@@ -43,6 +43,11 @@
 
 from typing import Any
 
+# time: high-resolution timer (perf_counter) to log how long the server spends
+# building the figure + tables — distinct from the client-side render that
+# happens in the browser after this callback returns (invisible to @log_time).
+import time
+
 # ---------------------------------------------------------------------------
 # Third-party imports
 # ---------------------------------------------------------------------------
@@ -70,7 +75,7 @@ import plotly.graph_objects as go
 #              id dict shares a given 'type' key. Used to listen to every
 #              remove button in a basket at once without knowing in advance
 #              how many there will be.
-from dash import Input, Output, State, callback, no_update, ALL, MATCH
+from dash import Input, Output, State, callback, no_update, ALL, MATCH, dcc
 
 # dash.callback_context: provides runtime information about the callback
 # that just fired (which Input triggered it, what its new value is, etc.).
@@ -94,7 +99,10 @@ from src.utils import log_time
 # UI helper functions for rendering basket contents and the metrics table.
 # These live in components.py because they build Dash component trees that
 # are also needed elsewhere (e.g. layout.py builds _basket_ui panels).
-from src.components import _render_basket_list, _metrics_table, _build_strategy_params_ui
+from src.components import (
+    _render_basket_list, _metrics_table, _build_strategy_params_ui,
+    _ORDER_COLUMNS, _order_rows, _order_table_component,
+)
 
 # The DCA simulation engine. run_backtest orchestrates data loading, the
 # monthly investment simulation, and metric computation. get_common_date_range
@@ -716,15 +724,49 @@ def update_strategy_config_b(strategy_name: str | None, param_values: list) -> d
 
 
 # ---------------------------------------------------------------------------
+# Helper: thin a daily curve for plotting (client render is the bottleneck)
+# ---------------------------------------------------------------------------
+
+# Max points drawn per chart trace.  A multi-year *daily* curve has thousands
+# of points, but the chart is only ~1-2k pixels wide, so drawing every point
+# just bloats the JSON payload and the browser's SVG render (the dominant cost
+# of a run) with no visible difference.  Only the plotted curve is thinned —
+# every metric is still computed on the full-resolution series.
+_MAX_PLOT_POINTS = 2000
+
+
+def _downsample_for_plot(series: pd.Series, max_points: int = _MAX_PLOT_POINTS) -> pd.Series:
+    """Reduce *series* to at most *max_points* points for plotting, keeping shape.
+
+    Returns the series unchanged when it is already small enough.  Otherwise it
+    keeps every k-th point (k chosen so the result is ~max_points) and always
+    appends the final point so the curve still ends on the true last value.
+    """
+    n = len(series)
+    if n <= max_points:
+        return series
+    step = (n // max_points) + 1
+    thinned = series.iloc[::step]
+    if thinned.index[-1] != series.index[-1]:
+        thinned = pd.concat([thinned, series.iloc[[-1]]])
+    return thinned
+
+
+# ---------------------------------------------------------------------------
 # Callback: run the DCA backtest and render results
 # ---------------------------------------------------------------------------
 
 @callback(
-    Output('bt-chart', 'figure'),      # the portfolio value line chart
-    Output('bt-chart', 'style'),       # show/hide the chart container
-    Output('bt-metrics', 'children'),  # the metrics comparison table
-    Output('bt-status', 'children'),   # status / error message text
-    Input('bt-run', 'n_clicks'),       # fires when the Run button is clicked
+    Output('bt-chart', 'figure'),       # the portfolio value line chart
+    Output('bt-chart', 'style'),        # show/hide the chart container
+    Output('bt-metrics', 'children'),   # the metrics comparison table
+    Output('bt-status', 'children'),    # status / error message text
+    # Both baskets' order tables, as native-HTML strings keyed 'a'/'b'.  A
+    # separate callback (render_order_table) renders the active tab's table into
+    # the always-visible bt-orders-content div, so the table never lives inside a
+    # display:none Bootstrap tab pane (which Safari fails to repaint on update).
+    Output('bt-orders-store', 'data'),
+    Input('bt-run', 'n_clicks'),        # fires when the Run button is clicked
     State('bt-basket-store-a', 'data'),          # basket A contents (read, not trigger)
     State('bt-basket-store-b', 'data'),          # basket B contents
     State('bt-date-range', 'value'),             # [start_index, end_index] into date_store
@@ -744,6 +786,8 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
       3. Run the backtest for each non-empty basket via run_backtest().
       4. Plot both portfolios on a single line chart.
       5. Build the side-by-side metrics comparison table.
+      6. Stash both baskets' per-order table HTML in the orders store (the active
+         one is rendered into the page by render_order_table).
 
     Parameters
     ----------
@@ -758,28 +802,32 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
 
     Returns
     -------
-    (figure, chart_style, metrics_children, status_text)
+    (figure, chart_style, metrics_children, status_text, orders_store)
       figure          : go.Figure with A and/or B portfolio value traces.
       chart_style     : dict – {'display': 'block'} or {'display': 'none'}.
       metrics_children: Dash component – the comparison table or empty string.
       status_text     : str – summary or error message shown below the button.
+      orders_store    : dict {'a': html|None, 'b': html|None} – each basket's
+                        order-table HTML; render_order_table shows the active one.
     """
     empty_chart = go.Figure()
+    empty_orders: dict = {}                          # empty orders-store payload
     hidden = {'width': '100%', 'display': 'none'}   # hide the chart div
     visible = {'width': '100%', 'display': 'block'}  # show the chart div
 
     # Require at least one basket to have assets before running.
     if not basket_a and not basket_b:
-        return empty_chart, hidden, '', 'Please fill at least one basket.'
+        return empty_chart, hidden, '', 'Please fill at least one basket.', empty_orders
 
     if not _config.base_url or _config.df is None:
-        return empty_chart, hidden, '', 'No data source available.'
+        return empty_chart, hidden, '', 'No data source available.', empty_orders
 
     # Guard: the date slider must have been populated by update_date_range_slider
     # before the user can run. If it has not (e.g. all files failed to load),
     # we cannot resolve the slider positions to actual Timestamps.
     if date_store is None or slider_value is None or len(date_store) < 2:
-        return empty_chart, hidden, '', 'No date range available. Add assets first.'
+        return (empty_chart, hidden, '', 'No date range available. Add assets first.',
+                empty_orders)
 
     # Convert the slider's integer positions back to pandas Timestamps.
     # slider_value is [i0, i1]; date_store[i0] is an ISO string like
@@ -801,40 +849,56 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
 
     # Run the simulation for each basket, but skip the call entirely if the
     # basket has no assets (saves an unnecessary function call).
-    # run_backtest returns (portfolio_series, metrics_dict) on success, or
-    # (None, None) if no data was available for the selected period.
-    portfolio_a, metrics_a = (
+    # run_backtest returns (portfolio_series, metrics_dict, order_log) on
+    # success, or (None, None, None) if no data was available for the period.
+    portfolio_a, metrics_a, orders_a = (
         run_backtest(_config.base_url, filenames_a, start_date, end_date, _config.df,
                      strategy=strategy_a, strategy_params=params_a)
-        if filenames_a else (None, None)
+        if filenames_a else (None, None, None)
     )
-    portfolio_b, metrics_b = (
+    portfolio_b, metrics_b, orders_b = (
         run_backtest(_config.base_url, filenames_b, start_date, end_date, _config.df,
                      strategy=strategy_b, strategy_params=params_b)
-        if filenames_b else (None, None)
+        if filenames_b else (None, None, None)
     )
 
     # If both backtests failed (e.g. all parquet files missing), abort.
     if portfolio_a is None and portfolio_b is None:
-        return empty_chart, hidden, '', 'No data available for the selected period.'
+        return (empty_chart, hidden, '', 'No data available for the selected period.',
+                empty_orders)
+
+    # --- diagnostics: how much is about to be serialised to the browser? ---
+    # The figure point count (= portfolio length) is the prime suspect for a
+    # slow *client-side* render: that happens in the browser AFTER this callback
+    # returns, so it never appears in this callback's @log_time total.
+    n_pts_a = len(portfolio_a) if portfolio_a is not None else 0
+    n_pts_b = len(portfolio_b) if portfolio_b is not None else 0
+    n_ord_a = len(orders_a) if orders_a else 0
+    n_ord_b = len(orders_b) if orders_b else 0
+    _config.log.debug('[perf] render input: A=%d points / %d orders, B=%d points / %d orders',
+                      n_pts_a, n_ord_a, n_pts_b, n_ord_b)
+    _t_render = time.perf_counter()
 
     # Build the portfolio value chart.
     fig = go.Figure()
 
     if portfolio_a is not None:
         # go.Scatter draws a line chart. round(2) avoids floating-point noise
-        # in hover tooltips (e.g. 1000.0000000002 → 1000.0).
+        # in hover tooltips (e.g. 1000.0000000002 → 1000.0).  The curve is
+        # thinned to ~_MAX_PLOT_POINTS first (see _downsample_for_plot).
+        plot_a = _downsample_for_plot(portfolio_a)
         fig.add_trace(go.Scatter(
-            x=portfolio_a.index,       # x-axis: daily dates
-            y=portfolio_a.round(2),    # y-axis: portfolio value in EUR
+            x=plot_a.index,       # x-axis: daily dates
+            y=plot_a.round(2),    # y-axis: portfolio value in EUR
             name='Basket A',
             line=dict(color='#1a56db', width=2),  # blue line, 2px thick
         ))
 
     if portfolio_b is not None:
+        plot_b = _downsample_for_plot(portfolio_b)
         fig.add_trace(go.Scatter(
-            x=portfolio_b.index,
-            y=portfolio_b.round(2),
+            x=plot_b.index,
+            y=plot_b.round(2),
             name='Basket B',
             line=dict(color='#c0392b', width=2),  # red line
         ))
@@ -865,6 +929,18 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
 
     # Build the side-by-side metrics table and assemble the status message.
     metrics_div = _metrics_table(metrics_a, metrics_b)
+
+    # Format each basket's order log into display rows (None for an empty/failed
+    # basket) and stash both in the store.  render_order_table renders the active
+    # one into the page; download_orders exports it as CSV / Excel.
+    orders_store = {'a': _order_rows(orders_a), 'b': _order_rows(orders_b)}
+
+    # Server-side cost of assembling the figure + metric/order tables. If this is
+    # small but the user still waits seconds, the time is the browser rendering
+    # the payload sized by the point/order counts logged above.
+    _config.log.debug('[perf] build figure+tables: %.1fms',
+                      (time.perf_counter() - _t_render) * 1000)
+
     name_a = (strategy_config_a or {}).get('strategy') or 'DCA'
     name_b = (strategy_config_b or {}).get('strategy') or 'DCA'
     status = (
@@ -875,5 +951,67 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     _config.log.info("Backtest completed: %d months, A=%s (%s), B=%s (%s)",
                      n_months, len(filenames_a), name_a, len(filenames_b), name_b)
 
-    # Return four values matching the four Output declarations above.
-    return fig, visible, metrics_div, status
+    # Return five values matching the five Output declarations above.
+    return fig, visible, metrics_div, status, orders_store
+
+
+# ---------------------------------------------------------------------------
+# Callback: render the active basket's order table into an always-visible div
+# ---------------------------------------------------------------------------
+
+@callback(
+    Output('bt-orders-content', 'children'),
+    Input('bt-orders-tabs', 'active_tab'),   # 'a' or 'b'
+    Input('bt-orders-store', 'data'),        # {'a': html|None, 'b': html|None}
+)
+@log_time
+def render_order_table(active_tab, orders_store):
+    """Render the selected basket's order table into the always-visible content div.
+
+    The order tables deliberately do NOT live inside the dbc.Tabs panes: a
+    Bootstrap tab pane is display:none until activated, and Safari does not
+    repaint content a callback injects into the active pane until a tab switch
+    forces a reflow.  Instead the tabs only choose the active basket; this
+    callback (re-)renders that basket's stored HTML into a single always-visible
+    div whenever the tab or the stored data changes — which paints reliably,
+    exactly like the chart and metrics.
+    """
+    store = orders_store or {}
+    return _order_table_component(store.get(active_tab or 'a'))
+
+
+# ---------------------------------------------------------------------------
+# Callback: download the active basket's order table as CSV / Excel
+# ---------------------------------------------------------------------------
+
+@callback(
+    Output('bt-orders-dl-data', 'data'),
+    Input('bt-dl-csv', 'n_clicks'),    # 'CSV' menu item
+    Input('bt-dl-xlsx', 'n_clicks'),   # 'Excel' menu item
+    State('bt-orders-tabs', 'active_tab'),
+    State('bt-orders-store', 'data'),
+    prevent_initial_call=True,
+)
+@log_time
+def download_orders(n_csv, n_xlsx, active_tab, orders_store):
+    """Send the active basket's order table to the browser as CSV or Excel.
+
+    The order rows already live (display-formatted) in bt-orders-store, so no
+    recomputation is needed; the requested format is read from the triggering
+    menu item.  An empty/absent basket downloads nothing.
+    """
+    tab = active_tab or 'a'
+    rows = (orders_store or {}).get(tab)
+    if not rows:
+        return no_update
+
+    # Columns in the same left-to-right order as the on-screen table.
+    labels = [label for _key, label, _fmt in _ORDER_COLUMNS]
+    df = pd.DataFrame(rows, columns=labels)
+    basket = 'A' if tab == 'a' else 'B'
+
+    if dash.callback_context.triggered_id == 'bt-dl-xlsx':
+        return dcc.send_data_frame(
+            df.to_excel, f'orders_basket_{basket}.xlsx', index=False,
+            sheet_name=f'Basket {basket}')
+    return dcc.send_data_frame(df.to_csv, f'orders_basket_{basket}.csv', index=False)

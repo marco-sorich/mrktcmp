@@ -17,6 +17,11 @@ A Plotly Dash web application for backtesting across user-defined asset baskets.
 - All strategies value the portfolio on a **daily** basis, so the chart is a dense daily curve and the risk metrics are
   daily-correct
 - Side-by-side performance metrics: Total Return, CAGR, Sharpe Ratio, Max. Drawdown, Volatility, Calmar Ratio, and more
+- Per-order transaction tables (one per basket, switchable via tabs) listing every buy/sell with its date, side,
+  pre-/post-trade value, inflow, asset/cash split, running net deposits, P&L (€ and %), equity exposure, cash quota,
+  and period return. The table fills ~80 % of the viewport height with a sticky header row and sticky first column for
+  easy scanning of long logs, and a download button (next to the "Orders" heading) exports the active basket's
+  table as **CSV** or **Excel (.xlsx)**
 
 ## Requirements
 
@@ -143,7 +148,13 @@ tests/
            resolved = self.resolve_params(params)
            my_param = float(resolved['my_param'])
            # ... compute portfolio (pd.Series) and metrics (dict[str, str]) ...
-           return portfolio, metrics
+           # Build this strategy's order log: emit your own list of
+           # backtest.OrderEvent (the strategy-specific part — when you trade,
+           # the side, the inflow, the asset/cash split) and hand it to the
+           # generic builder, which derives all the shared columns.
+           from src.backtest import build_order_log
+           order_log = build_order_log(my_order_events, initial_capital=0.0)
+           return portfolio, metrics, order_log
    ```
 
 2. Register the plugin by adding one import line to `src/strategies/__init__.py`:
@@ -155,7 +166,9 @@ tests/
 3. Add tests in `tests/test_strategies.py` following the existing `TestDCAStrategy` pattern.
 
 **Plugin contract:**
-- `run()` must return `(pd.Series | None, dict[str, str] | None)`.
+- `run()` must return `(pd.Series | None, dict[str, str] | None, list[OrderRow] | None)`.
 - The metrics dict must contain exactly the same 9 keys as `compute_metrics()` in `backtest.py`.
+- The order log is built **inside the plugin** from your own `OrderEvent`s passed to the generic
+  `build_order_log()` in `backtest.py` — that generic builder never needs to change for a new strategy.
 - Every `ConfigParam` must have a `default` value so the user is never forced to enter anything.
 - For `int`/`float` params, `min_value` and `max_value` are required (the GUI uses them to prevent invalid input).

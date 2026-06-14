@@ -24,6 +24,11 @@
 from dash import html, dcc
 import dash_bootstrap_components as dbc
 
+# escape: HTML-escape cell text (e.g. the '&' in the 'P&L (€)' header) before it
+# goes into the raw-HTML order table rendered via dcc.Markdown.  Aliased so it
+# does not shadow Dash's `html` component module imported above.
+from html import escape as _html_escape
+
 # ---------------------------------------------------------------------------
 # Internal imports
 # ---------------------------------------------------------------------------
@@ -33,6 +38,10 @@ import dash_bootstrap_components as dbc
 # config.assetsClasses may be replaced or the module may not yet be fully
 # initialised when components.py is first imported.
 import src.config as _config
+
+# OrderRow is the finalized order-log row type produced by build_order_log;
+# imported here only so _order_table can be type-annotated with it.
+from src.backtest import OrderRow
 
 # Shared style dicts imported from styles.py so all components stay visually
 # consistent without duplicating the same dict literals.
@@ -371,3 +380,82 @@ def _metrics_table(metrics_a, metrics_b):
     ]
 
     return html.Table(rows, style=_METRIC_TABLE_STYLE)
+
+
+# ---------------------------------------------------------------------------
+# Helper: render the per-order transaction table
+# ---------------------------------------------------------------------------
+
+# Column specification for the order table: (OrderRow key, header label,
+# value formatter).  The order here is the left-to-right column order in the
+# rendered table.  Each formatter receives the already-non-None value (None is
+# rendered as an em-dash by _order_table before the formatter runs):
+#   • currency columns use thousands separators and no decimals (e.g. 12,500);
+#     profit/loss adds an explicit sign so gains/losses read at a glance;
+#   • percentage columns scale by 100 and show one decimal (e.g. 66.7%);
+#     P&L and period return add an explicit sign.
+# Mirrors the formatting conventions of compute_metrics() in backtest.py.
+_ORDER_COLUMNS = [
+    ('date', 'Date', lambda v: v.strftime('%Y-%m-%d')),
+    ('side', 'Buy/Sell', str),
+    ('value_before', 'Value before', lambda v: f'{v:,.0f}'),
+    ('inflow', 'Inflow', lambda v: f'{v:,.0f}'),
+    ('assets_after', 'Assets value', lambda v: f'{v:,.0f}'),
+    ('cash_after', 'Cash value', lambda v: f'{v:,.0f}'),
+    ('value_after', 'Value after', lambda v: f'{v:,.0f}'),
+    ('net_deposits', 'Net deposits', lambda v: f'{v:,.0f}'),
+    ('pnl_abs', 'P&L (€)', lambda v: f'{v:+,.0f}'),
+    ('pnl_pct', 'P&L (%)', lambda v: f'{v * 100:+.1f}%'),
+    ('equity_exposure', 'Equity exposure', lambda v: f'{v * 100:.1f}%'),
+    ('cash_quote', 'Cash quota', lambda v: f'{v * 100:.1f}%'),
+    ('period_return', 'Period return', lambda v: f'{v * 100:+.1f}%'),
+]
+
+
+def _order_rows(orders: list[OrderRow] | None) -> "list[dict[str, str]] | None":
+    """Format an order log into display rows: a list of {column label: text}.
+
+    Each cell uses its _ORDER_COLUMNS formatter (None → em-dash).  The result is
+    plain JSON (all strings, keyed by the human column label) so it can live in a
+    dcc.Store and feed **both** the rendered table (_order_table_component) and
+    the CSV / Excel download (download_orders) from one source.  Returns None
+    when there are no orders.
+    """
+    if not orders:
+        return None
+    return [
+        {label: ('—' if row[key] is None else fmt(row[key]))
+         for key, label, fmt in _ORDER_COLUMNS}
+        for row in orders
+    ]
+
+
+def _order_table_component(rows: "list[dict[str, str]] | None") -> "dcc.Markdown | html.P":
+    """Render formatted order rows (from _order_rows, typically via a dcc.Store)
+    as a native HTML table inside a single ``dcc.Markdown``.
+
+    Emitting native HTML (one component) avoids the *seconds* of client-side
+    rendering that a grid of html.Tr/html.Td costs — dash-renderer would
+    instantiate every one of the rows × columns cells as its own React
+    component — and, being plain HTML, it needs no JS layout measurement, so it
+    paints first-time even inside the tabs UI.  dangerously_allow_html renders
+    the raw <table>; the content is machine-generated and HTML-escaped, so it is
+    safe.  None/empty rows yield the 'No orders.' placeholder.
+    """
+    if not rows:
+        return html.P('No orders.', style={'color': '#aaa'})
+
+    labels = [label for _key, label, _fmt in _ORDER_COLUMNS]
+    head = ''.join(f'<th>{_html_escape(label)}</th>' for label in labels)
+    body = ''.join(
+        '<tr>' + ''.join(
+            f'<td>{_html_escape(str(row.get(label, "")))}</td>' for label in labels
+        ) + '</tr>'
+        for row in rows
+    )
+    markup = (
+        '<div class="order-table-wrapper">'
+        f'<table class="order-table"><thead><tr>{head}</tr></thead>'
+        f'<tbody>{body}</tbody></table></div>'
+    )
+    return dcc.Markdown(markup, dangerously_allow_html=True)
