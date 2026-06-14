@@ -21,10 +21,6 @@
 #       Graph, RangeSlider, RadioItems, and Store.
 from dash import html, dcc
 
-# dbc: Dash Bootstrap Components – used here for the Tabs that switch between
-# the two baskets' order tables.
-import dash_bootstrap_components as dbc
-
 # ---------------------------------------------------------------------------
 # Internal imports
 # ---------------------------------------------------------------------------
@@ -155,21 +151,22 @@ def create_layout():
             html.Div(id='bt-metrics', className='bt-metrics-wrapper'),
         ], className='results-container'),
 
-        # Order (transaction) tables – one per basket, switchable via tabs and
-        # placed below the chart + metrics. A distinct id ('bt-orders-tabs', not
-        # 'main-tabs') avoids inheriting the orphaned #main-tabs icon rules in
-        # layout.css. dbc.Tabs keeps both panes in the DOM, so the run callback
-        # can populate both basket ids in one go. Each pane starts with an empty
-        # placeholder rendered by _order_table(None).
+        # Order (transaction) tables – one per basket, stacked in always-visible
+        # divs below the chart + metrics (deliberately NOT a dbc.Tabs pane).
+        # A Bootstrap tab pane is display:none until activated, and Safari does
+        # not repaint content that a callback injects into the *active* pane
+        # until a tab switch forces a reflow — which left the freshly rendered
+        # order table blank until the user toggled Basket B → Basket A.
+        # Always-visible divs render first-paint, exactly like the chart and
+        # metrics above.  The run callback fills both bt-orders-a / bt-orders-b.
         html.Div([
             html.H3('Orders', style={'marginBottom': '8px'}),
-            dbc.Tabs(
-                id='bt-orders-tabs',
-                children=[
-                    dbc.Tab(html.Div(id='bt-orders-a'), label='Basket A'),
-                    dbc.Tab(html.Div(id='bt-orders-b'), label='Basket B'),
-                ],
-            ),
+            html.H4('Basket A', style={'color': '#1a56db', 'fontSize': '15px',
+                                       'margin': '8px 0 4px'}),
+            html.Div(id='bt-orders-a'),
+            html.H4('Basket B', style={'color': '#c0392b', 'fontSize': '15px',
+                                       'margin': '20px 0 4px'}),
+            html.Div(id='bt-orders-b'),
         ], style={'marginTop': '20px'}),
 
         # Hidden result store (reserved for future drill-down

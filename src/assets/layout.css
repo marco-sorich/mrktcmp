@@ -29,9 +29,11 @@
    no JS layout measurement so it shows first-paint inside the dbc.Tabs. Sticky
    header + first column use plain, version-stable CSS below. */
 
-/* 80%-of-viewport scroll area; both axes scroll when the table overflows. */
+/* Up to 80%-of-viewport scroll area; both axes scroll when the table overflows.
+   max-height (not height) so a short order log — or the second stacked basket —
+   does not reserve the full 80vh. */
 .order-table-wrapper {
-    height: 80vh;
+    max-height: 80vh;
     overflow: auto;
     margin-top: 8px;
     border: 1px solid #e0e0e0;
