@@ -10,6 +10,7 @@ import src.strategies.registry as _registry_module  # noqa: E402
 from src.strategies.base import BacktestStrategy, ConfigParam  # noqa: E402
 from src.strategies.registry import get_strategy, list_strategies, register  # noqa: E402
 from src.strategies.dca import DCAStrategy, _dca_order_events  # noqa: E402
+from src.strategies.lumpsum import BuyHoldStrategy, _lumpsum_order_events  # noqa: E402
 from src.strategies.riskoff import RiskOffStrategy, _riskoff_order_events  # noqa: E402
 from src.backtest import (  # noqa: E402
     INITIAL_INVESTMENT,
@@ -283,6 +284,101 @@ class TestDCAStrategy:
     def test_dca_is_registered_in_registry(self):
         assert "DCA" in list_strategies()
         assert get_strategy("DCA") is DCAStrategy
+
+
+# ---------------------------------------------------------------------------
+# Layer 3b – BuyHoldStrategy unit tests (one single initial investment)
+# ---------------------------------------------------------------------------
+
+class TestBuyHoldStrategy:
+    def test_get_name_returns_buy_and_hold(self):
+        assert BuyHoldStrategy.get_name() == 'Buy & Hold'
+
+    def test_get_icon_returns_non_empty_string(self):
+        icon = BuyHoldStrategy.get_icon()
+        assert isinstance(icon, str) and icon, "get_icon() must return a non-empty string"
+
+    def test_get_description_returns_non_empty_string(self):
+        assert isinstance(BuyHoldStrategy.get_description(), str)
+        assert BuyHoldStrategy.get_description()
+
+    def test_get_config_schema_contains_initial_investment(self):
+        schema = BuyHoldStrategy.get_config_schema()
+        keys = [p.key for p in schema]
+        assert 'initial_investment' in keys
+
+    def test_all_params_have_non_none_default(self):
+        for param in BuyHoldStrategy.get_config_schema():
+            assert param.default is not None, f"Param '{param.key}' has no default"
+
+    def test_run_with_empty_params_uses_defaults(self):
+        strategy = BuyHoldStrategy()
+        with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
+            portfolio, metrics, orders = strategy.run(
+                BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META, params={}
+            )
+        assert portfolio is not None
+        assert isinstance(metrics, dict)
+        assert set(metrics.keys()) == _EXPECTED_METRIC_KEYS
+        # Buy & Hold makes exactly one trade, so the order log has a single row.
+        assert orders is not None and len(orders) == 1
+
+    def test_run_returns_9_metric_keys(self):
+        strategy = BuyHoldStrategy()
+        with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
+            _, metrics, _ = strategy.run(
+                BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META, params={}
+            )
+        assert metrics is not None
+        assert len(metrics) == 9
+
+    def test_run_with_empty_filenames_returns_none_none(self):
+        strategy = BuyHoldStrategy()
+        portfolio, metrics, orders = strategy.run(
+            BASE_URL, [], _START, _END, SAMPLE_META, params={}
+        )
+        assert portfolio is None
+        assert metrics is None
+        assert orders is None
+
+    def test_run_with_too_short_date_range_returns_none_none(self):
+        # Only 1 month of data → compute_metrics needs ≥3 → run() returns 3×None.
+        strategy = BuyHoldStrategy()
+        start = pd.Timestamp('2020-06-30', tz='UTC')
+        end = pd.Timestamp('2020-06-30', tz='UTC')
+        with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
+            portfolio, metrics, orders = strategy.run(
+                BASE_URL, ['aapl.parquet'], start, end, SAMPLE_META, params={}
+            )
+        assert portfolio is None
+        assert metrics is None
+        assert orders is None
+
+    def test_custom_initial_investment_scales_invested_total(self):
+        # The whole lump sum is the invested total, so halving the param halves
+        # the reported 'Invested' figure.
+        strategy = BuyHoldStrategy()
+        with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
+            _, m_default, _ = strategy.run(
+                BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META, params={}
+            )
+            _, m_half, _ = strategy.run(
+                BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META,
+                params={'initial_investment': float(INITIAL_INVESTMENT) / 2},
+            )
+
+        assert m_default is not None and m_half is not None
+        invested_default = float(m_default['Invested'].replace(',', ''))
+        invested_half = float(m_half['Invested'].replace(',', ''))
+        assert invested_default == pytest.approx(invested_half * 2, rel=1e-3)
+
+    def test_buy_and_hold_is_registered_in_registry(self):
+        assert "Buy & Hold" in list_strategies()
+        assert get_strategy("Buy & Hold") is BuyHoldStrategy
+
+    def test_buy_and_hold_is_the_default_first_strategy(self):
+        # Imported first in strategies/__init__.py so the GUI defaults to it.
+        assert list_strategies()[0] == "Buy & Hold"
 
 
 # ---------------------------------------------------------------------------
@@ -665,3 +761,40 @@ class TestRiskOffOrderEvents:
         assert ev['side'] == 'Buy'
         assert ev['assets_after'] == pytest.approx(5_000.0)
         assert ev['cash_after'] == pytest.approx(5_000.0)
+
+
+class TestLumpsumOrderEvents:
+    _IDX = pd.date_range('2020-01-31', periods=4, freq='ME', tz='UTC')
+
+    def test_empty_frame_returns_no_events(self):
+        assert _lumpsum_order_events(pd.DataFrame(), 10_000.0) == []
+
+    def test_single_buy_on_first_day_fully_invested(self):
+        # One trade only: the whole lump sum invested on day one, no cash left.
+        price = pd.DataFrame({'A': [100.0, 110.0, 120.0, 130.0]}, index=self._IDX)
+        events = _lumpsum_order_events(price, 10_000.0)
+        assert len(events) == 1
+        (ev,) = events
+        assert ev['side'] == 'Buy'
+        assert ev['date'] == self._IDX[0]
+        assert ev['value_before'] == pytest.approx(0.0)
+        assert ev['inflow'] == pytest.approx(10_000.0)
+        assert ev['assets_after'] == pytest.approx(10_000.0)
+        assert ev['cash_after'] == pytest.approx(0.0)
+
+    def test_buy_split_equally_across_assets(self):
+        price = pd.DataFrame(
+            {'A': [100.0, 100.0], 'B': [200.0, 200.0]},
+            index=self._IDX[:2],
+        )
+        events = _lumpsum_order_events(price, 10_000.0)
+        assert len(events) == 1
+        # 5,000 into each asset on day one → fully invested.
+        assert events[0]['assets_after'] == pytest.approx(10_000.0)
+
+    def test_buy_waits_for_first_buyable_day(self):
+        # No price on day one → the buy lands on the first day with a valid price.
+        price = pd.DataFrame({'A': [np.nan, 100.0, 100.0, 100.0]}, index=self._IDX)
+        events = _lumpsum_order_events(price, 10_000.0)
+        assert len(events) == 1
+        assert events[0]['date'] == self._IDX[1]

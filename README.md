@@ -7,7 +7,9 @@ A Plotly Dash web application for backtesting across user-defined asset baskets.
 - Build two asset baskets (Basket A and Basket B) from any combination of assets
 - Date range slider auto-calculated from the overlapping history of all selected assets
 - Pluggable backtesting strategies — each basket can use a different strategy with its own configurable parameters
-- **DCA** (default): a fixed amount (1,000 €) contributed per basket every month (on each month's last trading day),
+- **Buy & Hold** (default): a single lump sum (10,000 €) is invested in full on the first trading day, split equally
+  across available assets, and then held unchanged until the end — one order, no rebalancing
+- **DCA**: a fixed amount (1,000 €) contributed per basket every month (on each month's last trading day),
   split equally across available assets; the portfolio is valued on every trading day
 - **Risk-Off Signale**: a one-off lump sum is held as cash and tactically shifted between the basket and cash.
   Three market signals are evaluated on the basket as a whole *every day* — 200-day trend, year-to-date return, and the
@@ -89,13 +91,16 @@ pytest
 src/
   app.py              # Dash application entry point
   backtest.py         # pure simulation engines, all on daily close prices:
+                      #   Buy & Hold (load_daily_closes, _window_by_month, simulate_lumpsum),
                       #   DCA (load_daily_closes, _window_by_month, simulate_dca) and
                       #   Risk-Off (load_daily_closes, build_equal_weight_index,
                       #   compute_riskoff_signals, simulate_riskoff); shared compute_metrics
   strategies/
     __init__.py       # imports all plugins to trigger registration at startup
+                      #   (import order = dropdown order; lumpsum first = default)
     base.py           # BacktestStrategy ABC and ConfigParam dataclass
     registry.py       # @register decorator, get_strategy(), list_strategies()
+    lumpsum.py        # Buy & Hold strategy plugin (one single initial investment)
     dca.py            # Dollar-Cost Averaging strategy plugin
     riskoff.py        # Risk-Off signal strategy plugin (lump sum + tactical cash)
   callbacks/
@@ -108,7 +113,7 @@ src/
 tests/
   test_app.py
   test_backtest.py
-  test_strategies.py  # plugin system: ConfigParam, registry, DCAStrategy, backward compat
+  test_strategies.py  # plugin system: ConfigParam, registry, BuyHold/DCA/RiskOff, backward compat
 ```
 
 ## Adding a New Backtesting Strategy
