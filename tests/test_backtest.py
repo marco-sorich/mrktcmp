@@ -401,6 +401,31 @@ class TestBuildOrderLog:
         assert rows[0]['equity_exposure'] is None
         assert rows[0]['cash_quote'] is None
 
+    def test_bh_value_none_when_no_bh_index(self):
+        rows = build_order_log(self._events(), initial_capital=0.0)
+        for r in rows:
+            assert r['bh_value'] is None
+
+    def test_bh_value_computed_from_bh_index(self):
+        # bh_index is 1.0 on row-0, 1.5 on row-1, 0.8 on row-2.
+        ts = pd.Timestamp
+        dates = [ts('2020-01-31', tz='UTC'), ts('2020-02-29', tz='UTC'), ts('2020-03-31', tz='UTC')]
+        bh_index = pd.Series([1.0, 1.5, 0.8], index=dates)
+        rows = build_order_log(self._events(), initial_capital=0.0, bh_index=bh_index)
+        # net_deposits after row-0: 1000; row-1: 2000; row-2: 2000
+        assert rows[0]['bh_value'] == pytest.approx(1000.0 * 1.0)
+        assert rows[1]['bh_value'] == pytest.approx(2000.0 * 1.5)
+        assert rows[2]['bh_value'] == pytest.approx(2000.0 * 0.8)
+
+    def test_bh_value_none_when_date_missing_from_index(self):
+        # bh_index only covers row-0; rows 1 and 2 fall back to None.
+        ts = pd.Timestamp
+        bh_index = pd.Series([1.0], index=[ts('2020-01-31', tz='UTC')])
+        rows = build_order_log(self._events(), initial_capital=0.0, bh_index=bh_index)
+        assert rows[0]['bh_value'] == pytest.approx(1000.0)
+        assert rows[1]['bh_value'] is None
+        assert rows[2]['bh_value'] is None
+
 
 # ---------------------------------------------------------------------------
 # _get_monthly_range

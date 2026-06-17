@@ -17,6 +17,7 @@ from src.backtest import (
     _is_month_end_trading_day,
     _portfolio_value,
     _window_by_month,
+    build_equal_weight_index,
     build_order_log,
     compute_metrics,
     load_daily_closes,
@@ -165,13 +166,20 @@ class DCAStrategy(BacktestStrategy):
             portfolio, total_invested = simulate_dca(price_df, monthly_investment)
             metrics = compute_metrics(portfolio, total_invested)
 
+            # Normalised equal-weight index (first value = 1.0) used as the B&H
+            # benchmark column in the order log.
+            _bh_raw = build_equal_weight_index(price_df)
+            bh_index = (_bh_raw / _bh_raw.iloc[0]) if not _bh_raw.empty else None
+
             # compute_metrics returns {} when portfolio is too short (< 3 months)
             # or total_invested is zero; build the order log only for a valid run.
             # DCA seeds no initial capital — all money enters through the
             # per-contribution inflows — so initial_capital is 0.
             order_log = (
                 build_order_log(
-                    _dca_order_events(price_df, monthly_investment), initial_capital=0.0
+                    _dca_order_events(price_df, monthly_investment),
+                    initial_capital=0.0,
+                    bh_index=bh_index,
                 )
                 if metrics else None
             )

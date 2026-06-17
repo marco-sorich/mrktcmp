@@ -398,11 +398,11 @@ def _metrics_table(metrics_a, metrics_b):
 _ORDER_COLUMNS = [
     ('date', 'Date', lambda v: v.strftime('%Y-%m-%d')),
     ('side', 'Buy/Sell', str),
-    ('value_before', 'Value before', lambda v: f'{v:,.0f}'),
     ('inflow', 'Inflow', lambda v: f'{v:,.0f}'),
     ('assets_after', 'Assets value', lambda v: f'{v:,.0f}'),
     ('cash_after', 'Cash value', lambda v: f'{v:,.0f}'),
-    ('value_after', 'Value after', lambda v: f'{v:,.0f}'),
+    ('value_after', 'Portfolio value', lambda v: f'{v:,.0f}'),
+    ('bh_value', 'B&H value', lambda v: f'{v:,.0f}'),
     ('net_deposits', 'Net deposits', lambda v: f'{v:,.0f}'),
     ('pnl_abs', 'P&L (€)', lambda v: f'{v:+,.0f}'),
     ('pnl_pct', 'P&L (%)', lambda v: f'{v * 100:+.1f}%'),

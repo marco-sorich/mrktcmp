@@ -339,6 +339,7 @@ class OrderRow(TypedDict):
     assets_after: float
     cash_after: float
     value_after: float             # assets_after + cash_after
+    bh_value: float | None         # net_deposits × normalised equal-weight B&H index (None when unavailable)
     net_deposits: float            # running sum of all external money put in
     pnl_abs: float                 # value_after − net_deposits (profit/loss, €)
     pnl_pct: float | None          # pnl_abs / net_deposits
@@ -347,7 +348,11 @@ class OrderRow(TypedDict):
     period_return: float | None    # value_before / previous value_after − 1
 
 
-def build_order_log(events: list[OrderEvent], initial_capital: float) -> list[OrderRow]:
+def build_order_log(
+    events: list[OrderEvent],
+    initial_capital: float,
+    bh_index: pd.Series | None = None,
+) -> list[OrderRow]:
     """Turn a strategy's raw OrderEvents into fully-populated OrderRows.
 
     This is the *only* order-log logic in backtest.py and is completely
@@ -363,6 +368,12 @@ def build_order_log(events: list[OrderEvent], initial_capital: float) -> list[Or
                       (the Risk-Off lump sum; 0.0 for DCA, which adds all of its
                       money through per-event inflows).  Seeds the net-deposits
                       tally.
+    bh_index        – optional equal-weight buy-and-hold index normalised so its
+                      first value is 1.0; when provided, each row gets a
+                      ``bh_value`` column (net_deposits × index[date]) that shows
+                      what the same capital would be worth under a pure B&H.
+                      None when the strategy cannot produce a meaningful benchmark
+                      (e.g. the basket is empty).
 
     Returns
     -------
@@ -399,6 +410,11 @@ def build_order_log(events: list[OrderEvent], initial_capital: float) -> list[Or
             if prev_value_after is not None and prev_value_after > 0 else None
         )
 
+        # Equal-weight B&H benchmark: what net_deposits would be worth if the
+        # same total capital had been invested as a lump sum on day one.
+        bh_val = bh_index.get(ev['date']) if bh_index is not None else None
+        bh_value: float | None = net_deposits * float(bh_val) if bh_val is not None else None
+
         rows.append(OrderRow(
             date=ev['date'],
             side=ev['side'],
@@ -407,6 +423,7 @@ def build_order_log(events: list[OrderEvent], initial_capital: float) -> list[Or
             assets_after=ev['assets_after'],
             cash_after=ev['cash_after'],
             value_after=value_after,
+            bh_value=bh_value,
             net_deposits=net_deposits,
             pnl_abs=pnl_abs,
             pnl_pct=pnl_pct,
