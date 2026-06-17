@@ -242,8 +242,9 @@ _PORTFOLIO_STUB = pd.Series(
 )
 _METRICS_STUB = {'Total Return': '+50.0%', 'CAGR': '10.0%'}
 
-# A single finalized OrderRow (all 13 keys) used to exercise _order_table.
+# A single finalized OrderRow (all 14 keys) used to exercise _order_table.
 # period_return is None so the em-dash ('—') rendering path is covered.
+# bh_value is None so the em-dash path is covered for that column too.
 _ORDERS_STUB = [{
     'date': pd.Timestamp('2022-01-31', tz='UTC'),
     'side': 'Buy',
@@ -252,6 +253,7 @@ _ORDERS_STUB = [{
     'assets_after': 1000.0,
     'cash_after': 0.0,
     'value_after': 1000.0,
+    'bh_value': None,
     'net_deposits': 1000.0,
     'pnl_abs': 0.0,
     'pnl_pct': 0.0,

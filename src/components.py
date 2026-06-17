@@ -402,6 +402,7 @@ _ORDER_COLUMNS = [
     ('assets_after', 'Assets value', lambda v: f'{v:,.0f}'),
     ('cash_after', 'Cash value', lambda v: f'{v:,.0f}'),
     ('value_after', 'Portfolio value', lambda v: f'{v:,.0f}'),
+    ('bh_value', 'B&H value', lambda v: f'{v:,.0f}'),
     ('net_deposits', 'Net deposits', lambda v: f'{v:,.0f}'),
     ('pnl_abs', 'P&L (€)', lambda v: f'{v:+,.0f}'),
     ('pnl_pct', 'P&L (%)', lambda v: f'{v * 100:+.1f}%'),

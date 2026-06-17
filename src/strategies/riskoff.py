@@ -211,12 +211,19 @@ class RiskOffStrategy(BacktestStrategy):
             portfolio, total_invested = simulate_riskoff(price_df, target_fraction, initial_investment)
             metrics = compute_metrics(portfolio, total_invested)
 
+            # Normalised equal-weight index for the windowed price_df (first value
+            # = 1.0), used as the B&H benchmark column in the order log.  This is
+            # separate from the full-history `index` used for signal computation.
+            _bh_raw = build_equal_weight_index(price_df)
+            bh_index = (_bh_raw / _bh_raw.iloc[0]) if not _bh_raw.empty else None
+
             # Build the order log only for a valid run.  The whole lump sum is
             # present from the start, so it seeds net-deposits as initial_capital.
             order_log = (
                 build_order_log(
                     _riskoff_order_events(price_df, target_fraction, initial_investment),
                     initial_capital=initial_investment,
+                    bh_index=bh_index,
                 )
                 if metrics else None
             )

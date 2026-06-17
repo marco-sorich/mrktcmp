@@ -19,6 +19,7 @@ from src.backtest import (
     _portfolio_value,
     _rebalance_to_target,
     _window_by_month,
+    build_equal_weight_index,
     build_order_log,
     compute_metrics,
     load_daily_closes,
@@ -153,6 +154,11 @@ class BuyHoldStrategy(BacktestStrategy):
             portfolio, total_invested = simulate_lumpsum(price_df, initial_investment)
             metrics = compute_metrics(portfolio, total_invested)
 
+            # Normalised equal-weight index (first value = 1.0) used as the B&H
+            # benchmark column in the order log.
+            _bh_raw = build_equal_weight_index(price_df)
+            bh_index = (_bh_raw / _bh_raw.iloc[0]) if not _bh_raw.empty else None
+
             # compute_metrics returns {} when portfolio is too short (< 3 months)
             # or total_invested is zero; build the order log only for a valid run.
             # The whole lump sum is present from the start, so it seeds the
@@ -161,6 +167,7 @@ class BuyHoldStrategy(BacktestStrategy):
                 build_order_log(
                     _lumpsum_order_events(price_df, initial_investment),
                     initial_capital=initial_investment,
+                    bh_index=bh_index,
                 )
                 if metrics else None
             )
