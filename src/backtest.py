@@ -751,6 +751,79 @@ def simulate_riskoff(
     return pd.Series(daily_value, index=price_df.index), initial_investment
 
 
+def simulate_lumpsum(
+    price_df: pd.DataFrame,
+    initial_investment: float = INITIAL_INVESTMENT,
+) -> tuple[pd.Series, float]:
+    """Simulate a single initial lump-sum investment held to the end (buy & hold).
+
+    The whole *initial_investment* is deployed once, on the first trading day
+    that has at least one buyable asset, split equally across the assets priced
+    that day.  Those units are then held unchanged for the rest of the window —
+    there are no further trades, no rebalancing and no contributions — so the
+    daily value curve is simply the fixed holdings re-priced each day.  Because
+    no fresh money ever enters after day one, *total_invested* is the lump sum.
+
+    Mirrors ``simulate_riskoff``'s valuation exactly: the one-off purchase reuses
+    ``_rebalance_to_target`` (target fraction 1.0 = fully invested), then every
+    day is valued in a single vectorised numpy pass (Σ units × price over assets
+    with a valid price — a NaN price contributes 0 but keeps its units — plus any
+    residual cash).  Days before the first buy hold the lump sum flat as cash.
+
+    Parameters
+    ----------
+    price_df           – daily close prices (one column per asset).
+    initial_investment – one-off lump sum invested on the first buyable day.
+
+    Returns
+    -------
+    (portfolio_series, total_invested)
+      portfolio_series – portfolio value (holdings + cash) on every trading day.
+      total_invested   – the initial lump sum (constant; no contributions).
+    """
+    # Guard the empty case before touching the (then non-datetime) index.
+    if price_df.empty:
+        return pd.Series(dtype=float), initial_investment
+
+    assert isinstance(price_df.index, pd.DatetimeIndex)
+
+    # Column order shared by the holdings dict (string keys) and the price matrix.
+    columns = [str(col) for col in price_df.columns]
+    prices_mat = price_df.to_numpy(dtype=float)
+    n_days, n_assets = prices_mat.shape
+
+    # An asset is buyable on a day with a valid, strictly positive price; the
+    # lump sum is deployed on the first day at least one asset is buyable.
+    buyable = ~np.isnan(prices_mat) & (prices_mat > 0)
+    has_buyable = buyable.any(axis=1)
+
+    # Never any tradable price → the lump sum is held flat in cash throughout.
+    if not has_buyable.any():
+        flat = pd.Series(np.full(n_days, float(initial_investment)), index=price_df.index)
+        return flat, initial_investment
+
+    # Deploy 100% on the first buyable day, equal-weight across that day's priced
+    # assets, reusing the exact Risk-Off rebalance math (cash_after ≈ 0).
+    buy_pos = int(np.flatnonzero(has_buyable)[0])
+    holdings: dict[str, float] = {col: 0.0 for col in columns}
+    holdings, cash, _ = _rebalance_to_target(
+        holdings, float(initial_investment), price_df.iloc[buy_pos], 1.0
+    )
+    holdings_vec = np.array([holdings[col] for col in columns])
+
+    # The bought units are held from the buy day onward (0 before it); the cash
+    # is the lump sum before the buy and the (tiny) residual after it.
+    invested = np.arange(n_days) >= buy_pos
+    holdings_mat = np.where(invested[:, None], holdings_vec[None, :], 0.0)
+    cash_arr = np.where(invested, cash, float(initial_investment))
+
+    # Value every day exactly like _portfolio_value: Σ units × price over assets
+    # with a valid price (NaN priced → 0 but units retained), plus cash.
+    daily_value = (holdings_mat * np.where(np.isnan(prices_mat), 0.0, prices_mat)).sum(axis=1) + cash_arr
+
+    return pd.Series(daily_value, index=price_df.index), initial_investment
+
+
 def _get_monthly_range(base_url: str, filename: str, df_meta: pd.DataFrame) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
     """Return the earliest and latest month-end dates for a single asset.
 
@@ -863,14 +936,14 @@ def run_backtest(
 
     When *strategy* is provided the call is delegated entirely to that plugin,
     which is responsible for loading data, filtering dates, and computing
-    metrics.  When *strategy* is None the built-in DCA logic below is used,
-    preserving full backward compatibility for existing callers.
+    metrics.  When *strategy* is None the built-in Buy & Hold logic below is
+    used, preserving full backward compatibility for existing callers.
 
-    Steps (strategy=None / built-in DCA path):
+    Steps (strategy=None / built-in Buy & Hold path):
       1. Load daily close prices for every asset in the basket.
       2. Restrict to the calendar months of the [start_date, end_date] window.
       3. Forward-fill small price gaps.
-      4. Run the DCA simulation (monthly contributions, daily valuation).
+      4. Run the lump-sum simulation (invest once on day one, hold to the end).
       5. Compute and return performance metrics.
 
     Parameters
@@ -888,9 +961,9 @@ def run_backtest(
     Returns
     -------
     (portfolio_series, metrics_dict, order_log) on success, or
-    (None, None, None) on failure.  The built-in DCA path (strategy=None) is a
-    legacy/back-compat entry point not used by the UI, so it returns None for
-    the order log; the per-strategy order logs are produced by the plugins.
+    (None, None, None) on failure.  The built-in Buy & Hold path (strategy=None)
+    is a legacy/back-compat entry point not used by the UI, so it returns None
+    for the order log; the per-strategy order logs are produced by the plugins.
     """
     # Delegate to a strategy plugin when one is supplied.
     if strategy is not None:
@@ -923,5 +996,5 @@ def run_backtest(
     # during a long absence.
     price_df = price_df.ffill(limit=5)
 
-    portfolio, total_invested = simulate_dca(price_df)
+    portfolio, total_invested = simulate_lumpsum(price_df)
     return portfolio, compute_metrics(portfolio, total_invested), None

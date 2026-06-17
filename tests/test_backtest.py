@@ -7,9 +7,11 @@ from unittest.mock import patch
 os.environ.pop("BASE_URL", None)
 
 from src.backtest import (  # noqa: E402
+    INITIAL_INVESTMENT,
     OrderEvent,
     build_order_log,
     simulate_dca,
+    simulate_lumpsum,
     compute_metrics,
     run_backtest,
     get_common_date_range,
@@ -141,6 +143,73 @@ class TestSimulateDca:
         # 5 AAPL (→20) + 2.5 BTC (→5): 20 × 100 + 5 × 200 = 3,000.
         assert portfolio.iloc[2] == pytest.approx(3000.0)
         assert total == pytest.approx(3000.0)
+
+
+# ---------------------------------------------------------------------------
+# simulate_lumpsum
+# ---------------------------------------------------------------------------
+
+class TestSimulateLumpsum:
+    def test_empty_dataframe_returns_empty_series_and_default_invested(self):
+        portfolio, total = simulate_lumpsum(pd.DataFrame())
+        assert portfolio.empty
+        assert total == pytest.approx(INITIAL_INVESTMENT)
+
+    def test_total_invested_equals_initial_investment(self):
+        df = pd.DataFrame({'AAPL': [100.0] * 12}, index=_MONTHLY_IDX[:12])
+        _, total = simulate_lumpsum(df, initial_investment=5000.0)
+        assert total == pytest.approx(5000.0)
+
+    def test_flat_price_stays_flat_at_initial_investment(self):
+        # Buy once on day one and hold: a constant price means the value never
+        # moves off the lump sum on any day.
+        df = pd.DataFrame({'AAPL': [100.0] * 6}, index=_MONTHLY_IDX[:6])
+        portfolio, _ = simulate_lumpsum(df, initial_investment=10_000.0)
+        assert portfolio.tolist() == pytest.approx([10_000.0] * 6)
+
+    def test_rising_price_grows_proportionally(self):
+        # Price doubles from day one to the end → so does the held position.
+        df = pd.DataFrame({'AAPL': [100.0, 150.0, 200.0]}, index=_MONTHLY_IDX[:3])
+        portfolio, _ = simulate_lumpsum(df, initial_investment=10_000.0)
+        assert portfolio.iloc[0] == pytest.approx(10_000.0)
+        assert portfolio.iloc[-1] == pytest.approx(20_000.0)
+
+    def test_two_assets_split_equally_on_day_one(self):
+        # 5,000 into AAPL (50 sh) + 5,000 into BTC (25 sh) = 10,000 on day one.
+        df = pd.DataFrame(
+            {'AAPL': [100.0, 100.0], 'BTC': [200.0, 200.0]},
+            index=_MONTHLY_IDX[:2],
+        )
+        portfolio, _ = simulate_lumpsum(df, initial_investment=10_000.0)
+        assert portfolio.iloc[0] == pytest.approx(10_000.0)
+
+    def test_holdings_held_constant_no_rebalance(self):
+        # AAPL doubles while BTC halves: a true buy-and-hold keeps the day-one
+        # units, so the end value reflects the drifted (un-rebalanced) position.
+        df = pd.DataFrame(
+            {'AAPL': [100.0, 200.0], 'BTC': [100.0, 50.0]},
+            index=_MONTHLY_IDX[:2],
+        )
+        portfolio, _ = simulate_lumpsum(df, initial_investment=10_000.0)
+        # 50 AAPL sh × 200 + 50 BTC sh × 50 = 10,000 + 2,500 = 12,500.
+        assert portfolio.iloc[-1] == pytest.approx(12_500.0)
+
+    def test_lump_sum_held_as_cash_before_first_buyable_day(self):
+        # No buyable price on day one → the lump sum waits in cash until BTC
+        # becomes priced, then is fully deployed.
+        df = pd.DataFrame(
+            {'AAPL': [np.nan, np.nan], 'BTC': [np.nan, 200.0]},
+            index=_MONTHLY_IDX[:2],
+        )
+        portfolio, _ = simulate_lumpsum(df, initial_investment=10_000.0)
+        assert portfolio.iloc[0] == pytest.approx(10_000.0)   # cash
+        assert portfolio.iloc[1] == pytest.approx(10_000.0)   # just invested
+
+    def test_output_index_matches_input_index(self):
+        idx = _MONTHLY_IDX[:6]
+        df = pd.DataFrame({'AAPL': [100.0] * 6}, index=idx)
+        portfolio, _ = simulate_lumpsum(df)
+        assert list(portfolio.index) == list(idx)
 
 
 # ---------------------------------------------------------------------------
