@@ -22,7 +22,7 @@
 	],
 	"postCreateCommand": {
 		//"fix-ownership": "sudo chown -R vscode:vscode /home/vscode/.claude",
-		"pip-install": "pip install --break-system-packages -r requirements.txt"
+		"pip-install": "pip install --break-system-packages -e '.[dev]'"
 	},
 	"remoteEnv": {
 		"DATA_URL": "${localEnv:DATA_URL}",

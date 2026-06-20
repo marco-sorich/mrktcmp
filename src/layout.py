@@ -33,6 +33,10 @@ import dash_bootstrap_components as dbc
 # (heading, radio buttons, dropdown, add button, item list, and Store).
 from src.components import _basket_ui
 
+# _config provides module-level globals: app_version (from setuptools-scm),
+# and df/assetsClasses (loaded master.parquet).
+import src.config as _config
+
 
 # ---------------------------------------------------------------------------
 # Layout factory
@@ -204,5 +208,17 @@ def create_layout():
         # Hidden result store (reserved for future drill-down
         # interactions, e.g. clicking a month to inspect it).
         dcc.Store(id='bt-result-store', data={}),
+
+        # Footer with application version.
+        html.Footer([
+            html.Hr(style={'border': 'none', 'borderTop': '1px solid #e0e0e0', 'margin': '0 0 8px 0'}),
+            html.P(f"mrktcmp v{_config.app_version}", style={
+                'margin': '0',
+                'fontSize': '0.75rem',
+                'color': '#888',
+                'textAlign': 'center',
+                'letterSpacing': '0.05em',
+            }),
+        ], style={'marginTop': '24px', 'paddingBottom': '12px'}),
 
     ], style={'maxWidth': '100%', 'padding': '0 8px', 'boxSizing': 'border-box'})

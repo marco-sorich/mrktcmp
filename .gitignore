@@ -80,6 +80,9 @@ desktop.ini
 # devcontainer
 devcontainer-lock.json
 
+# setuptools-scm generated
+src/_version.py
+
 # Project specific
 .env
 config.local.py

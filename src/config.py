@@ -55,6 +55,10 @@ import pandas as pd
 # take precedence over any already-set environment variables.
 from dotenv import load_dotenv
 
+# importlib.metadata: read the installed package version and metadata.
+# Used to resolve app_version from setuptools-scm at runtime.
+from importlib.metadata import version, PackageNotFoundError
+
 # ---------------------------------------------------------------------------
 # Load .env before reading any environment variables
 # ---------------------------------------------------------------------------
@@ -149,3 +153,39 @@ else:
         # log.exception automatically includes the full traceback so we can
         # diagnose the problem without adding extra debug code.
         log.exception("Failed to load master.parquet from BASE_URL")
+
+# ---------------------------------------------------------------------------
+# Application version (from setuptools-scm, git tags, or fallback)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_version() -> str:
+    """Resolve the application version using best-effort strategies.
+
+    Reihenfolge:
+    1. Installed distribution metadata (pip install, wheels, editable installs)
+    2. Generated version file from setuptools-scm (src/_version.py)
+    3. Live version query from setuptools-scm during development (git tags)
+    4. Fallback to 'unknown' if none of the above work
+    """
+    try:
+        # Works when installed via pip (CI, Devcontainer, Production)
+        return version("mrktcmp")
+    except PackageNotFoundError:
+        pass
+    try:
+        # Works when setuptools-scm generated src/_version.py
+        from src._version import __version__  # type: ignore[import-not-found]
+        return __version__
+    except Exception:
+        pass
+    try:
+        # Works during uninstalled development (git checkout, no pip install)
+        from setuptools_scm import get_version
+        return get_version(root="..", relative_to=__file__)
+    except Exception:
+        return "unknown"
+
+
+app_version: str = _resolve_version()
+log.debug(f"App version resolved to: {app_version}")

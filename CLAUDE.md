@@ -5,6 +5,9 @@ This is a Plotly/Dash based webpage for comparing baskets, containing financial 
 ## Commands
 
 ```bash
+# Setup: install editable package with dev tools (from pyproject.toml)
+pip install -e ".[dev]"
+
 # Development server (hot-reload via DASH_DEBUG=true in .env)
 python src/app.py
 # or
@@ -14,9 +17,9 @@ gunicorn --reload src.app:server
 gunicorn src.app:server
 
 # Linting
-flake8 --max-complexity=10 --max-line-length=127
+flake8 --max-complexity=10 --max-line-length=127 ./src
 
-# Type check (requires mypy 2.1.0 — pinned in requirements_dev.txt; older 1.x
+# Type check (requires mypy 2.1.0 — pinned in pyproject.toml; older 1.x
 # releases silently miss errors that CI's mypy 2.1.0 reports)
 mypy --explicit-package-bases --ignore-missing-imports src/backtest.py src/strategies/
 mypy --explicit-package-bases --ignore-missing-imports tests/test_backtest.py tests/test_strategies.py
@@ -43,6 +46,12 @@ DASH_DEBUG=false
 
 `BASE_URL` must point to a directory containing `master.parquet` (asset catalogue) and one parquet file per asset (OHLCV data).
 
+## Dependency Management
+
+All dependencies (runtime and development) are pinned to exact versions in `pyproject.toml` for reproducibility. The build system (`setuptools` + `setuptools-scm`) manages the package metadata, versioning from git tags, and entry points. Installation uses `pip install -e ".[dev]"` (editable install with dev tools); no separate `requirements*.txt` files exist.
+
+**Dependency Updates**: Dependabot (GitHub Action, configured in `.github/dependabot.yml`) scans `pyproject.toml` weekly and creates pull requests with new versions. CI runs on these PRs; tests validate compatibility. Review and merge PRs to keep dependencies current.
+
 ## Development
 
 * Implement type checking for all functions which are not Dash callbacks
@@ -61,7 +70,7 @@ DASH_DEBUG=false
 `app.py` → imports `src.callbacks` (side-effect: registers all Dash callbacks) → imports `src.layout` → `src.config` is always imported first as a module-level singleton.
 
 **`src/config.py` — startup singleton**
-Loads `.env`, configures logging, fetches `master.parquet` from `BASE_URL` into the module-level global `df` (a DataFrame). Exposes `base_url`, `assetsClasses`, `df`, and `log` to the rest of the app. All other modules import this as `import src.config as _config`.
+Loads `.env`, configures logging, fetches `master.parquet` from `BASE_URL` into the module-level global `df` (a DataFrame). Resolves `app_version` from setuptools-scm (git tags, dev versions, or fallback); the version displays in the page footer. Exposes `base_url`, `assetsClasses`, `df`, `log`, and `app_version` to the rest of the app. All other modules import this as `import src.config as _config`. Version resolution chain: (1) installed distribution metadata, (2) generated `src/_version.py` from setuptools-scm, (3) live git query, (4) fallback to `'unknown'`. For releases, tag with `git tag v<VERSION>` (e.g., `git tag v0.1.0`); setuptools-scm will then report that exact version.
 
 **`src/backtest.py` — pure simulation engines (no Dash dependencies)**
 Three strategies share this module; all parquet I/O happens here. All engines run on **daily** close prices (`load_daily_closes()`), windowed to the selected months by `_window_by_month()`, and produce a daily portfolio-value curve. All engines are **vectorised** (numpy array maths, no per-day Python loop) for speed: DCA cumulative-sums a (days × assets) purchase matrix; Buy & Hold and Risk-Off snapshot holdings on the (few) trade days — reusing `_rebalance_to_target()` — then value all days in one pass. The daily valuation matches `_portfolio_value()` exactly (Σ units × price over non-NaN prices, NaN-priced assets keep their units). `_portfolio_value()` and `_rebalance_to_target()` remain the per-trade primitives reused by the plugins' order-event generators.
