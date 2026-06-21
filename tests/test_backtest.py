@@ -348,17 +348,21 @@ class TestBuildOrderLog:
         # non-trivial period return (drift) can be asserted.
         ts = pd.Timestamp
         # asset_values split each assets_after across two assets so it can be
-        # asserted to carry through and to sum back to assets_after.
+        # asserted to carry through and to sum back to assets_after; asset_prices
+        # carries each asset's quote on the trade day (independent of holdings).
         return [
             OrderEvent(date=ts('2020-01-31', tz='UTC'), side='Buy',
                        value_before=0.0, inflow=1000.0, assets_after=1000.0, cash_after=0.0,
-                       asset_values={'AAA': 600.0, 'BBB': 400.0}),
+                       asset_values={'AAA': 600.0, 'BBB': 400.0},
+                       asset_prices={'AAA': 10.0, 'BBB': 20.0}),
             OrderEvent(date=ts('2020-02-29', tz='UTC'), side='Buy',
                        value_before=1200.0, inflow=1000.0, assets_after=2200.0, cash_after=0.0,
-                       asset_values={'AAA': 1300.0, 'BBB': 900.0}),
+                       asset_values={'AAA': 1300.0, 'BBB': 900.0},
+                       asset_prices={'AAA': 11.0, 'BBB': 22.0}),
             OrderEvent(date=ts('2020-03-31', tz='UTC'), side='Sell',
                        value_before=2200.0, inflow=0.0, assets_after=0.0, cash_after=2200.0,
-                       asset_values={'AAA': 0.0, 'BBB': 0.0}),
+                       asset_values={'AAA': 0.0, 'BBB': 0.0},
+                       asset_prices={'AAA': 12.0, 'BBB': 24.0}),
         ]
 
     def test_empty_events_return_empty_list(self):
@@ -377,13 +381,21 @@ class TestBuildOrderLog:
         for r in rows:
             assert sum(r['asset_values'].values()) == pytest.approx(r['assets_after'])
 
-    def test_asset_values_default_empty_for_events_without_breakdown(self):
+    def test_asset_prices_carried_through(self):
+        rows = build_order_log(self._events(), initial_capital=0.0)
+        # The per-asset quotes are passed through verbatim, independent of value
+        # (e.g. the final Sell row holds nothing yet still reports both prices).
+        assert rows[0]['asset_prices'] == {'AAA': 10.0, 'BBB': 20.0}
+        assert rows[2]['asset_prices'] == {'AAA': 12.0, 'BBB': 24.0}
+
+    def test_asset_values_and_prices_default_empty_for_events_without_breakdown(self):
         # Events that predate the per-asset breakdown still build valid rows.
         ev = [OrderEvent(date=pd.Timestamp('2020-01-31', tz='UTC'), side='Buy',
                          value_before=0.0, inflow=1000.0, assets_after=1000.0,
                          cash_after=0.0)]  # type: ignore[typeddict-item]
         rows = build_order_log(ev, initial_capital=0.0)
         assert rows[0]['asset_values'] == {}
+        assert rows[0]['asset_prices'] == {}
 
     def test_net_deposits_accumulates_inflows_from_initial_capital(self):
         rows = build_order_log(self._events(), initial_capital=500.0)
@@ -417,7 +429,7 @@ class TestBuildOrderLog:
         # All-zero seed/inflow/value → every ratio's denominator is 0 → None.
         ev = [OrderEvent(date=pd.Timestamp('2020-01-31', tz='UTC'), side='Buy',
                          value_before=0.0, inflow=0.0, assets_after=0.0, cash_after=0.0,
-                         asset_values={})]
+                         asset_values={}, asset_prices={})]
         rows = build_order_log(ev, initial_capital=0.0)
         assert rows[0]['pnl_pct'] is None
         assert rows[0]['equity_exposure'] is None

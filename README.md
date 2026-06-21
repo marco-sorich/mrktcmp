@@ -21,10 +21,11 @@ A Plotly Dash web application for backtesting across user-defined asset baskets.
 - Side-by-side performance metrics: Total Return, CAGR, Sharpe Ratio, Max. Drawdown, Volatility, Calmar Ratio, and more
 - Per-order transaction tables (one per basket, switchable via tabs) listing every buy/sell with its date, side,
   pre-/post-trade value, inflow, asset/cash split, running net deposits, P&L (€ and %), equity exposure, cash quota,
-  and period return, followed by one extra column per basket asset showing that asset's current worth (units × price,
-  €) on each trade row. The table fills ~80 % of the viewport height with a sticky header row and sticky first column
-  for easy scanning of long logs, and a download button (next to the "Orders" heading) exports the active basket's
-  table (per-asset columns included) as **CSV** or **Excel (.xlsx)**
+  and period return, followed by two extra columns per basket asset showing that asset's current worth (units × price,
+  €) and its exchange close (the Börsenkurs) on each trade row. The table fills ~80 % of the viewport height with a
+  sticky header row and sticky first column for easy scanning of long logs, and a download button (next to the
+  "Orders" heading) exports the active basket's table (per-asset value + price columns included) as **CSV** or
+  **Excel (.xlsx)**
 
 ## Requirements
 

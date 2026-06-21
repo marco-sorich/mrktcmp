@@ -14,6 +14,7 @@ from src.backtest import (
     MONTHLY_INVESTMENT,
     OrderEvent,
     OrderRow,
+    _asset_prices,
     _asset_values,
     _is_month_end_trading_day,
     _portfolio_value,
@@ -91,7 +92,8 @@ def _dca_order_events(
             inflow=monthly_investment,
             assets_after=_portfolio_value(holdings, 0.0, prices),
             cash_after=0.0,
-            asset_values=_asset_values(holdings, prices),  # per-asset breakdown
+            asset_values=_asset_values(holdings, prices),  # per-asset worth
+            asset_prices=_asset_prices(prices),            # per-asset close price
         ))
 
     return events
