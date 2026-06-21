@@ -27,15 +27,16 @@ A Plotly Dash web application for backtesting across user-defined asset baskets.
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.14+
 - A data source (parquet files) accessible via `BASE_URL` — a `master.parquet` catalogue plus one parquet file per asset
 
 ## Setup
 
-1. Install dependencies:
+1. Install the package with development dependencies:
+   ```bash
+   pip install -e ".[dev]"
    ```
-   pip install -r requirements.txt
-   ```
+   (Dependencies and build metadata are defined in `pyproject.toml`. No separate `requirements*.txt` files exist.)
 
 2. Set environment variables:
    ```bash
@@ -66,16 +67,11 @@ Open `http://127.0.0.1:8050/` in your browser.
 
 ## QA Checks
 
-Install the development dependencies first (this also pins **mypy 2.1.0**, the
-version CI runs — older 1.x releases silently miss some errors):
-
-```bash
-pip install -r requirements_dev.txt
-```
+All checks require development dependencies, which are installed via `pip install -e ".[dev]"` (this includes **mypy 2.1.0**, the version CI runs — older 1.x releases silently miss some errors):
 
 ```bash
 # Linting
-flake8 --max-complexity=10 --max-line-length=127
+flake8 --max-complexity=10 --max-line-length=127 ./src
 
 # Type checking (mypy 2.1.0)
 mypy --explicit-package-bases --ignore-missing-imports src/backtest.py src/strategies/
@@ -84,6 +80,17 @@ mypy --explicit-package-bases --ignore-missing-imports tests/test_backtest.py te
 # Testing
 pytest
 ```
+
+## Versioning
+
+The application version is automatically derived from git tags via `setuptools-scm`. The version displays in the page footer. To create a release:
+
+```bash
+git tag -a v<VERSION> -m "Release <VERSION>"  # e.g., v0.1.0
+git push origin v<VERSION>
+```
+
+Without tags, the version will be a development version (e.g., `0.1.dev3+g<hash>`).
 
 ## Project Structure
 
