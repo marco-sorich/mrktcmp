@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "mrktcmp"
 description = "Plotly/Dash webpage for comparing baskets of financial assets via backtesting"
 readme = "README.md"
+license = { text = "AGPL-3.0-or-later" }
 requires-python = ">=3.11"
 dynamic = ["version"]
 dependencies = [
