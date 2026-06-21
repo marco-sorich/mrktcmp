@@ -19,6 +19,7 @@ from src.backtest import (
     INITIAL_INVESTMENT,
     OrderEvent,
     OrderRow,
+    _asset_values,
     _portfolio_value,
     _rebalance_to_target,
     _window_by_month,
@@ -103,6 +104,7 @@ def _riskoff_order_events(
             inflow=0.0,
             assets_after=_portfolio_value(holdings, 0.0, prices),
             cash_after=cash,
+            asset_values=_asset_values(holdings, prices),  # per-asset breakdown
         ))
 
     return events

@@ -85,6 +85,23 @@ def _portfolio_value(holdings: dict[str, float], cash: float, prices: pd.Series)
     return cash + invested
 
 
+def _asset_values(holdings: dict[str, float], prices: pd.Series) -> dict[str, float]:
+    """Per-asset worth = units × price, one entry per asset column.
+
+    Mirrors the individual terms summed by ``_portfolio_value``: an asset with a
+    valid price contributes ``units × price``; an asset whose price is missing
+    (NaN) this day contributes 0.0 (it keeps its units but has no current value).
+    *Every* column of ``prices`` is included so the returned dict has the same,
+    stable key set on every trade day — these become the per-asset value columns
+    the order tables add (keyed by the asset's symbol, the price-frame column).
+    The values therefore sum to the assets portion of ``_portfolio_value``.
+    """
+    return {
+        str(c): (holdings.get(str(c), 0.0) * float(p) if pd.notna(p) else 0.0)
+        for c, p in prices.items()
+    }
+
+
 def _window_by_month(
     price_df: pd.DataFrame, start_date: pd.Timestamp, end_date: pd.Timestamp
 ) -> pd.DataFrame:
@@ -312,6 +329,9 @@ class OrderEvent(TypedDict):
                    0.0 for pure re-allocations such as a Risk-Off rebalance.
     assets_after – worth of the held assets (excluding cash) *after* the trade.
     cash_after   – uninvested cash *after* the trade.
+    asset_values – per-asset worth (units × price, € by symbol) *after* the trade;
+                   one entry per basket asset (see ``_asset_values``).  Sums to
+                   ``assets_after`` and feeds the order tables' per-asset columns.
     """
 
     date: pd.Timestamp
@@ -320,6 +340,7 @@ class OrderEvent(TypedDict):
     inflow: float
     assets_after: float
     cash_after: float
+    asset_values: dict[str, float]
 
 
 class OrderRow(TypedDict):
@@ -338,6 +359,7 @@ class OrderRow(TypedDict):
     inflow: float
     assets_after: float
     cash_after: float
+    asset_values: dict[str, float]  # per-asset worth after the trade (€ by symbol)
     value_after: float             # assets_after + cash_after
     bh_value: float | None         # net_deposits × normalised equal-weight B&H index (None when unavailable)
     net_deposits: float            # running sum of all external money put in
@@ -422,6 +444,10 @@ def build_order_log(
             inflow=ev['inflow'],
             assets_after=ev['assets_after'],
             cash_after=ev['cash_after'],
+            # Carried through verbatim (defaulting to {} for events that predate
+            # the per-asset breakdown) so the order tables can add one column
+            # per asset; the generic builder stays strategy-agnostic.
+            asset_values=ev.get('asset_values', {}),
             value_after=value_after,
             bh_value=bh_value,
             net_deposits=net_deposits,

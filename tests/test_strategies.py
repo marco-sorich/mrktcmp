@@ -722,6 +722,20 @@ class TestDcaOrderEvents:
         assert [e['date'].month for e in events] == [1, 2, 3]
         assert [e['date'].day for e in events] == [31, 29, 31]  # 2020 is a leap year
 
+    def test_asset_values_break_down_assets_after(self):
+        # Two assets → each contribution is split equally; the per-asset values
+        # carry the asset symbols and sum back to assets_after on every event.
+        idx = pd.date_range('2020-01-01', '2020-03-31', freq='D', tz='UTC')
+        price = pd.DataFrame({'AAPL': 100.0, 'MSFT': 200.0}, index=idx)
+        events = _dca_order_events(price, 1000.0)
+        first = events[0]['asset_values']
+        assert set(first) == {'AAPL', 'MSFT'}
+        # Equal € split (500 each) on the first contribution.
+        assert first['AAPL'] == pytest.approx(500.0)
+        assert first['MSFT'] == pytest.approx(500.0)
+        for e in events:
+            assert sum(e['asset_values'].values()) == pytest.approx(e['assets_after'])
+
 
 class TestRiskOffOrderEvents:
     _IDX = pd.date_range('2020-01-31', periods=4, freq='ME', tz='UTC')
@@ -761,6 +775,16 @@ class TestRiskOffOrderEvents:
         assert ev['side'] == 'Buy'
         assert ev['assets_after'] == pytest.approx(5_000.0)
         assert ev['cash_after'] == pytest.approx(5_000.0)
+        # The single asset holds the whole invested half; cash is excluded.
+        assert ev['asset_values'] == pytest.approx({'A': 5_000.0})
+
+    def test_asset_values_track_holdings_after_each_rebalance(self):
+        price = pd.DataFrame({'A': [100.0, 100.0, 200.0, 200.0]}, index=self._IDX)
+        target = pd.Series([0.0, 1.0, 1.0, 0.0], index=self._IDX)
+        buy, sell = _riskoff_order_events(price, target, 10_000.0)
+        # Fully invested after the buy, fully in cash (asset value 0) after sell.
+        assert buy['asset_values'] == pytest.approx({'A': 10_000.0})
+        assert sell['asset_values'] == pytest.approx({'A': 0.0})
 
 
 class TestLumpsumOrderEvents:
@@ -791,6 +815,8 @@ class TestLumpsumOrderEvents:
         assert len(events) == 1
         # 5,000 into each asset on day one → fully invested.
         assert events[0]['assets_after'] == pytest.approx(10_000.0)
+        # The per-asset breakdown carries both symbols with the equal split.
+        assert events[0]['asset_values'] == pytest.approx({'A': 5_000.0, 'B': 5_000.0})
 
     def test_buy_waits_for_first_buyable_day(self):
         # No price on day one → the buy lands on the first day with a valid price.

@@ -101,7 +101,7 @@ from src.utils import log_time
 # are also needed elsewhere (e.g. layout.py builds _basket_ui panels).
 from src.components import (
     _render_basket_list, _metrics_table, _build_strategy_params_ui,
-    _ORDER_COLUMNS, _order_rows, _order_table_component,
+    _order_rows, _order_table_component,
 )
 
 # The DCA simulation engine. run_backtest orchestrates data loading, the
@@ -1005,8 +1005,10 @@ def download_orders(n_csv, n_xlsx, active_tab, orders_store):
     if not rows:
         return no_update
 
-    # Columns in the same left-to-right order as the on-screen table.
-    labels = [label for _key, label, _fmt in _ORDER_COLUMNS]
+    # Columns in the same left-to-right order as the on-screen table: the fixed
+    # _ORDER_COLUMNS followed by the dynamic per-asset value columns.  Derived
+    # from the stored rows' keys so the export matches the rendered table exactly.
+    labels = list(rows[0].keys())
     df = pd.DataFrame(rows, columns=labels)
     basket = 'A' if tab == 'a' else 'B'
 
