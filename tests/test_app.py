@@ -242,9 +242,12 @@ _PORTFOLIO_STUB = pd.Series(
 )
 _METRICS_STUB = {'Total Return': '+50.0%', 'CAGR': '10.0%'}
 
-# A single finalized OrderRow (all 14 keys) used to exercise _order_table.
+# A single finalized OrderRow (all keys) used to exercise _order_table.
 # period_return is None so the em-dash ('—') rendering path is covered.
 # bh_value is None so the em-dash path is covered for that column too.
+# asset_values splits the 1,000 assets_after across two symbols and asset_prices
+# carries each symbol's quote, so the dynamic per-asset value + price columns are
+# exercised by the table/download tests.
 _ORDERS_STUB = [{
     'date': pd.Timestamp('2022-01-31', tz='UTC'),
     'side': 'Buy',
@@ -252,6 +255,8 @@ _ORDERS_STUB = [{
     'inflow': 1000.0,
     'assets_after': 1000.0,
     'cash_after': 0.0,
+    'asset_values': {'AAPL': 600.0, 'MSFT': 400.0},
+    'asset_prices': {'AAPL': 150.0, 'MSFT': 250.0},
     'value_after': 1000.0,
     'bh_value': None,
     'net_deposits': 1000.0,
@@ -555,6 +560,12 @@ class TestOrderTable:
         assert row['Date'] == '2022-01-31'         # date formatted as YYYY-MM-DD
         assert row['Inflow'] == '1,000'            # currency uses a thousands separator
         assert row['Period return'] == '—'         # period_return is None → em-dash
+        # Dynamic per-asset columns: a value (€, no decimals) and a price (2 dp)
+        # column per basket asset.
+        assert row['AAPL value'] == '600'
+        assert row['MSFT value'] == '400'
+        assert row['AAPL price'] == '150.00'
+        assert row['MSFT price'] == '250.00'
 
     def test_component_renders_rows_as_native_table(self):
         from dash import dcc, html
@@ -569,6 +580,11 @@ class TestOrderTable:
         assert '<td>Buy</td>' in markup and '<td>2022-01-31</td>' in markup
         assert '<td>—</td>' in markup              # None → em-dash
         assert 'P&amp;L (€)' in markup             # '&' in the header is HTML-escaped
+        # Dynamic per-asset value + price columns render as their own header + cell.
+        assert '<th>AAPL value</th>' in markup and '<th>AAPL price</th>' in markup
+        assert '<th>MSFT value</th>' in markup and '<th>MSFT price</th>' in markup
+        assert '<td>600</td>' in markup and '<td>400</td>' in markup
+        assert '<td>150.00</td>' in markup and '<td>250.00</td>' in markup
         assert markup.count('<tr>') == len(_ORDERS_STUB) + 1   # header + one per order
 
 
@@ -580,6 +596,7 @@ class TestDownloadOrders:
         assert out['filename'] == 'orders_basket_A.csv'
         assert 'Buy' in out['content']        # data present
         assert 'Date' in out['content']       # header row present
+        assert 'AAPL' in out['content']       # per-asset value column exported too
 
     def test_xlsx_export_is_base64(self):
         with patch('dash.callback_context') as ctx:

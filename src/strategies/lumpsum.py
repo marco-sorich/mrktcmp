@@ -16,6 +16,8 @@ from src.backtest import (
     INITIAL_INVESTMENT,
     OrderEvent,
     OrderRow,
+    _asset_prices,
+    _asset_values,
     _portfolio_value,
     _rebalance_to_target,
     _window_by_month,
@@ -78,6 +80,8 @@ def _lumpsum_order_events(
             inflow=initial_investment,        # the whole lump sum enters here
             assets_after=_portfolio_value(holdings, 0.0, prices),
             cash_after=0.0,                   # fully invested, no residual cash
+            asset_values=_asset_values(holdings, prices),  # per-asset worth
+            asset_prices=_asset_prices(prices),            # per-asset close price
         )]
 
     return []

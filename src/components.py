@@ -412,22 +412,53 @@ _ORDER_COLUMNS = [
 ]
 
 
+def _order_asset_columns(orders: list[OrderRow]) -> list[str]:
+    """Collect the basket's asset symbols (each drives a value + price column).
+
+    Walks every order's ``asset_values`` dict and returns the symbols in
+    first-seen order, so the per-asset columns appear in the basket's natural
+    asset order and the set is stable across rows.  Empty when no order carries
+    a per-asset breakdown (e.g. legacy events / test stubs without it).
+    """
+    cols: list[str] = []
+    for row in orders:
+        for symbol in (row.get('asset_values') or {}):
+            if symbol not in cols:
+                cols.append(symbol)
+    return cols
+
+
 def _order_rows(orders: list[OrderRow] | None) -> "list[dict[str, str]] | None":
     """Format an order log into display rows: a list of {column label: text}.
 
-    Each cell uses its _ORDER_COLUMNS formatter (None → em-dash).  The result is
+    Each cell uses its _ORDER_COLUMNS formatter (None → em-dash), followed by two
+    extra columns per basket asset: '<symbol> value' (its current worth in €,
+    units × price on that trade day, from ``asset_values``) and '<symbol> price'
+    (the asset's exchange close that day, from ``asset_prices``).  The result is
     plain JSON (all strings, keyed by the human column label) so it can live in a
     dcc.Store and feed **both** the rendered table (_order_table_component) and
-    the CSV / Excel download (download_orders) from one source.  Returns None
-    when there are no orders.
+    the CSV / Excel download (download_orders) from one source.  Returns None when
+    there are no orders.
     """
     if not orders:
         return None
-    return [
-        {label: ('—' if row[key] is None else fmt(row[key]))
-         for key, label, fmt in _ORDER_COLUMNS}
-        for row in orders
-    ]
+    # The per-asset columns are dynamic (two per basket asset), so they are
+    # appended after the fixed _ORDER_COLUMNS in the basket's asset order, each
+    # asset's value column immediately followed by its price column.
+    asset_cols = _order_asset_columns(orders)
+    rows: list[dict[str, str]] = []
+    for row in orders:
+        cells = {label: ('—' if row[key] is None else fmt(row[key]))
+                 for key, label, fmt in _ORDER_COLUMNS}
+        values = row.get('asset_values') or {}
+        prices = row.get('asset_prices') or {}
+        for symbol in asset_cols:
+            v = values.get(symbol)
+            cells[f'{symbol} value'] = '—' if v is None else f'{v:,.0f}'
+            p = prices.get(symbol)
+            cells[f'{symbol} price'] = '—' if p is None else f'{p:,.2f}'
+        rows.append(cells)
+    return rows
 
 
 def _order_table_component(rows: "list[dict[str, str]] | None") -> "dcc.Markdown | html.P":
@@ -445,7 +476,10 @@ def _order_table_component(rows: "list[dict[str, str]] | None") -> "dcc.Markdown
     if not rows:
         return html.P('No orders.', style={'color': '#aaa'})
 
-    labels = [label for _key, label, _fmt in _ORDER_COLUMNS]
+    # Derive the column order from the row dicts (insertion order = the fixed
+    # _ORDER_COLUMNS followed by the dynamic per-asset columns) so the table
+    # automatically includes each basket's per-asset value columns.
+    labels = list(rows[0].keys())
     head = ''.join(f'<th>{_html_escape(label)}</th>' for label in labels)
     body = ''.join(
         '<tr>' + ''.join(
