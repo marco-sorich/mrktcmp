@@ -30,6 +30,55 @@ A Plotly Dash web application for backtesting across user-defined asset baskets.
 - Python 3.14+
 - A data source (parquet files) accessible via `BASE_URL` — a `master.parquet` catalogue plus one parquet file per asset
 
+## Data Source: Parquet File Format
+
+The app reads two kinds of Parquet files from the directory pointed to by `BASE_URL`
+(either a URL prefix such as `https://host/data` or a local filesystem path such as `/mnt/data`).
+
+### `master.parquet` — asset catalogue
+
+One row per available asset. Loaded once at startup; used to populate asset search dropdowns.
+
+| Column | Type | Description |
+|---|---|---|
+| `symbol` | `str` | Short ticker or identifier shown in the UI (e.g. `AAPL`) |
+| `name` | `str` | Human-readable asset name (e.g. `Apple Inc.`) |
+| `asset_class` | `str` | Category shown as a filter tab (e.g. `stocks`, `crypto`, `etf`) |
+| `filename` | `str` | Name of the per-asset parquet file (e.g. `aapl.parquet`) |
+| `exchange` | `str` | Exchange name used for sorting and display (e.g. `NASDAQ`) |
+| `country` | `str` | *(optional)* Country code or name |
+| `interval` | `str` | *(optional)* Data cadence hint (e.g. `1d`) |
+
+The catalogue is sorted at startup by `asset_class → symbol → exchange`; the order controls
+how assets appear in search results.
+
+### Per-asset parquet files — OHLCV price data
+
+One file per asset, named by the `filename` column in the catalogue. It contains OHLCV columns (`Open`, `High`, `Low`, `Volume`).
+
+| Requirement | Detail |
+|---|---|
+| **Index** | `DatetimeIndex` — timezone-aware or naive (naive is localized to UTC at load time) |
+| **`Open` column** | Daily opening price as a numeric type; `NaN` or non-positive values are treated as missing (no trade placed) |
+| **`High` column** | Daily high price as a numeric type; `NaN` or non-positive values are treated as missing (no trade placed) |
+| **`Low` column** | Daily low price as a numeric type; `NaN` or non-positive values are treated as missing (no trade placed) |
+| **`Close` column** | Daily closing price as a numeric type; `NaN` or non-positive values are treated as missing (no trade placed) |
+| **Cadence** | **Daily** resolution. The backtesting engines are designed for daily data; monthly or intraday files will load but produce incorrect results |
+| **History** | As much history as available — the Risk-Off strategy needs at least 200 trading days of warm-up before the backtest window starts for its SMA signal |
+
+Example minimal structure (pseudo-code):
+
+```
+DatetimeIndex (daily, UTC)   Close
+2020-01-02                   300.35
+2020-01-03                   298.10
+2020-01-06                   301.75
+…
+```
+
+Files are fetched on demand when a user adds an asset to a basket; only the `Close` column is read
+for the date-range slider, and the full file is read when a backtest is run.
+
 ## Setup
 
 1. Install the package with development dependencies:
@@ -37,6 +86,16 @@ A Plotly Dash web application for backtesting across user-defined asset baskets.
    pip install -e ".[dev]"
    ```
    (Dependencies and build metadata are defined in `pyproject.toml`. No separate `requirements*.txt` files exist.)
+   
+   ...or...
+   
+   Install the package with dependencies on production server:
+   ```bash
+   pip install .
+   ```
+   (Dependencies and build metadata are defined in `pyproject.toml`. No separate `requirements*.txt` files exist.)
+   
+   ...or...
 
 2. Set environment variables:
    ```bash
