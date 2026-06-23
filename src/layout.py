@@ -31,7 +31,7 @@ import dash_bootstrap_components as dbc
 
 # _basket_ui builds the full component subtree for a single basket panel
 # (heading, radio buttons, dropdown, add button, item list, and Store).
-from src.components import _basket_ui
+from src.components import _basket_ui, _base_currency_options
 
 # _config provides module-level globals: app_version (from setuptools-scm),
 # and df/assetsClasses (loaded master.parquet).
@@ -85,6 +85,20 @@ def create_layout():
                 'textTransform': 'uppercase',
             }),
         ], style={'marginBottom': '16px', 'borderBottom': '1px solid #e0e0e0', 'paddingBottom': '12px'}),
+
+        # Reporting (base) currency selector. Every asset's prices are converted
+        # into this currency before the backtest, so both baskets are compared on
+        # a common basis. Placed above the baskets because it applies to both.
+        html.Div([
+            html.Label('Base currency:', style={'fontWeight': 'bold', 'marginRight': '8px'}),
+            dcc.Dropdown(
+                id='bt-base-currency',
+                options=[{'label': c, 'value': c} for c in _base_currency_options()],
+                value=_config.default_base_currency,
+                clearable=False,
+                style={'width': '120px'},
+            ),
+        ], style={'display': 'flex', 'alignItems': 'center', 'marginTop': '12px'}),
 
         # Two basket panels side by side using a flex row.
         # gap: 8px adds horizontal space between the panels.

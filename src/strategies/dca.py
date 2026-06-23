@@ -123,7 +123,7 @@ class DCAStrategy(BacktestStrategy):
         return [
             ConfigParam(
                 key='monthly_investment',
-                label='Monthly Investment (€)',
+                label='Monthly Investment',
                 type='float',
                 # Share the module constant from backtest.py so both code paths
                 # always start from the same default value.
@@ -141,6 +141,7 @@ class DCAStrategy(BacktestStrategy):
         end_date: pd.Timestamp,
         df_meta: pd.DataFrame,
         params: dict[str, int | float | str],
+        base_currency: str = 'EUR',
     ) -> tuple[pd.Series | None, dict[str, str] | None, list[OrderRow] | None]:
         # resolve_params merges caller-supplied values with schema defaults so
         # that passing params={} is equivalent to using all declared defaults.
@@ -152,7 +153,7 @@ class DCAStrategy(BacktestStrategy):
         # the requested window so the chosen start/end *months* are fully
         # included regardless of exact trading-day boundaries.
         with log_duration('dca: load_daily_closes'):
-            price_df = load_daily_closes(base_url, filenames, df_meta)
+            price_df = load_daily_closes(base_url, filenames, df_meta, base_currency)
         if price_df.empty:
             return None, None, None
 

@@ -119,6 +119,12 @@ log = logging.getLogger(__name__)
 #   BASE_URL=/mnt/data                  → files at /mnt/data/master.parquet
 base_url = os.getenv("BASE_URL")
 
+# Default reporting (base) currency pre-selected in the GUI dropdown. The user
+# can change it per run; this only sets the initial value. Read from the same
+# BASE_CURRENCY environment variable that backtest.py uses for its function
+# default, so the GUI default and the simulation default never diverge.
+default_base_currency = os.getenv("BASE_CURRENCY", "EUR")
+
 # These two variables hold the loaded data. They are module-level (global)
 # so every callback can read them without passing them as arguments.
 # assetsClasses: list of distinct asset class strings, e.g. ['stocks','crypto']

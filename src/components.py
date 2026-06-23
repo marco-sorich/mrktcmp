@@ -71,6 +71,36 @@ def _get_strategy_options() -> list[dict]:
     ]
 
 
+# Currency codes that must never be offered as a *reporting* currency: blank /
+# placeholder values, and GBp (pence) which is a quote sub-unit, not a currency
+# anyone reports a portfolio in.
+_NON_BASE_CURRENCIES = {'', '0', 'nan', 'None', 'GBp'}
+
+
+def _base_currency_options() -> list[str]:
+    """List the currencies offerable as the portfolio's reporting (base) currency.
+
+    Derived from the catalogue's ``currency`` asset-class rows (the FX pairs):
+    their quote currencies are exactly the set we can convert *into*.  Blank /
+    placeholder codes and GBp (pence) are excluded; the configured default is
+    always included so the dropdown never starts on an absent value.  Falls back
+    to ``[default]`` when no catalogue is loaded.
+
+    Returns
+    -------
+    Sorted list of currency-code strings.
+    """
+    default = _config.default_base_currency
+    codes = {default}
+    df = _config.df
+    if df is not None and 'currency' in df.columns and 'asset_class' in df.columns:
+        fx = df[df['asset_class'] == 'currency']
+        for code in fx['currency'].dropna().astype(str).str.strip().unique():
+            if code not in _NON_BASE_CURRENCIES:
+                codes.add(code)
+    return sorted(codes)
+
+
 def _default_strategy_config() -> dict:
     """Return the config store initial value for the first registered strategy.
 
@@ -404,7 +434,10 @@ _ORDER_COLUMNS = [
     ('value_after', 'Portfolio value', lambda v: f'{v:,.0f}'),
     ('bh_value', 'B&H value', lambda v: f'{v:,.0f}'),
     ('net_deposits', 'Net deposits', lambda v: f'{v:,.0f}'),
-    ('pnl_abs', 'P&L (€)', lambda v: f'{v:+,.0f}'),
+    # The base-currency code is appended to this header at render time by
+    # _order_rows (e.g. 'P&L (USD)'), so the table reflects the selected
+    # reporting currency instead of a hard-coded one.
+    ('pnl_abs', 'P&L', lambda v: f'{v:+,.0f}'),
     ('pnl_pct', 'P&L (%)', lambda v: f'{v * 100:+.1f}%'),
     ('equity_exposure', 'Equity exposure', lambda v: f'{v * 100:.1f}%'),
     ('cash_quote', 'Cash quota', lambda v: f'{v * 100:.1f}%'),
@@ -428,15 +461,20 @@ def _order_asset_columns(orders: list[OrderRow]) -> list[str]:
     return cols
 
 
-def _order_rows(orders: list[OrderRow] | None) -> "list[dict[str, str]] | None":
+def _order_rows(
+    orders: list[OrderRow] | None,
+    base_currency: str = 'EUR',
+) -> "list[dict[str, str]] | None":
     """Format an order log into display rows: a list of {column label: text}.
 
     Each cell uses its _ORDER_COLUMNS formatter (None → em-dash), followed by two
-    extra columns per basket asset: '<symbol> value' (its current worth in €,
-    units × price on that trade day, from ``asset_values``) and '<symbol> price'
-    (the asset's exchange close that day, from ``asset_prices``).  The result is
-    plain JSON (all strings, keyed by the human column label) so it can live in a
-    dcc.Store and feed **both** the rendered table (_order_table_component) and
+    extra columns per basket asset: '<symbol> value' (its current worth in the
+    reporting currency, units × price on that trade day, from ``asset_values``)
+    and '<symbol> price' (the asset's converted close that day, from
+    ``asset_prices``).  The P&L header gets *base_currency* appended (e.g.
+    'P&L (USD)') so the table names the selected reporting currency.  The result
+    is plain JSON (all strings, keyed by the human column label) so it can live in
+    a dcc.Store and feed **both** the rendered table (_order_table_component) and
     the CSV / Excel download (download_orders) from one source.  Returns None when
     there are no orders.
     """
@@ -448,7 +486,10 @@ def _order_rows(orders: list[OrderRow] | None) -> "list[dict[str, str]] | None":
     asset_cols = _order_asset_columns(orders)
     rows: list[dict[str, str]] = []
     for row in orders:
-        cells = {label: ('—' if row[key] is None else fmt(row[key]))
+        # The absolute P&L column names the reporting currency dynamically; all
+        # other fixed columns keep their static label.
+        cells = {(f'P&L ({base_currency})' if key == 'pnl_abs' else label):
+                 ('—' if row[key] is None else fmt(row[key]))
                  for key, label, fmt in _ORDER_COLUMNS}
         values = row.get('asset_values') or {}
         prices = row.get('asset_prices') or {}

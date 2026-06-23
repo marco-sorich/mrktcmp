@@ -138,7 +138,7 @@ class RiskOffStrategy(BacktestStrategy):
         return [
             ConfigParam(
                 key='initial_investment',
-                label='Initial Investment (€)',
+                label='Initial Investment',
                 type='float',
                 # Share the module constant so both code paths start from the
                 # same default lump-sum value.
@@ -172,6 +172,7 @@ class RiskOffStrategy(BacktestStrategy):
         end_date: pd.Timestamp,
         df_meta: pd.DataFrame,
         params: dict[str, int | float | str],
+        base_currency: str = 'EUR',
     ) -> tuple[pd.Series | None, dict[str, str] | None, list[OrderRow] | None]:
         # Merge caller-supplied values with schema defaults.
         resolved = self.resolve_params(params)
@@ -185,7 +186,7 @@ class RiskOffStrategy(BacktestStrategy):
         # 1. Full daily history (no window) → equal-weight index → signals.
         #    The extra history gives the long look-back signals enough warm-up.
         with log_duration('riskoff: load_daily_closes'):
-            daily_df = load_daily_closes(base_url, filenames, df_meta)
+            daily_df = load_daily_closes(base_url, filenames, df_meta, base_currency)
         if daily_df.empty:
             return None, None, None
 

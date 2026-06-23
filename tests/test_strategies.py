@@ -165,7 +165,8 @@ class TestRegistry:
             def get_config_schema(cls) -> list[ConfigParam]:
                 return []
 
-            def run(self, base_url, filenames, start_date, end_date, df_meta, params):
+            def run(self, base_url, filenames, start_date, end_date, df_meta,
+                    params, base_currency='EUR'):
                 return None, None
 
         register(_Dummy)

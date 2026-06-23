@@ -2,7 +2,7 @@ import os
 import pytest
 import numpy as np
 import pandas as pd
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 os.environ.pop("BASE_URL", None)
 
@@ -14,6 +14,7 @@ from src.backtest import (  # noqa: E402
     simulate_lumpsum,
     compute_metrics,
     run_backtest,
+    load_daily_closes,
     get_common_date_range,
     _get_monthly_range,
 )
@@ -538,3 +539,113 @@ class TestGetCommonDateRange:
         assert s is not None
         # Common start must be >= Jul 2020
         assert s >= pd.Timestamp('2020-07-01', tz='UTC')
+
+
+# ---------------------------------------------------------------------------
+# load_daily_closes – FX (trading-currency) conversion
+# ---------------------------------------------------------------------------
+
+# Catalogue with currencies + the FX-pair rows needed to convert into EUR/USD.
+# AAPL/VWRL are quoted in USD, SAP in EUR, IDX carries the '0' placeholder
+# (unknown currency → left unconverted). USDEUR=X is itself addable as an asset.
+FX_META = pd.DataFrame({
+    'asset_class': ['Stocks', 'Stocks', 'ETFs', 'Indices', 'currency', 'currency'],
+    'symbol':      ['AAPL', 'SAP', 'VWRL', 'IDX', 'USDEUR=X', 'EURUSD=X'],
+    'name':        ['Apple', 'SAP SE', 'Vanguard All-World', 'Some Index',
+                    'USD/EUR', 'EUR/USD'],
+    'filename':    ['aapl.parquet', 'sap.parquet', 'vwrl.parquet', 'idx.parquet',
+                    'USDEUR_X.parquet', 'EURUSD_X.parquet'],
+    'currency':    ['USD', 'EUR', 'USD', '0', 'EUR', 'USD'],
+})
+
+# Constant FX rates used by the mock loader.
+_USDEUR = 0.90   # 1 USD = 0.90 EUR
+_EURUSD = 1.20   # 1 EUR = 1.20 USD
+
+
+def _fx_ohlcv(rate, n_days=400, start='2020-01-01'):
+    """Daily OHLCV with a constant FX close (same shape as an asset file)."""
+    idx = pd.date_range(start, periods=n_days, freq='D', tz='UTC')
+    return pd.DataFrame({'Close': rate}, index=idx)
+
+
+def _fx_mock_read(asset_price=100.0):
+    """Build a read_parquet side-effect mapping each filename to its OHLCV."""
+    def _read(path, columns=None):
+        if 'USDEUR' in path:
+            return _fx_ohlcv(_USDEUR)
+        if 'EURUSD' in path:
+            return _fx_ohlcv(_EURUSD)
+        # Any non-FX (asset) file: constant close.
+        return _daily_ohlcv(asset_price)
+    return _read
+
+
+class TestLoadDailyClosesFx:
+    def test_usd_asset_converted_to_eur(self):
+        # AAPL (USD, close 100) × USDEUR (0.90) → 90 EUR on every day.
+        with patch('src.backtest.pd.read_parquet', side_effect=_fx_mock_read()):
+            df = load_daily_closes(BASE_URL, ['aapl.parquet'], FX_META, 'EUR')
+        assert not df.empty
+        assert np.allclose(df['AAPL'].dropna(), 100.0 * _USDEUR)
+
+    def test_base_currency_asset_unchanged(self):
+        # SAP already in EUR → no conversion, raw close preserved.
+        with patch('src.backtest.pd.read_parquet', side_effect=_fx_mock_read()):
+            df = load_daily_closes(BASE_URL, ['sap.parquet'], FX_META, 'EUR')
+        assert np.allclose(df['SAP'].dropna(), 100.0)
+
+    def test_placeholder_currency_left_unconverted(self):
+        # IDX carries the '0' placeholder → treated as unknown, no FX applied.
+        with patch('src.backtest.pd.read_parquet', side_effect=_fx_mock_read()):
+            df = load_daily_closes(BASE_URL, ['idx.parquet'], FX_META, 'EUR')
+        assert np.allclose(df['IDX'].dropna(), 100.0)
+
+    def test_missing_currency_column_is_backward_compatible(self):
+        # SAMPLE_META has no 'currency' column → conversion is skipped entirely.
+        with patch('src.backtest.pd.read_parquet', side_effect=_fx_mock_read()):
+            df = load_daily_closes(BASE_URL, ['aapl.parquet'], SAMPLE_META, 'EUR')
+        assert np.allclose(df['AAPL'].dropna(), 100.0)
+
+    def test_selectable_base_currency(self):
+        # Same USD asset: unchanged when base=USD, converted when base=EUR.
+        with patch('src.backtest.pd.read_parquet', side_effect=_fx_mock_read()):
+            usd = load_daily_closes(BASE_URL, ['aapl.parquet'], FX_META, 'USD')
+            eur = load_daily_closes(BASE_URL, ['aapl.parquet'], FX_META, 'EUR')
+        assert np.allclose(usd['AAPL'].dropna(), 100.0)
+        assert np.allclose(eur['AAPL'].dropna(), 100.0 * _USDEUR)
+
+    def test_fx_rate_read_is_cached_across_assets(self):
+        # AAPL and VWRL are both USD → the USDEUR pair must be read only once
+        # (assets + one shared FX read = 3 reads total).
+        mock = Mock(side_effect=_fx_mock_read())
+        with patch('src.backtest.pd.read_parquet', mock):
+            load_daily_closes(BASE_URL, ['aapl.parquet', 'vwrl.parquet'], FX_META, 'EUR')
+        fx_reads = [c for c in mock.call_args_list if 'USDEUR' in c.args[0]]
+        assert len(fx_reads) == 1
+
+    def test_calendar_misalignment_ffilled_no_nan(self):
+        # FX series covers fewer / offset days than the asset; ffill+bfill must
+        # leave no NaN across the overlap so the converted series is complete.
+        def _read(path, columns=None):
+            if 'USDEUR' in path:                       # short, offset FX calendar
+                return _fx_ohlcv(_USDEUR, n_days=50, start='2020-02-01')
+            return _daily_ohlcv(100.0, n_days=400)
+        with patch('src.backtest.pd.read_parquet', side_effect=_read):
+            df = load_daily_closes(BASE_URL, ['aapl.parquet'], FX_META, 'EUR')
+        assert not df['AAPL'].isna().any()
+        assert np.allclose(df['AAPL'], 100.0 * _USDEUR)
+
+    def test_currency_pair_as_basket_asset(self):
+        # An FX pair added as an asset is converted by its own quote currency:
+        # USDEUR=X is quoted in EUR, so with base=EUR it passes through unchanged
+        # (its close is the rate itself).
+        with patch('src.backtest.pd.read_parquet', side_effect=_fx_mock_read()):
+            df = load_daily_closes(BASE_URL, ['USDEUR_X.parquet'], FX_META, 'EUR')
+        assert np.allclose(df['USDEUR=X'].dropna(), _USDEUR)
+
+    def test_currency_pair_asset_converted_when_base_differs(self):
+        # Same pair (quoted in EUR) with base=USD → converted EUR→USD via EURUSD.
+        with patch('src.backtest.pd.read_parquet', side_effect=_fx_mock_read()):
+            df = load_daily_closes(BASE_URL, ['USDEUR_X.parquet'], FX_META, 'USD')
+        assert np.allclose(df['USDEUR=X'].dropna(), _USDEUR * _EURUSD)

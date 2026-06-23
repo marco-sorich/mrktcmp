@@ -773,11 +773,12 @@ def _downsample_for_plot(series: pd.Series, max_points: int = _MAX_PLOT_POINTS) 
     State('bt-date-store', 'data'),              # ISO date strings, one per slider step
     State('bt-strategy-config-store-a', 'data'),  # selected strategy + params for basket A
     State('bt-strategy-config-store-b', 'data'),  # selected strategy + params for basket B
+    State('bt-base-currency', 'value'),           # reporting currency for both baskets
     prevent_initial_call=True,  # do not run at page load (no data yet)
 )
 @log_time
 def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store,
-                          strategy_config_a, strategy_config_b):
+                          strategy_config_a, strategy_config_b, base_currency):
     """Execute the DCA simulation for both baskets and update the UI.
 
     Steps:
@@ -799,6 +800,8 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     date_store        : list – ISO date strings for each slider position.
     strategy_config_a : dict – {'strategy': name, 'params': {...}} for basket A.
     strategy_config_b : dict – {'strategy': name, 'params': {...}} for basket B.
+    base_currency     : str  – reporting currency both baskets are converted into
+                               (every asset's prices, metrics and order log).
 
     Returns
     -------
@@ -839,6 +842,10 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     filenames_a = [item['filename'] for item in (basket_a or [])]
     filenames_b = [item['filename'] for item in (basket_b or [])]
 
+    # Fall back to the configured default when the dropdown value is somehow
+    # missing (e.g. a stale client state), so conversion always has a target.
+    base_currency = base_currency or _config.default_base_currency
+
     # Resolve strategy instances from the per-basket config stores.  If a
     # store is absent or its 'strategy' key is missing, _get_strategy_instance
     # returns None and run_backtest falls back to the built-in DCA code path.
@@ -853,12 +860,14 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     # success, or (None, None, None) if no data was available for the period.
     portfolio_a, metrics_a, orders_a = (
         run_backtest(_config.base_url, filenames_a, start_date, end_date, _config.df,
-                     strategy=strategy_a, strategy_params=params_a)
+                     strategy=strategy_a, strategy_params=params_a,
+                     base_currency=base_currency)
         if filenames_a else (None, None, None)
     )
     portfolio_b, metrics_b, orders_b = (
         run_backtest(_config.base_url, filenames_b, start_date, end_date, _config.df,
-                     strategy=strategy_b, strategy_params=params_b)
+                     strategy=strategy_b, strategy_params=params_b,
+                     base_currency=base_currency)
         if filenames_b else (None, None, None)
     )
 
@@ -889,7 +898,7 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
         plot_a = _downsample_for_plot(portfolio_a)
         fig.add_trace(go.Scatter(
             x=plot_a.index,       # x-axis: daily dates
-            y=plot_a.round(2),    # y-axis: portfolio value in EUR
+            y=plot_a.round(2),    # y-axis: portfolio value in the base currency
             name='Basket A',
             line=dict(color='#1a56db', width=2),  # blue line, 2px thick
         ))
@@ -917,7 +926,7 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     fig.update_layout(
         title='Portfolio Value',
         xaxis_title='Date',
-        yaxis_title='Portfolio Value (€)',
+        yaxis_title=f'Portfolio Value ({base_currency})',
         # hovermode='x unified': a single tooltip shows values for ALL traces
         # at the hovered x-position instead of separate tooltips per trace.
         hovermode='x unified',
@@ -933,7 +942,8 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     # Format each basket's order log into display rows (None for an empty/failed
     # basket) and stash both in the store.  render_order_table renders the active
     # one into the page; download_orders exports it as CSV / Excel.
-    orders_store = {'a': _order_rows(orders_a), 'b': _order_rows(orders_b)}
+    orders_store = {'a': _order_rows(orders_a, base_currency),
+                    'b': _order_rows(orders_b, base_currency)}
 
     # Server-side cost of assembling the figure + metric/order tables. If this is
     # small but the user still waits seconds, the time is the browser rendering

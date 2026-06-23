@@ -111,7 +111,7 @@ class BuyHoldStrategy(BacktestStrategy):
         return [
             ConfigParam(
                 key='initial_investment',
-                label='Initial Investment (€)',
+                label='Initial Investment',
                 type='float',
                 # Share the module constant from backtest.py so both code paths
                 # always start from the same default value.
@@ -129,6 +129,7 @@ class BuyHoldStrategy(BacktestStrategy):
         end_date: pd.Timestamp,
         df_meta: pd.DataFrame,
         params: dict[str, int | float | str],
+        base_currency: str = 'EUR',
     ) -> tuple[pd.Series | None, dict[str, str] | None, list[OrderRow] | None]:
         # resolve_params merges caller-supplied values with schema defaults so
         # that passing params={} is equivalent to using all declared defaults.
@@ -140,7 +141,7 @@ class BuyHoldStrategy(BacktestStrategy):
         # requested window so the chosen start/end *months* are fully included
         # regardless of exact trading-day boundaries.
         with log_duration('lumpsum: load_daily_closes'):
-            price_df = load_daily_closes(base_url, filenames, df_meta)
+            price_df = load_daily_closes(base_url, filenames, df_meta, base_currency)
         if price_df.empty:
             return None, None, None
 
