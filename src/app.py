@@ -102,6 +102,37 @@ app = dash.Dash(
     external_stylesheets=[dbc.themes.BOOTSTRAP, dbc.icons.BOOTSTRAP],
 )
 
+# add JS listener for theme switching
+app.index_string = '''
+<!DOCTYPE html>
+<html>
+    <head>
+        {%metas%}
+        <title>{%title%}</title>
+        {%favicon%}
+        <script>
+            // Setze Theme BEVOR Bootstrap-CSS geladen wird
+            (function() {
+                const darkModeMediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+                document.documentElement.setAttribute('data-bs-theme', darkModeMediaQuery.matches ? 'dark' : 'light');
+                darkModeMediaQuery.addEventListener('change', (e) => {
+                    document.documentElement.setAttribute('data-bs-theme', e.matches ? 'dark' : 'light');
+                });
+            })();
+        </script>
+        {%css%}
+    </head>
+    <body>
+        {%app_entry%}
+        <footer>
+            {%config%}
+            {%scripts%}
+            {%renderer%}
+        </footer>
+    </body>
+</html>
+'''
+
 # set title of app
 app.title = 'mrktcmp'
 
