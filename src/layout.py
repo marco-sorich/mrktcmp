@@ -60,6 +60,17 @@ def create_layout():
     # adds small side margins. boxSizing=border-box includes padding in the
     # declared width so content does not overflow horizontally.
     return html.Div([
+        # JavaScript for automatic theme change
+        html.Script("""
+            (function() {
+                const darkModeMediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+                const setTheme = (isDark) => {
+                    document.documentElement.setAttribute('data-bs-theme', isDark ? 'dark' : 'light');
+                };
+                setTheme(darkModeMediaQuery.matches);
+                darkModeMediaQuery.addEventListener('change', (e) => setTheme(e.matches));
+            })();
+        """),
 
         # Page heading – main brand name with a subtitle line below.
         html.Header([
