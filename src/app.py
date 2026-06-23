@@ -102,6 +102,9 @@ app = dash.Dash(
     external_stylesheets=[dbc.themes.BOOTSTRAP, dbc.icons.BOOTSTRAP],
 )
 
+# set title of app
+app.title = 'mrktcmp'
+
 # Enable Dash's hot-reload and debug overlay only when DASH_DEBUG=true is set
 # in the environment. In production this should be false to avoid exposing
 # internal error details to users.
