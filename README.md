@@ -11,7 +11,8 @@ A Plotly Dash web application for backtesting across user-defined asset baskets.
   be added to a basket as assets. Each asset's trading currency is shown in the search dropdown and basket list, and the
   order tables show each trade's price in both the trading and the reporting currency plus the FX rate used
 - Date range slider auto-calculated from the overlapping history of all selected assets
-- Pluggable backtesting strategies — each basket can use a different strategy with its own configurable parameters
+- Pluggable backtesting strategies — each basket can use a different strategy with its own configurable parameters; a
+  click on the ⓘ icon next to the strategy selector expands a rich-text description explaining the selected strategy and its parameters
 - **Buy & Hold** (default): a single lump sum (10,000, in the reporting currency) is invested in full on the first
   trading day, split equally across available assets, and then held unchanged until the end — one order, no rebalancing
 - **DCA**: a fixed amount (1,000, in the reporting currency) contributed per basket every month (on each month's last trading day),
