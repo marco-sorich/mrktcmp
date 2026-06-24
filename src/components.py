@@ -71,6 +71,41 @@ def _get_strategy_options() -> list[dict]:
     ]
 
 
+# Currency codes that must never be offered as a *reporting* currency: blank /
+# placeholder values, and GBp (pence) which is a quote sub-unit, not a currency
+# anyone reports a portfolio in.
+_NON_BASE_CURRENCIES = {'', '0', 'nan', 'None', 'GBp'}
+
+# Currency codes that carry no usable information (blank / placeholder).  Unlike
+# _NON_BASE_CURRENCIES this keeps GBp, which *is* a valid trading currency to
+# label an asset's price column with (it just cannot be a reporting currency).
+_BLANK_CURRENCIES = {'', '0', 'nan', 'None'}
+
+
+def _base_currency_options() -> list[str]:
+    """List the currencies offerable as the portfolio's reporting (base) currency.
+
+    Derived from the catalogue's ``currency`` asset-class rows (the FX pairs):
+    their quote currencies are exactly the set we can convert *into*.  Blank /
+    placeholder codes and GBp (pence) are excluded; the configured default is
+    always included so the dropdown never starts on an absent value.  Falls back
+    to ``[default]`` when no catalogue is loaded.
+
+    Returns
+    -------
+    Sorted list of currency-code strings.
+    """
+    default = _config.default_base_currency
+    codes = {default}
+    df = _config.df
+    if df is not None and 'currency' in df.columns and 'asset_class' in df.columns:
+        fx = df[df['asset_class'] == 'currency']
+        for code in fx['currency'].dropna().astype(str).str.strip().unique():
+            if code not in _NON_BASE_CURRENCIES:
+                codes.add(code)
+    return sorted(codes)
+
+
 def _default_strategy_config() -> dict:
     """Return the config store initial value for the first registered strategy.
 
@@ -275,6 +310,21 @@ def _basket_ui(basket_id):
 # Helper: render the visible list of assets currently in a basket
 # ---------------------------------------------------------------------------
 
+def _basket_item_label(item: dict) -> str:
+    """Build one basket row's text: "<symbol> — <name>" plus a currency tag.
+
+    The trading currency (stored on the item when the asset was added) is appended
+    in parentheses — e.g. "AAPL — Apple Inc. (USD)" — so a user scanning a
+    mixed-currency basket can see each asset's currency at a glance.  Blank /
+    unknown currencies (e.g. Indices) get no tag.
+    """
+    label = f"{item['symbol']} — {item['name']}"
+    ccy = str(item.get('currency') or '').strip()
+    if ccy and ccy not in _BLANK_CURRENCIES:
+        label += f" ({ccy})"
+    return label
+
+
 def _render_basket_list(basket_data, basket_id):
     """Build the component tree for the basket's item list.
 
@@ -301,10 +351,10 @@ def _render_basket_list(basket_data, basket_id):
     # build a list by applying expr to each element of an iterable.
     return html.Div([
         html.Div([
-            # Asset label: "AAPL — Apple Inc"
-            # overflow: hidden + textOverflow: ellipsis truncates long names
-            # with '…' instead of overflowing the container.
-            html.Span(f"{item['symbol']} — {item['name']}",
+            # Asset label: "AAPL — Apple Inc (USD)" — the trailing currency tag
+            # (omitted for assets with a blank/unknown currency) tells the user
+            # which currency the asset trades in, since baskets may mix currencies.
+            html.Span(_basket_item_label(item),
                       style={'overflow': 'hidden', 'textOverflow': 'ellipsis'}),
 
             # Remove button with a *pattern-matching ID*.
@@ -404,7 +454,10 @@ _ORDER_COLUMNS = [
     ('value_after', 'Portfolio value', lambda v: f'{v:,.0f}'),
     ('bh_value', 'B&H value', lambda v: f'{v:,.0f}'),
     ('net_deposits', 'Net deposits', lambda v: f'{v:,.0f}'),
-    ('pnl_abs', 'P&L (€)', lambda v: f'{v:+,.0f}'),
+    # The base-currency code is appended to this header at render time by
+    # _order_rows (e.g. 'P&L (USD)'), so the table reflects the selected
+    # reporting currency instead of a hard-coded one.
+    ('pnl_abs', 'P&L', lambda v: f'{v:+,.0f}'),
     ('pnl_pct', 'P&L (%)', lambda v: f'{v * 100:+.1f}%'),
     ('equity_exposure', 'Equity exposure', lambda v: f'{v * 100:.1f}%'),
     ('cash_quote', 'Cash quota', lambda v: f'{v * 100:.1f}%'),
@@ -428,35 +481,105 @@ def _order_asset_columns(orders: list[OrderRow]) -> list[str]:
     return cols
 
 
-def _order_rows(orders: list[OrderRow] | None) -> "list[dict[str, str]] | None":
+def _order_fx_columns(orders: list[OrderRow]) -> list[str]:
+    """Collect the ``{LOCAL}{BASE}=X`` FX pairs used to convert the basket.
+
+    Walks every order's ``fx_rates`` dict and returns the pair symbols in
+    first-seen order, so the order table can add one rate column per currency
+    pair actually used.  Empty when no conversion happened (single-currency
+    basket, base-currency assets, or legacy/test rows without FX context).
+    """
+    cols: list[str] = []
+    for row in orders:
+        for pair in (row.get('fx_rates') or {}):
+            if pair not in cols:
+                cols.append(pair)
+    return cols
+
+
+def _asset_currency_map(filenames: list[str], df_meta) -> dict[str, str]:
+    """Map each basket asset's symbol to its catalogue trading currency.
+
+    Used by the run callback to tell ``_order_rows`` which currency each asset
+    trades in, so the order table can label its trading-currency price column.
+    Returns ``''`` for assets with a blank/unknown currency, and an empty map
+    when the catalogue carries no ``currency`` column (legacy/test fixtures).
+    """
+    out: dict[str, str] = {}
+    if df_meta is None or 'currency' not in getattr(df_meta, 'columns', []):
+        return out
+    for filename in filenames:
+        meta = df_meta[df_meta['filename'] == filename]
+        if not meta.empty:
+            cur = meta.iloc[0]['currency']
+            out[str(meta.iloc[0]['symbol'])] = '' if cur is None else str(cur).strip()
+    return out
+
+
+def _order_rows(
+    orders: list[OrderRow] | None,
+    base_currency: str = 'EUR',
+    asset_currency: "dict[str, str] | None" = None,
+) -> "list[dict[str, str]] | None":
     """Format an order log into display rows: a list of {column label: text}.
 
-    Each cell uses its _ORDER_COLUMNS formatter (None → em-dash), followed by two
-    extra columns per basket asset: '<symbol> value' (its current worth in €,
-    units × price on that trade day, from ``asset_values``) and '<symbol> price'
-    (the asset's exchange close that day, from ``asset_prices``).  The result is
-    plain JSON (all strings, keyed by the human column label) so it can live in a
-    dcc.Store and feed **both** the rendered table (_order_table_component) and
-    the CSV / Excel download (download_orders) from one source.  Returns None when
-    there are no orders.
+    Each cell uses its _ORDER_COLUMNS formatter (None → em-dash), followed by the
+    dynamic per-asset columns and, last, one column per FX pair used to convert
+    the basket.  For each basket asset there is a '<symbol> value' column (its
+    worth in the reporting currency, from ``asset_values``) and its price
+    column(s): when the asset trades in a currency *other* than the reporting one
+    (looked up in *asset_currency*) both the trading-currency quote
+    '<symbol> price (<local>)' (from ``asset_prices_local``) and the converted
+    '<symbol> price (<base>)' (from ``asset_prices``) are shown; otherwise a single
+    price column is shown ('<symbol> price (<base>)' when the currency is known and
+    equals the base, or a plain '<symbol> price' when it is unknown).  Finally a
+    '<{LOCAL}{BASE}=X>' column per affected pair shows the rate each trade was
+    converted at (from ``fx_rates``).  The P&L header gets *base_currency* appended
+    (e.g. 'P&L (USD)') so the table names the selected reporting currency.  The
+    result is plain JSON (all strings, keyed by the human column label) so it can
+    live in a dcc.Store and feed **both** the rendered table
+    (_order_table_component) and the CSV / Excel download (download_orders) from
+    one source.  Returns None when there are no orders.
     """
     if not orders:
         return None
-    # The per-asset columns are dynamic (two per basket asset), so they are
-    # appended after the fixed _ORDER_COLUMNS in the basket's asset order, each
-    # asset's value column immediately followed by its price column.
+    asset_currency = asset_currency or {}
+    # The per-asset columns are dynamic, appended after the fixed _ORDER_COLUMNS in
+    # the basket's asset order (value then price), and the FX-pair rate columns
+    # come last so the conversion inputs sit together at the right of the table.
     asset_cols = _order_asset_columns(orders)
+    fx_cols = _order_fx_columns(orders)
     rows: list[dict[str, str]] = []
     for row in orders:
-        cells = {label: ('—' if row[key] is None else fmt(row[key]))
+        # The absolute P&L column names the reporting currency dynamically; all
+        # other fixed columns keep their static label.
+        cells = {(f'P&L ({base_currency})' if key == 'pnl_abs' else label):
+                 ('—' if row[key] is None else fmt(row[key]))
                  for key, label, fmt in _ORDER_COLUMNS}
         values = row.get('asset_values') or {}
-        prices = row.get('asset_prices') or {}
+        base_prices = row.get('asset_prices') or {}
+        local_prices = row.get('asset_prices_local') or {}
+        fx_rates = row.get('fx_rates') or {}
         for symbol in asset_cols:
             v = values.get(symbol)
             cells[f'{symbol} value'] = '—' if v is None else f'{v:,.0f}'
-            p = prices.get(symbol)
-            cells[f'{symbol} price'] = '—' if p is None else f'{p:,.2f}'
+            base_p = base_prices.get(symbol)
+            base_cell = '—' if base_p is None else f'{base_p:,.2f}'
+            local = str(asset_currency.get(symbol, '')).strip()
+            if local and local not in _BLANK_CURRENCIES and local != base_currency:
+                # Asset trades in another currency → show both quotes side by side.
+                local_p = local_prices.get(symbol)
+                cells[f'{symbol} price ({local})'] = '—' if local_p is None else f'{local_p:,.2f}'
+                cells[f'{symbol} price ({base_currency})'] = base_cell
+            elif local and local not in _BLANK_CURRENCIES:
+                # Currency known and already the base currency → one labelled column.
+                cells[f'{symbol} price ({base_currency})'] = base_cell
+            else:
+                # Unknown/blank currency (e.g. an Index) → an unlabelled price column.
+                cells[f'{symbol} price'] = base_cell
+        for pair in fx_cols:
+            r = fx_rates.get(pair)
+            cells[pair] = '—' if r is None else f'{r:,.4f}'
         rows.append(cells)
     return rows
 

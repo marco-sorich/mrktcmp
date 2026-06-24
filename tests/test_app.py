@@ -19,7 +19,9 @@ from src.callbacks.backtesting import (   # noqa: E402
 )
 from src.components import (  # noqa: E402
     _render_basket_list, _metrics_table, _order_rows, _order_table_component,
+    _base_currency_options, _asset_currency_map, _basket_item_label,
 )
+from src.callbacks.backtesting import _asset_option_label  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -267,6 +269,23 @@ _ORDERS_STUB = [{
     'period_return': None,
 }]
 
+# A foreign-currency variant: AAPL trades in USD, so the row carries the local
+# (trading-currency) close and the day's FX rate alongside the converted close,
+# exercising the order table's split price + FX-pair columns.
+_ORDERS_STUB_FX = [{
+    **_ORDERS_STUB[0],
+    'asset_values': {'AAPL': 1000.0},
+    'asset_prices': {'AAPL': 135.0},        # converted close (base = EUR)
+    'asset_prices_local': {'AAPL': 150.0},  # trading-currency close (USD)
+    'fx_rates': {'USDEUR=X': 0.90},
+}]
+
+# Same, but the FX rate is missing for that row (→ em-dash in the rate column).
+_ORDERS_STUB_FX_NO_RATE = [{
+    **_ORDERS_STUB_FX[0],
+    'fx_rates': {'USDEUR=X': None},
+}]
+
 BASKET_A = [BASKET_ITEM_AAPL]
 BASKET_B = [BASKET_ITEM_GOOGL]
 
@@ -281,7 +300,7 @@ _STRATEGY_CFG = {'strategy': 'DCA', 'params': {'monthly_investment': 1000.0}}
 class TestRunBacktestCallback:
     def test_both_baskets_empty_returns_status_message(self):
         _, style, _, status, _ = run_backtest_callback(
-            1, [], [], _SLIDER_VAL, _DATE_STORE, None, None)
+            1, [], [], _SLIDER_VAL, _DATE_STORE, None, None, 'EUR')
         assert 'basket' in status
         assert style['display'] == 'none'
 
@@ -289,7 +308,7 @@ class TestRunBacktestCallback:
         with patch.object(config_module, 'base_url', None), \
              patch.object(config_module, 'df', SAMPLE_DF):
             _, style, _, status, _ = run_backtest_callback(
-                1, BASKET_A, [], _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
+                1, BASKET_A, [], _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG, 'EUR')
         assert 'data source' in status
         assert style['display'] == 'none'
 
@@ -297,7 +316,7 @@ class TestRunBacktestCallback:
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF):
             _, style, _, status, _ = run_backtest_callback(
-                1, BASKET_A, [], _SLIDER_VAL, [], _STRATEGY_CFG, _STRATEGY_CFG)
+                1, BASKET_A, [], _SLIDER_VAL, [], _STRATEGY_CFG, _STRATEGY_CFG, 'EUR')
         assert 'date range' in status.lower()
         assert style['display'] == 'none'
 
@@ -306,7 +325,7 @@ class TestRunBacktestCallback:
              patch.object(config_module, 'df', SAMPLE_DF), \
              patch('src.callbacks.backtesting.run_backtest', return_value=(None, None, None)):
             _, style, _, status, _ = run_backtest_callback(
-                1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
+                1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG, 'EUR')
         assert style['display'] == 'none'
         assert 'No data' in status
 
@@ -316,7 +335,7 @@ class TestRunBacktestCallback:
              patch('src.callbacks.backtesting.run_backtest',
                    return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _ORDERS_STUB)):
             _, style, _, _, _ = run_backtest_callback(
-                1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
+                1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG, 'EUR')
         assert style['display'] == 'block'
 
     def test_successful_run_returns_plotly_figure(self):
@@ -325,7 +344,7 @@ class TestRunBacktestCallback:
              patch('src.callbacks.backtesting.run_backtest',
                    return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _ORDERS_STUB)):
             fig, _, _, _, _ = run_backtest_callback(
-                1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
+                1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG, 'EUR')
         assert isinstance(fig, go.Figure)
 
     def test_successful_run_populates_orders_store(self):
@@ -334,7 +353,7 @@ class TestRunBacktestCallback:
              patch('src.callbacks.backtesting.run_backtest',
                    return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _ORDERS_STUB)):
             *_, orders_store = run_backtest_callback(
-                1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG)
+                1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, _STRATEGY_CFG, 'EUR')
         # Both baskets ran → the store carries each basket's display rows.
         assert orders_store['a'][0]['Buy/Sell'] == 'Buy'
         assert orders_store['b'][0]['Buy/Sell'] == 'Buy'
@@ -345,7 +364,7 @@ class TestRunBacktestCallback:
              patch('src.callbacks.backtesting.run_backtest',
                    return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _ORDERS_STUB)):
             fig, style, _, status, orders_store = run_backtest_callback(
-                1, BASKET_A, [], _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, None)
+                1, BASKET_A, [], _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, None, 'EUR')
         assert style['display'] == 'block'
         assert 'complete' in status
         # Basket B was empty → its stored rows are None (placeholder on render).
@@ -505,6 +524,48 @@ class TestRenderBasketList:
         assert 'AAPL' in rendered
         assert 'Apple Inc' in rendered
 
+    def test_currency_tag_appears_when_present(self):
+        item = {**BASKET_ITEM_AAPL, 'currency': 'USD'}
+        assert 'AAPL — Apple Inc (USD)' in str(_render_basket_list([item], 'a'))
+
+    def test_blank_currency_gets_no_tag(self):
+        # Blank/placeholder currency → no parenthesised tag, just symbol — name.
+        assert _basket_item_label({**BASKET_ITEM_AAPL, 'currency': '0'}) == 'AAPL — Apple Inc'
+        assert _basket_item_label(BASKET_ITEM_AAPL) == 'AAPL — Apple Inc'  # key absent
+        assert _basket_item_label({**BASKET_ITEM_AAPL, 'currency': 'GBp'}) == 'AAPL — Apple Inc (GBp)'
+
+
+# ---------------------------------------------------------------------------
+# _asset_currency_map / _asset_option_label
+# ---------------------------------------------------------------------------
+
+class TestAssetCurrencyMap:
+    def test_maps_symbol_to_currency(self):
+        assert _asset_currency_map(['aapl.parquet', 'a.parquet'], _CURRENCY_DF) == {
+            'AAPL': 'USD', 'USDEUR=X': 'EUR',
+        }
+
+    def test_no_currency_column_returns_empty(self):
+        df = pd.DataFrame({'symbol': ['AAPL'], 'filename': ['aapl.parquet']})
+        assert _asset_currency_map(['aapl.parquet'], df) == {}
+
+    def test_none_catalogue_returns_empty(self):
+        assert _asset_currency_map(['aapl.parquet'], None) == {}
+
+
+class TestAssetOptionLabel:
+    def test_label_includes_currency_tag(self):
+        row = pd.Series({'symbol': 'AAPL', 'name': 'Apple', 'interval': '1d', 'currency': 'USD'})
+        assert _asset_option_label(row) == 'AAPL — Apple (1d · USD)'
+
+    def test_label_drops_blank_currency(self):
+        row = pd.Series({'symbol': 'IDX', 'name': 'Index', 'interval': '1d', 'currency': '0'})
+        assert _asset_option_label(row) == 'IDX — Index (1d)'
+
+    def test_label_without_currency_column(self):
+        row = pd.Series({'symbol': 'AAPL', 'name': 'Apple', 'interval': '1d'})
+        assert _asset_option_label(row) == 'AAPL — Apple (1d)'
+
 
 # ---------------------------------------------------------------------------
 # _metrics_table
@@ -560,12 +621,74 @@ class TestOrderTable:
         assert row['Date'] == '2022-01-31'         # date formatted as YYYY-MM-DD
         assert row['Inflow'] == '1,000'            # currency uses a thousands separator
         assert row['Period return'] == '—'         # period_return is None → em-dash
-        # Dynamic per-asset columns: a value (€, no decimals) and a price (2 dp)
+        # Dynamic per-asset columns: a value (no decimals) and a price (2 dp)
         # column per basket asset.
         assert row['AAPL value'] == '600'
         assert row['MSFT value'] == '400'
         assert row['AAPL price'] == '150.00'
         assert row['MSFT price'] == '250.00'
+
+    def test_pnl_header_names_selected_base_currency(self):
+        # The P&L column header carries the chosen reporting currency code.
+        assert 'P&L (EUR)' in _order_rows(_ORDERS_STUB)[0]          # default
+        assert 'P&L (USD)' in _order_rows(_ORDERS_STUB, 'USD')[0]   # explicit
+        assert 'P&L (€)' not in _order_rows(_ORDERS_STUB, 'USD')[0]
+
+    def test_unknown_currency_keeps_single_plain_price_column(self):
+        # No asset_currency given → currency unknown → one unlabelled price column
+        # (the back-compatible behaviour, exercised by the stub-based tests above).
+        row = _order_rows(_ORDERS_STUB)[0]
+        assert 'AAPL price' in row
+        assert 'AAPL price (EUR)' not in row
+
+    def test_base_currency_asset_gets_single_labelled_price_column(self):
+        # Asset trades in the reporting currency → one column labelled with it.
+        row = _order_rows(_ORDERS_STUB, 'EUR', {'AAPL': 'EUR', 'MSFT': 'EUR'})[0]
+        assert row['AAPL price (EUR)'] == '150.00'
+        assert 'AAPL price (USD)' not in row
+
+    def test_foreign_currency_asset_shows_both_price_columns(self):
+        # AAPL trades in USD, reporting in EUR → both quotes side by side.
+        rows = _order_rows(_ORDERS_STUB_FX, 'EUR', {'AAPL': 'USD'})
+        row = rows[0]
+        assert row['AAPL price (USD)'] == '150.00'   # trading-currency close
+        assert row['AAPL price (EUR)'] == '135.00'   # converted close (150 × 0.90)
+        # The FX pair used for the conversion gets its own rate column, last.
+        assert row['USDEUR=X'] == '0.9000'
+        assert list(row).index('USDEUR=X') == len(row) - 1
+
+    def test_missing_fx_rate_renders_em_dash(self):
+        rows = _order_rows(_ORDERS_STUB_FX_NO_RATE, 'EUR', {'AAPL': 'USD'})
+        assert rows[0]['USDEUR=X'] == '—'
+
+
+# ---------------------------------------------------------------------------
+# _base_currency_options
+# ---------------------------------------------------------------------------
+
+_CURRENCY_DF = pd.DataFrame({
+    'asset_class': ['Stocks', 'currency', 'currency', 'currency', 'currency'],
+    'symbol': ['AAPL', 'USDEUR=X', 'GBPEUR=X', 'EURGBp=X', 'BADxx=X'],
+    'name': ['Apple', 'USD/EUR', 'GBP/EUR', 'EUR/GBp', 'BAD/xx'],
+    'filename': ['aapl.parquet', 'a.parquet', 'b.parquet', 'c.parquet', 'd.parquet'],
+    'currency': ['USD', 'EUR', 'EUR', 'GBp', '0'],
+})
+
+
+class TestBaseCurrencyOptions:
+    def test_options_from_quote_currencies_sorted_with_default(self):
+        with patch.object(config_module, 'df', _CURRENCY_DF), \
+             patch.object(config_module, 'default_base_currency', 'EUR'):
+            opts = _base_currency_options()
+        assert opts == sorted(opts)        # sorted
+        assert 'EUR' in opts               # the default is always present
+        # GBp (pence sub-unit) and the '0' placeholder are excluded.
+        assert 'GBp' not in opts and '0' not in opts
+
+    def test_fallback_to_default_without_catalogue(self):
+        with patch.object(config_module, 'df', None), \
+             patch.object(config_module, 'default_base_currency', 'USD'):
+            assert _base_currency_options() == ['USD']
 
     def test_component_renders_rows_as_native_table(self):
         from dash import dcc, html
@@ -579,7 +702,9 @@ class TestOrderTable:
         assert '<th>Date</th>' in markup and '<th>Buy/Sell</th>' in markup
         assert '<td>Buy</td>' in markup and '<td>2022-01-31</td>' in markup
         assert '<td>—</td>' in markup              # None → em-dash
-        assert 'P&amp;L (€)' in markup             # '&' in the header is HTML-escaped
+        # '&' in the header is HTML-escaped; the reporting currency (default EUR)
+        # is appended to the P&L header by _order_rows.
+        assert 'P&amp;L (EUR)' in markup
         # Dynamic per-asset value + price columns render as their own header + cell.
         assert '<th>AAPL value</th>' in markup and '<th>AAPL price</th>' in markup
         assert '<th>MSFT value</th>' in markup and '<th>MSFT price</th>' in markup

@@ -17,14 +17,18 @@ import pandas as pd
 
 from src.backtest import (
     INITIAL_INVESTMENT,
+    FxColumns,
     OrderEvent,
     OrderRow,
     _asset_prices,
+    _asset_prices_local,
     _asset_values,
+    _fx_rate_values,
     _portfolio_value,
     _rebalance_to_target,
     _window_by_month,
     build_equal_weight_index,
+    build_fx_columns,
     build_order_log,
     compute_metrics,
     compute_riskoff_signals,
@@ -40,6 +44,7 @@ def _riskoff_order_events(
     price_df: pd.DataFrame,
     target_fraction: pd.Series,
     initial_investment: float = INITIAL_INVESTMENT,
+    fx: FxColumns | None = None,
 ) -> list[OrderEvent]:
     """Record one OrderEvent per Risk-Off rebalance (each time the target changes).
 
@@ -57,6 +62,9 @@ def _riskoff_order_events(
     target_fraction    – per-day target invested fraction (0..1); reindexed onto
                          price_df exactly as simulate_riskoff does.
     initial_investment – one-off lump sum held as cash at the start.
+    fx                 – optional FX context (see backtest.FxColumns); when given,
+                         each event also carries the trading-currency quote and the
+                         per-pair FX rates so the order table can show conversions.
 
     Returns
     -------
@@ -66,6 +74,11 @@ def _riskoff_order_events(
         return []
 
     assert isinstance(price_df.index, pd.DatetimeIndex)
+
+    # FX side-tables (empty when no conversion applies) used to add the
+    # trading-currency price and per-pair rate columns to each order event.
+    asset_rate = fx.asset_rate if fx else {}
+    pair_rate = fx.pair_rate if fx else {}
 
     holdings: dict[str, float] = {str(col): 0.0 for col in price_df.columns}
     cash = initial_investment
@@ -98,15 +111,18 @@ def _riskoff_order_events(
         holdings, cash, _ = _rebalance_to_target(holdings, cash, prices, frac)
         current = frac
 
+        date = change_rows.index[i]
         events.append(OrderEvent(
-            date=change_rows.index[i],
+            date=date,
             side=side,
             value_before=value_before,
             inflow=0.0,
             assets_after=_portfolio_value(holdings, 0.0, prices),
             cash_after=cash,
             asset_values=_asset_values(holdings, prices),  # per-asset worth
-            asset_prices=_asset_prices(prices),            # per-asset close price
+            asset_prices=_asset_prices(prices),            # per-asset close (base ccy)
+            asset_prices_local=_asset_prices_local(prices, asset_rate, date),  # trading-ccy close
+            fx_rates=_fx_rate_values(pair_rate, date),     # per-pair FX rate this day
         ))
 
     return events
@@ -138,7 +154,7 @@ class RiskOffStrategy(BacktestStrategy):
         return [
             ConfigParam(
                 key='initial_investment',
-                label='Initial Investment (€)',
+                label='Initial Investment',
                 type='float',
                 # Share the module constant so both code paths start from the
                 # same default lump-sum value.
@@ -172,6 +188,7 @@ class RiskOffStrategy(BacktestStrategy):
         end_date: pd.Timestamp,
         df_meta: pd.DataFrame,
         params: dict[str, int | float | str],
+        base_currency: str = 'EUR',
     ) -> tuple[pd.Series | None, dict[str, str] | None, list[OrderRow] | None]:
         # Merge caller-supplied values with schema defaults.
         resolved = self.resolve_params(params)
@@ -185,7 +202,7 @@ class RiskOffStrategy(BacktestStrategy):
         # 1. Full daily history (no window) → equal-weight index → signals.
         #    The extra history gives the long look-back signals enough warm-up.
         with log_duration('riskoff: load_daily_closes'):
-            daily_df = load_daily_closes(base_url, filenames, df_meta)
+            daily_df = load_daily_closes(base_url, filenames, df_meta, base_currency)
         if daily_df.empty:
             return None, None, None
 
@@ -204,6 +221,10 @@ class RiskOffStrategy(BacktestStrategy):
 
         # Forward-fill short price gaps (≤5 trading days, ≈ one week), as in DCA.
         price_df = price_df.ffill(limit=5)
+
+        # FX side-tables aligned to the windowed index, so the order log can show
+        # each asset's trading-currency price and the rate it was converted at.
+        fx = build_fx_columns(base_url, filenames, df_meta, base_currency, price_df.index)
 
         # 3. Daily target invested fraction = positive signals / 3, aligned to
         #    the windowed price index. Days before any signal history (NaN) map
@@ -225,7 +246,7 @@ class RiskOffStrategy(BacktestStrategy):
             # present from the start, so it seeds net-deposits as initial_capital.
             order_log = (
                 build_order_log(
-                    _riskoff_order_events(price_df, target_fraction, initial_investment),
+                    _riskoff_order_events(price_df, target_fraction, initial_investment, fx),
                     initial_capital=initial_investment,
                     bh_index=bh_index,
                 )

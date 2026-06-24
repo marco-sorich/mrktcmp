@@ -5,11 +5,16 @@ A Plotly Dash web application for backtesting across user-defined asset baskets.
 ## Features
 
 - Build two asset baskets (Basket A and Basket B) from any combination of assets
+- **Multi-currency support**: pick a reporting (base) currency from a dropdown (default EUR); every asset's prices are
+  converted from its quote currency into that base currency using daily FX rates before the backtest, so baskets mixing
+  USD/GBP/EUR/… assets are compared on a common basis (the standard *unhedged* approach). Currency pairs can themselves
+  be added to a basket as assets. Each asset's trading currency is shown in the search dropdown and basket list, and the
+  order tables show each trade's price in both the trading and the reporting currency plus the FX rate used
 - Date range slider auto-calculated from the overlapping history of all selected assets
 - Pluggable backtesting strategies — each basket can use a different strategy with its own configurable parameters
-- **Buy & Hold** (default): a single lump sum (10,000 €) is invested in full on the first trading day, split equally
-  across available assets, and then held unchanged until the end — one order, no rebalancing
-- **DCA**: a fixed amount (1,000 €) contributed per basket every month (on each month's last trading day),
+- **Buy & Hold** (default): a single lump sum (10,000, in the reporting currency) is invested in full on the first
+  trading day, split equally across available assets, and then held unchanged until the end — one order, no rebalancing
+- **DCA**: a fixed amount (1,000, in the reporting currency) contributed per basket every month (on each month's last trading day),
   split equally across available assets; the portfolio is valued on every trading day
 - **Risk-Off Signale**: a one-off lump sum is held as cash and tactically shifted between the basket and cash.
   Three market signals are evaluated on the basket as a whole *every day* — 200-day trend, year-to-date return, and the
@@ -20,11 +25,14 @@ A Plotly Dash web application for backtesting across user-defined asset baskets.
   daily-correct
 - Side-by-side performance metrics: Total Return, CAGR, Sharpe Ratio, Max. Drawdown, Volatility, Calmar Ratio, and more
 - Per-order transaction tables (one per basket, switchable via tabs) listing every buy/sell with its date, side,
-  pre-/post-trade value, inflow, asset/cash split, running net deposits, P&L (€ and %), equity exposure, cash quota,
-  and period return, followed by two extra columns per basket asset showing that asset's current worth (units × price,
-  €) and its exchange close (the Börsenkurs) on each trade row. The table fills ~80 % of the viewport height with a
+  pre-/post-trade value, inflow, asset/cash split, running net deposits, P&L (absolute in the reporting currency, and %),
+  equity exposure, cash quota, and period return. Then, per basket asset, a value column (units × price, in the reporting
+  currency) and its price column(s): for an asset that trades in a non-reporting currency **both** the trading-currency
+  close and the converted reporting-currency close are shown side by side; for an asset already in the reporting currency
+  a single price column is shown. Finally one column per currency pair (`{LOCAL}{BASE}=X`) used in the basket, giving the
+  exact FX rate each trade was converted at. The table fills ~80 % of the viewport height with a
   sticky header row and sticky first column for easy scanning of long logs, and a download button (next to the
-  "Orders" heading) exports the active basket's table (per-asset value + price columns included) as **CSV** or
+  "Orders" heading) exports the active basket's table (per-asset value/price + FX-pair columns included) as **CSV** or
   **Excel (.xlsx)**
 
 ## Requirements
@@ -50,6 +58,12 @@ One row per available asset. Loaded once at startup; used to populate asset sear
 | `exchange` | `str` | Exchange name used for sorting and display (e.g. `NASDAQ`) |
 | `country` | `str` | *(optional)* Country code or name |
 | `interval` | `str` | *(optional)* Data cadence hint (e.g. `1d`) |
+| `currency` | `str` | *(optional)* The currency the asset's prices are quoted in (e.g. `USD`, `EUR`, `GBp`). Drives FX conversion into the reporting currency. Blank/`0`/unknown → left unconverted |
+
+To enable multi-currency comparison, the catalogue may also include **FX-pair rows** with `asset_class == 'currency'`:
+one row per downloadable currency pair, with `symbol` like `USDEUR=X`, `name` like `USD/EUR`, `currency` set to the
+pair's *quote* currency (`EUR`), and a `filename` pointing at that pair's OHLCV file. Conversion multiplies an asset's
+local-currency close by the `{LOCAL}{BASE}=X` pair's daily close (units of base per unit of local).
 
 The catalogue is sorted at startup by `asset_class → symbol → exchange`; the order controls
 how assets appear in search results.
@@ -109,6 +123,9 @@ for the date-range slider, and the full file is read when a backtest is run.
 
    # optional: (de-)activate dev tools of Plotly/Dash (default: false)
    DASH_DEBUG=false
+
+   # optional: default reporting (base) currency pre-selected in the GUI (default: EUR)
+   BASE_CURRENCY=EUR
    ```
 
 ## Running

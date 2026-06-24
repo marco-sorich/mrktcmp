@@ -140,19 +140,22 @@ class BacktestStrategy(ABC):
         end_date: pd.Timestamp,
         df_meta: pd.DataFrame,
         params: dict[str, int | float | str],
+        base_currency: str = 'EUR',
     ) -> tuple[pd.Series | None, dict[str, str] | None, list[OrderRow] | None]:
         """Execute the backtest for one basket and return results.
 
         Parameters
         ----------
-        base_url   – root URL/path where the per-asset parquet files are hosted.
-        filenames  – parquet filenames for every asset in this basket.
-        start_date – first month-end date to include (inclusive).
-        end_date   – last month-end date to include (inclusive).
-        df_meta    – master metadata table (symbol, name, filename, …).
-        params     – user-supplied config values, keyed by ConfigParam.key.
-                     May be empty; call self.resolve_params(params) at the start
-                     of run() to merge in the declared defaults for missing keys.
+        base_url      – root URL/path where the per-asset parquet files are hosted.
+        filenames     – parquet filenames for every asset in this basket.
+        start_date    – first month-end date to include (inclusive).
+        end_date      – last month-end date to include (inclusive).
+        df_meta       – master metadata table (symbol, name, filename, …).
+        params        – user-supplied config values, keyed by ConfigParam.key.
+                        May be empty; call self.resolve_params(params) at the start
+                        of run() to merge in the declared defaults for missing keys.
+        base_currency – reporting currency every asset is converted into before
+                        simulation; forward it to load_daily_closes().
 
         Returns
         -------

@@ -17,6 +17,11 @@
 # logger (instead of print) lets callers control output format and level.
 import logging
 
+# os: read the BASE_CURRENCY environment variable so the default reporting
+# currency can be configured without code changes (mirrors how the GUI default
+# is sourced in config.py — both read the same env var, one source of truth).
+import os
+
 # time: high-resolution timers (perf_counter) used to log how long the parquet
 # reads take — these are the network-I/O hot spots, invisible to @log_time.
 import time
@@ -25,7 +30,7 @@ import time
 # imports from backtest.py, so importing BacktestStrategy here unconditionally
 # would create a cycle.  Under TYPE_CHECKING the import is only evaluated by
 # static analysis tools (mypy), not at runtime.
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, NamedTuple, NotRequired, TypedDict
 if TYPE_CHECKING:
     from src.strategies.base import BacktestStrategy
 
@@ -45,6 +50,15 @@ log = logging.getLogger(__name__)
 # into each basket every month. Defined as a module constant so it is easy
 # to find and change in one place.
 MONTHLY_INVESTMENT = 1000.0
+
+# The default *reporting* (base) currency every asset's prices are converted
+# into before simulation.  The GUI lets the user pick another currency at run
+# time (the chosen value is threaded down as the `base_currency` argument); this
+# constant is only the fallback used when no explicit value is supplied (e.g. by
+# the test suite or the legacy run_backtest entry point).  Configurable via the
+# BASE_CURRENCY environment variable so deployments can change it without code
+# edits — config.py reads the same variable for the dropdown's default.
+BASE_CURRENCY = os.getenv('BASE_CURRENCY', 'EUR')
 
 # The one-off lump sum (in the portfolio's base currency, e.g. EUR) made
 # available as cash at the very start of the Risk-Off strategy.  Unlike DCA
@@ -107,15 +121,66 @@ def _asset_prices(prices: pd.Series) -> dict[str, float | None]:
 
     The companion of ``_asset_values``: where that reports each asset's *worth*
     (units × price), this reports the bare *price* — the asset's exchange close
-    that day — so the order tables can show, alongside the value, the quote at
-    which the trade was struck.  A missing price (NaN) maps to ``None`` (rendered
-    as an em-dash); the price is reported for every column regardless of whether
-    any units are held, so it stays meaningful even after a position is sold to 0.
+    that day, in the **reporting (base) currency** (prices arrive already
+    converted, see ``load_daily_closes``) — so the order tables can show, alongside
+    the value, the quote at which the trade was struck.  A missing price (NaN) maps
+    to ``None`` (rendered as an em-dash); the price is reported for every column
+    regardless of whether any units are held, so it stays meaningful even after a
+    position is sold to 0.
     """
     return {
         str(c): (float(p) if pd.notna(p) else None)
         for c, p in prices.items()
     }
+
+
+def _asset_prices_local(
+    prices: pd.Series,
+    asset_rate: dict[str, "pd.Series"],
+    date: pd.Timestamp,
+) -> dict[str, float | None]:
+    """Per-asset close in the asset's own *trading* currency on a trade day.
+
+    The companion of ``_asset_prices`` (which reports the base-currency close):
+    where an FX rate applies — ``asset_rate[symbol]`` gives that pair's daily rate
+    (base units per local unit) and ``date`` selects the trade day — the base
+    close is divided back by the rate to recover the original local-currency
+    close.  Assets already quoted in the base currency (or of unknown currency)
+    have no entry in *asset_rate* and pass through unchanged, so their local and
+    base price coincide.  A missing price (NaN) maps to ``None``, mirroring
+    ``_asset_prices``.
+    """
+    out: dict[str, float | None] = {}
+    for c, p in prices.items():
+        sym = str(c)
+        if pd.isna(p):
+            out[sym] = None
+            continue
+        series = asset_rate.get(sym)
+        rate = series.get(date) if series is not None else None
+        out[sym] = (
+            float(p) / float(rate)
+            if rate is not None and pd.notna(rate) and float(rate) != 0.0
+            else float(p)
+        )
+    return out
+
+
+def _fx_rate_values(
+    pair_rate: dict[str, "pd.Series"], date: pd.Timestamp
+) -> dict[str, float | None]:
+    """The day's FX rate for each affected currency pair, keyed by pair symbol.
+
+    For every ``{LOCAL}{BASE}=X`` pair used to convert one of the basket's
+    currencies, return its rate (base units per local unit) on *date* so the
+    order table can show the exact rate each trade was converted at.  A missing
+    rate (NaN) maps to ``None`` (rendered as an em-dash).
+    """
+    out: dict[str, float | None] = {}
+    for pair, series in pair_rate.items():
+        v = series.get(date)
+        out[pair] = float(v) if v is not None and pd.notna(v) else None
+    return out
 
 
 def _window_by_month(
@@ -171,13 +236,13 @@ def simulate_dca(price_df: pd.DataFrame, monthly_investment: float = MONTHLY_INV
     Parameters
     ----------
     price_df           – daily (or monthly) close prices, one column per asset.
-    monthly_investment – total EUR invested per month across the basket.
+    monthly_investment – total amount (reporting currency) invested per month across the basket.
 
     Returns
     -------
     (portfolio_series, total_invested)
       portfolio_series – portfolio value on every row of price_df.
-      total_invested   – cumulative EUR contributed (months with no data skipped).
+      total_invested   – cumulative amount (reporting currency) contributed (months with no data skipped).
     """
     # Guard the empty case first so the month-end logic below never runs on a
     # non-datetime index (e.g. the RangeIndex of an empty DataFrame).
@@ -228,7 +293,7 @@ def compute_metrics(portfolio: pd.Series, total_invested: float) -> dict[str, st
     Parameters
     ----------
     portfolio      – daily portfolio value over time (DatetimeIndex).
-    total_invested – total EUR deposited throughout the period.
+    total_invested – total amount (reporting currency) deposited throughout the period.
 
     Returns
     -------
@@ -345,12 +410,21 @@ class OrderEvent(TypedDict):
                    0.0 for pure re-allocations such as a Risk-Off rebalance.
     assets_after – worth of the held assets (excluding cash) *after* the trade.
     cash_after   – uninvested cash *after* the trade.
-    asset_values – per-asset worth (units × price, € by symbol) *after* the trade;
+    asset_values – per-asset worth (units × price, reporting currency by symbol) *after* the trade;
                    one entry per basket asset (see ``_asset_values``).  Sums to
                    ``assets_after`` and feeds the order tables' per-asset columns.
     asset_prices – per-asset market price (exchange close, by symbol) on the trade
-                   day (see ``_asset_prices``); the companion quote column shown
-                   next to each asset's value.  NaN prices map to None.
+                   day, in the **reporting (base) currency** (see ``_asset_prices``);
+                   the companion quote column shown next to each asset's value.
+                   NaN prices map to None.
+    asset_prices_local – per-asset close in the asset's own **trading** currency
+                   (see ``_asset_prices_local``); optional, populated only when the
+                   plugin passes FX context so the order table can show the local
+                   quote next to the converted one.  NaN prices map to None.
+    fx_rates     – the trade day's FX rate (base per local) for each affected
+                   ``{LOCAL}{BASE}=X`` pair (see ``_fx_rate_values``); optional,
+                   populated only with FX context so the order table can add one
+                   column per currency pair used to convert the basket.
     """
 
     date: pd.Timestamp
@@ -361,6 +435,8 @@ class OrderEvent(TypedDict):
     cash_after: float
     asset_values: dict[str, float]
     asset_prices: dict[str, float | None]
+    asset_prices_local: NotRequired[dict[str, float | None]]
+    fx_rates: NotRequired[dict[str, float | None]]
 
 
 class OrderRow(TypedDict):
@@ -379,8 +455,10 @@ class OrderRow(TypedDict):
     inflow: float
     assets_after: float
     cash_after: float
-    asset_values: dict[str, float]  # per-asset worth after the trade (€ by symbol)
-    asset_prices: dict[str, float | None]  # per-asset exchange close on the trade day
+    asset_values: dict[str, float]  # per-asset worth after the trade (base ccy by symbol)
+    asset_prices: dict[str, float | None]  # per-asset exchange close (base ccy) on the trade day
+    asset_prices_local: dict[str, float | None]  # per-asset close in the asset's trading currency
+    fx_rates: dict[str, float | None]  # day's FX rate per {LOCAL}{BASE}=X pair used to convert
     value_after: float             # assets_after + cash_after
     bh_value: float | None         # net_deposits × normalised equal-weight B&H index (None when unavailable)
     net_deposits: float            # running sum of all external money put in
@@ -470,6 +548,11 @@ def build_order_log(
             # price column per asset; the generic builder stays strategy-agnostic.
             asset_values=ev.get('asset_values', {}),
             asset_prices=ev.get('asset_prices', {}),
+            # The local-currency quote and per-pair FX rates are optional on the
+            # event (only present when the plugin supplied FX context); default to
+            # {} so the builder stays strategy-agnostic and back-compatible.
+            asset_prices_local=ev.get('asset_prices_local', {}),
+            fx_rates=ev.get('fx_rates', {}),
             value_after=value_after,
             bh_value=bh_value,
             net_deposits=net_deposits,
@@ -504,7 +587,92 @@ def build_order_log(
 # ---------------------------------------------------------------------------
 
 
-def load_daily_closes(base_url: str, filenames: list[str], df_meta: pd.DataFrame) -> pd.DataFrame:
+# Currency values that carry no usable information (blank or the literal '0'
+# placeholder some catalogue rows use). Treated like "unknown currency" → the
+# asset is left unconverted (mostly Indices, which are unitless point values).
+_BLANK_CURRENCIES = {'', '0', 'nan', 'None'}
+
+
+def _fx_rate_series(
+    base_url: str,
+    df_meta: pd.DataFrame,
+    local_ccy: str,
+    base_ccy: str,
+    cache: dict[str, "pd.Series | None"],
+) -> "pd.Series | None":
+    """Return the daily FX rate that converts *local_ccy* prices into *base_ccy*.
+
+    The returned series is the close of the ``{LOCAL}{BASE}=X`` pair, i.e. the
+    number of *base* units per 1 *local* unit, so ``price_local × rate`` yields
+    ``price_base``.
+
+    Returns ``None`` (meaning "no conversion needed/possible") when:
+      * *local_ccy* is blank/unknown (see _BLANK_CURRENCIES) or NaN, or
+      * *local_ccy* already equals *base_ccy*, or
+      * no matching FX pair exists in the catalogue (logged as a WARNING — a
+        safety net only; the shipped data has a direct pair for every asset
+        currency into EUR).
+
+    Parameters
+    ----------
+    base_url   – root URL/path where the parquet files are hosted.
+    df_meta    – master catalogue; its ``currency`` asset-class rows map a pair
+                 name/symbol to the parquet filename to load.
+    local_ccy  – the currency the asset's prices are quoted in.
+    base_ccy   – the desired reporting currency.
+    cache      – per-call dict keyed by *local_ccy* so several assets sharing a
+                 currency trigger only one FX parquet read.
+
+    Returns
+    -------
+    A UTC-indexed, chronologically sorted Series of FX closes, or ``None``.
+    """
+    # Normalise the input: NaN floats and stray whitespace both occur in the wild.
+    local = '' if local_ccy is None else str(local_ccy).strip()
+    if local in _BLANK_CURRENCIES or local == base_ccy:
+        return None
+
+    # Memoised within a single load_daily_closes call (the value may itself be
+    # None when the pair is missing — caching that avoids repeated lookups/warns).
+    if local in cache:
+        return cache[local]
+
+    # Locate the FX pair row: prefer an exact symbol match ({LOCAL}{BASE}=X),
+    # fall back to the human pair name ('{LOCAL}/{BASE}'). Both identify the same
+    # row; either is enough and robust to minor catalogue inconsistencies.
+    fx_rows = df_meta[df_meta['asset_class'] == 'currency']
+    pair_symbol = f'{local}{base_ccy}=X'
+    pair_name = f'{local}/{base_ccy}'
+    match = fx_rows[(fx_rows['symbol'] == pair_symbol) | (fx_rows['name'] == pair_name)]
+    if match.empty:
+        log.warning("No FX pair %s to convert %s prices to %s; leaving unconverted",
+                    pair_symbol, local, base_ccy)
+        cache[local] = None
+        return None
+
+    try:
+        fx_ohlcv = pd.read_parquet(f"{base_url}/{match.iloc[0]['filename']}")
+        rate = fx_ohlcv['Close']
+        # Same UTC normalisation as the asset branch so the indices align.
+        assert isinstance(rate.index, pd.DatetimeIndex)
+        if rate.index.tz is None:
+            rate.index = rate.index.tz_localize('UTC')
+        else:
+            rate.index = rate.index.tz_convert('UTC')
+        rate = rate.dropna().sort_index()
+        cache[local] = None if rate.empty else rate
+    except Exception:
+        log.exception("Failed to load FX pair for %s->%s", local, base_ccy)
+        cache[local] = None
+    return cache[local]
+
+
+def load_daily_closes(
+    base_url: str,
+    filenames: list[str],
+    df_meta: pd.DataFrame,
+    base_currency: str = BASE_CURRENCY,
+) -> pd.DataFrame:
     """Load and combine *daily* close prices for the given asset filenames.
 
     Keeps the full daily resolution and the full available history (no
@@ -514,11 +682,22 @@ def load_daily_closes(base_url: str, filenames: list[str], df_meta: pd.DataFrame
     average and the year-to-date anchor) have enough warm-up data before the
     backtest window begins.
 
+    Every asset's prices are converted from the currency they are quoted in (the
+    catalogue's ``currency`` column) into *base_currency* using the daily FX rate
+    (``_fx_rate_series``), so a basket mixing currencies is valued consistently —
+    the standard *unhedged* base-currency approach.  Assets already quoted in the
+    base currency, or with no/unknown currency (e.g. Indices), pass through
+    unchanged.  FX pairs added as basket assets take this same path, converted by
+    their own quote currency.
+
     Parameters
     ----------
-    base_url  – root URL/path where the parquet files are hosted.
-    filenames – list of parquet file names (e.g. ['aapl.parquet']).
-    df_meta   – master metadata table mapping filenames to symbols/names.
+    base_url      – root URL/path where the parquet files are hosted.
+    filenames     – list of parquet file names (e.g. ['aapl.parquet']).
+    df_meta       – master metadata table mapping filenames to symbols/names and
+                    (when present) currencies, plus the ``currency`` asset-class
+                    FX-pair rows used for conversion.
+    base_currency – reporting currency every series is converted into.
 
     Returns
     -------
@@ -527,6 +706,11 @@ def load_daily_closes(base_url: str, filenames: list[str], df_meta: pd.DataFrame
     """
     # Accumulate individual daily price series here before combining them.
     series = {}
+    # Per-call FX-rate cache: assets sharing a currency reuse one parquet read.
+    fx_cache: dict[str, "pd.Series | None"] = {}
+    # Conversion only runs when the catalogue actually carries currencies; the
+    # test fixtures (and any legacy catalogue) omit the column → unchanged behaviour.
+    has_currency = 'currency' in df_meta.columns
     t_total = time.perf_counter()
 
     for filename in filenames:
@@ -557,6 +741,23 @@ def load_daily_closes(base_url: str, filenames: list[str], df_meta: pd.DataFrame
             # native cadence (NOT resampled to daily — intraday files stay
             # intraday, which is why the row count below matters for speed).
             close = close.dropna()
+
+            # Convert the local-currency close into the reporting currency.
+            if has_currency:
+                rate = _fx_rate_series(
+                    base_url, df_meta, meta.iloc[0]['currency'], base_currency, fx_cache,
+                )
+                if rate is not None:
+                    # Align the FX rate onto the asset's trading days: ffill carries
+                    # the last known rate across weekend/holiday calendar mismatches;
+                    # the trailing bfill back-fills the (small) span where an asset
+                    # predates its FX pair's history using the earliest known rate,
+                    # rather than silently dropping that pre-FX history.
+                    aligned = rate.reindex(close.index, method='ffill').bfill()
+                    close = (close * aligned).dropna()
+                    log.debug('load_daily_closes converted %s: %s->%s',
+                              symbol, meta.iloc[0]['currency'], base_currency)
+
             log.debug('[perf] load_daily_closes read %s: %d rows in %.1fms',
                       filename, len(close), read_ms)
             if not close.empty:
@@ -576,6 +777,83 @@ def load_daily_closes(base_url: str, filenames: list[str], df_meta: pd.DataFrame
               len(filenames), combined.shape[0], combined.shape[1],
               (time.perf_counter() - t_total) * 1000)
     return combined
+
+
+class FxColumns(NamedTuple):
+    """The FX side-tables an order log needs to show each trade's conversion.
+
+    ``load_daily_closes`` converts every price into the reporting currency and
+    keeps only the result, so the order generators — which need to *also* show the
+    untouched trading-currency quote and the rate they were converted at — get
+    that information from here instead.  All three maps are built from the same
+    catalogue rows and aligned with the same calendar logic as the conversion, so
+    ``base_price / rate`` exactly reconstructs the original local price.
+
+    Fields
+    ------
+    asset_local_ccy – symbol → the currency the asset trades in ('' when the
+                      catalogue records none); labels the per-asset price columns.
+    asset_rate      – symbol → the asset's daily FX rate (base units per local
+                      unit) aligned onto the order index; present only for assets
+                      actually converted (absent ⇒ local price = base price).
+    pair_rate       – ``{LOCAL}{BASE}=X`` → that pair's daily rate aligned onto the
+                      order index, one entry per distinct currency converted, so
+                      the order table adds a column per FX pair used in the basket.
+    """
+
+    asset_local_ccy: dict[str, str]
+    asset_rate: dict[str, pd.Series]
+    pair_rate: dict[str, pd.Series]
+
+
+def build_fx_columns(
+    base_url: str,
+    filenames: list[str],
+    df_meta: pd.DataFrame,
+    base_currency: str,
+    index: pd.Index,
+) -> FxColumns:
+    """Build the per-asset and per-pair FX maps the order log renders (see FxColumns).
+
+    For every basket asset this records the trading currency, and — when that
+    currency is converted into *base_currency* — the daily FX rate aligned onto
+    *index* (the windowed order index).  The alignment
+    (``reindex(index, method='ffill').bfill()``) is identical to the one
+    ``load_daily_closes`` applies during conversion, so dividing an asset's
+    base-currency close by this rate exactly recovers the original local close.
+    ``_fx_rate_series`` (and its per-call cache) is reused, so a currency shared by
+    several assets is read only once and the same FX pair maps to a single column.
+
+    Returns an empty FxColumns when the catalogue carries no ``currency`` column
+    (legacy/test fixtures), so the order log simply omits the FX columns.
+    """
+    asset_local_ccy: dict[str, str] = {}
+    asset_rate: dict[str, pd.Series] = {}
+    pair_rate: dict[str, pd.Series] = {}
+    if 'currency' not in df_meta.columns:
+        return FxColumns(asset_local_ccy, asset_rate, pair_rate)
+
+    # Per-call cache shared across assets (mirrors load_daily_closes), so a
+    # currency used by several basket assets triggers a single FX parquet read.
+    fx_cache: dict[str, "pd.Series | None"] = {}
+    for filename in filenames:
+        meta = df_meta[df_meta['filename'] == filename]
+        if meta.empty:
+            continue
+        symbol = str(meta.iloc[0]['symbol'])
+        local_raw = meta.iloc[0]['currency']
+        local = '' if local_raw is None or pd.isna(local_raw) else str(local_raw).strip()
+        asset_local_ccy[symbol] = local
+
+        rate = _fx_rate_series(base_url, df_meta, local_raw, base_currency, fx_cache)
+        if rate is not None:
+            aligned = rate.reindex(index, method='ffill').bfill()
+            asset_rate[symbol] = aligned
+            # One column per distinct converted currency; setdefault dedupes the
+            # pair when several assets share the same trading currency.
+            pair_rate.setdefault(f'{local}{base_currency}=X', aligned)
+
+    return FxColumns(asset_local_ccy, asset_rate, pair_rate)
 
 
 def build_equal_weight_index(daily_df: pd.DataFrame) -> pd.Series:
@@ -996,6 +1274,7 @@ def run_backtest(
     df_meta: pd.DataFrame,
     strategy: "BacktestStrategy | None" = None,
     strategy_params: dict[str, int | float | str] | None = None,
+    base_currency: str = BASE_CURRENCY,
 ) -> tuple[pd.Series | None, dict[str, str] | None, list[OrderRow] | None]:
     """Orchestrate a backtest for a single basket of assets.
 
@@ -1022,6 +1301,8 @@ def run_backtest(
                       remaining parameters are forwarded to strategy.run().
     strategy_params – config values for the strategy plugin (may be empty or
                       None; the plugin falls back to its declared defaults).
+    base_currency   – reporting currency every asset is converted into before
+                      simulation (forwarded to the plugin / load_daily_closes).
 
     Returns
     -------
@@ -1036,7 +1317,7 @@ def run_backtest(
             return None, None, None
         return strategy.run(
             base_url, filenames, start_date, end_date, df_meta,
-            strategy_params or {},
+            strategy_params or {}, base_currency=base_currency,
         )
 
     # Bail out immediately if the caller provided nothing useful.
@@ -1044,7 +1325,7 @@ def run_backtest(
         return None, None, None
 
     # Load all assets' daily close prices into a single aligned DataFrame.
-    price_df = load_daily_closes(base_url, filenames, df_meta)
+    price_df = load_daily_closes(base_url, filenames, df_meta, base_currency)
     if price_df.empty:
         return None, None, None
 
