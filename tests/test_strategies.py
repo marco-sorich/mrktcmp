@@ -14,6 +14,7 @@ from src.strategies.lumpsum import BuyHoldStrategy, _lumpsum_order_events  # noq
 from src.strategies.riskoff import RiskOffStrategy, _riskoff_order_events  # noqa: E402
 from src.backtest import (  # noqa: E402
     INITIAL_INVESTMENT,
+    FxColumns,
     build_equal_weight_index,
     compute_riskoff_signals,
     run_backtest,
@@ -743,6 +744,59 @@ class TestDcaOrderEvents:
         price = pd.DataFrame({'AAPL': 100.0, 'MSFT': 200.0}, index=idx)
         events = _dca_order_events(price, 1000.0)
         assert events[0]['asset_prices'] == pytest.approx({'AAPL': 100.0, 'MSFT': 200.0})
+
+    def test_no_fx_context_local_equals_base_and_no_fx_pairs(self):
+        # Without FX context the local price passes through (= the base close) and
+        # no FX-pair rates are recorded, so the order table shows no extra columns.
+        idx = pd.date_range('2020-01-01', '2020-03-31', freq='D', tz='UTC')
+        price = pd.DataFrame({'AAPL': 100.0}, index=idx)
+        ev = _dca_order_events(price, 1000.0)[0]
+        assert ev['asset_prices_local'] == ev['asset_prices']
+        assert ev['fx_rates'] == {}
+
+
+class TestOrderEventsFxContext:
+    """An FX context (FxColumns) makes the generators record the trading-currency
+    quote and the per-pair rate on every event, for all three strategies."""
+
+    def _price(self):
+        idx = pd.date_range('2020-01-01', '2020-03-31', freq='D', tz='UTC')
+        # AAPL holds a base-currency (e.g. EUR) close of 90 = 100 USD × 0.90.
+        return pd.DataFrame({'AAPL': 90.0}, index=idx)
+
+    def _fx(self, index):
+        # AAPL trades in USD; the rate (0.90 base per USD) is constant over `index`.
+        rate = pd.Series(0.90, index=index)
+        return FxColumns(
+            asset_local_ccy={'AAPL': 'USD'},
+            asset_rate={'AAPL': rate},
+            pair_rate={'USDEUR=X': rate},
+        )
+
+    def test_dca_records_local_price_and_fx_rate(self):
+        price = self._price()
+        fx = self._fx(price.index)
+        ev = _dca_order_events(price, 1000.0, fx)[0]
+        # 90 base / 0.90 rate → 100 in the trading currency.
+        assert ev['asset_prices_local']['AAPL'] == pytest.approx(100.0)
+        assert ev['fx_rates'] == {'USDEUR=X': pytest.approx(0.90)}
+
+    def test_lumpsum_records_local_price_and_fx_rate(self):
+        price = self._price()
+        fx = self._fx(price.index)
+        ev = _lumpsum_order_events(price, 10_000.0, fx)[0]
+        assert ev['asset_prices_local']['AAPL'] == pytest.approx(100.0)
+        assert ev['fx_rates'] == {'USDEUR=X': pytest.approx(0.90)}
+
+    def test_riskoff_records_local_price_and_fx_rate(self):
+        price = self._price()
+        fx = self._fx(price.index)
+        # A target that turns on once so exactly one rebalance event is produced.
+        target = pd.Series(0.0, index=price.index)
+        target.iloc[10:] = 1.0
+        ev = _riskoff_order_events(price, target, 10_000.0, fx)[0]
+        assert ev['asset_prices_local']['AAPL'] == pytest.approx(100.0)
+        assert ev['fx_rates'] == {'USDEUR=X': pytest.approx(0.90)}
 
 
 class TestRiskOffOrderEvents:

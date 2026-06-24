@@ -10,12 +10,15 @@ from src.backtest import (  # noqa: E402
     INITIAL_INVESTMENT,
     OrderEvent,
     build_order_log,
+    build_fx_columns,
     simulate_dca,
     simulate_lumpsum,
     compute_metrics,
     run_backtest,
     load_daily_closes,
     get_common_date_range,
+    _asset_prices_local,
+    _fx_rate_values,
     _get_monthly_range,
 )
 
@@ -649,3 +652,82 @@ class TestLoadDailyClosesFx:
         with patch('src.backtest.pd.read_parquet', side_effect=_fx_mock_read()):
             df = load_daily_closes(BASE_URL, ['USDEUR_X.parquet'], FX_META, 'USD')
         assert np.allclose(df['USDEUR=X'].dropna(), _USDEUR * _EURUSD)
+
+
+# ---------------------------------------------------------------------------
+# build_fx_columns – the order log's FX side-tables
+# ---------------------------------------------------------------------------
+
+class TestBuildFxColumns:
+    # A daily index the rates are aligned onto (subset of the asset calendars).
+    _INDEX = pd.date_range('2020-01-10', periods=30, freq='D', tz='UTC')
+
+    def _fx(self, filenames, base='EUR'):
+        with patch('src.backtest.pd.read_parquet', side_effect=_fx_mock_read()):
+            return build_fx_columns(BASE_URL, filenames, FX_META, base, self._INDEX)
+
+    def test_records_trading_currency_per_asset(self):
+        fx = self._fx(['aapl.parquet', 'sap.parquet', 'idx.parquet'])
+        # Currency tag taken straight from the catalogue (placeholder '0' kept).
+        assert fx.asset_local_ccy == {'AAPL': 'USD', 'SAP': 'EUR', 'IDX': '0'}
+
+    def test_rate_present_only_for_converted_assets(self):
+        fx = self._fx(['aapl.parquet', 'sap.parquet', 'idx.parquet'])
+        # Only AAPL (USD→EUR) is converted; SAP (already EUR) and IDX (unknown)
+        # carry no rate, so their local price will equal the base price.
+        assert set(fx.asset_rate) == {'AAPL'}
+        assert np.allclose(fx.asset_rate['AAPL'], _USDEUR)
+        assert len(fx.asset_rate['AAPL']) == len(self._INDEX)
+
+    def test_pair_rate_deduplicated_per_currency(self):
+        # AAPL and VWRL are both USD → a single USDEUR=X pair column.
+        fx = self._fx(['aapl.parquet', 'vwrl.parquet'])
+        assert list(fx.pair_rate) == ['USDEUR=X']
+        assert np.allclose(fx.pair_rate['USDEUR=X'], _USDEUR)
+
+    def test_no_currency_column_returns_empty_maps(self):
+        with patch('src.backtest.pd.read_parquet', side_effect=_fx_mock_read()):
+            fx = build_fx_columns(BASE_URL, ['aapl.parquet'], SAMPLE_META, 'EUR', self._INDEX)
+        assert fx.asset_local_ccy == {} and fx.asset_rate == {} and fx.pair_rate == {}
+
+    def test_rate_reconstructs_local_price(self):
+        # base_price / rate must recover the original local close (here 100 USD).
+        fx = self._fx(['aapl.parquet'])
+        base_price = 100.0 * _USDEUR
+        rate = float(fx.asset_rate['AAPL'].iloc[0])
+        assert base_price / rate == pytest.approx(100.0)
+
+
+# ---------------------------------------------------------------------------
+# _asset_prices_local / _fx_rate_values – per-row FX helpers
+# ---------------------------------------------------------------------------
+
+class TestAssetPricesLocal:
+    _DATE = pd.Timestamp('2020-01-10', tz='UTC')
+
+    def test_divides_base_by_rate_to_recover_local(self):
+        prices = pd.Series({'AAPL': 90.0})           # base (EUR) close
+        rate = pd.Series({self._DATE: _USDEUR})       # 0.90 EUR per USD
+        local = _asset_prices_local(prices, {'AAPL': rate}, self._DATE)
+        assert local['AAPL'] == pytest.approx(100.0)  # 90 / 0.90
+
+    def test_passthrough_when_no_rate(self):
+        # No rate for the symbol → base price is the local price (already base ccy).
+        prices = pd.Series({'SAP': 100.0})
+        assert _asset_prices_local(prices, {}, self._DATE) == {'SAP': 100.0}
+
+    def test_nan_price_maps_to_none(self):
+        prices = pd.Series({'AAPL': np.nan})
+        assert _asset_prices_local(prices, {}, self._DATE) == {'AAPL': None}
+
+
+class TestFxRateValues:
+    _DATE = pd.Timestamp('2020-01-10', tz='UTC')
+
+    def test_returns_rate_per_pair_on_the_day(self):
+        pair_rate = {'USDEUR=X': pd.Series({self._DATE: _USDEUR})}
+        assert _fx_rate_values(pair_rate, self._DATE) == {'USDEUR=X': pytest.approx(_USDEUR)}
+
+    def test_missing_rate_maps_to_none(self):
+        pair_rate = {'USDEUR=X': pd.Series(dtype=float)}  # no entry for the day
+        assert _fx_rate_values(pair_rate, self._DATE) == {'USDEUR=X': None}

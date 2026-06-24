@@ -8,7 +8,8 @@ A Plotly Dash web application for backtesting across user-defined asset baskets.
 - **Multi-currency support**: pick a reporting (base) currency from a dropdown (default EUR); every asset's prices are
   converted from its quote currency into that base currency using daily FX rates before the backtest, so baskets mixing
   USD/GBP/EUR/… assets are compared on a common basis (the standard *unhedged* approach). Currency pairs can themselves
-  be added to a basket as assets
+  be added to a basket as assets. Each asset's trading currency is shown in the search dropdown and basket list, and the
+  order tables show each trade's price in both the trading and the reporting currency plus the FX rate used
 - Date range slider auto-calculated from the overlapping history of all selected assets
 - Pluggable backtesting strategies — each basket can use a different strategy with its own configurable parameters
 - **Buy & Hold** (default): a single lump sum (10,000, in the reporting currency) is invested in full on the first
@@ -25,10 +26,13 @@ A Plotly Dash web application for backtesting across user-defined asset baskets.
 - Side-by-side performance metrics: Total Return, CAGR, Sharpe Ratio, Max. Drawdown, Volatility, Calmar Ratio, and more
 - Per-order transaction tables (one per basket, switchable via tabs) listing every buy/sell with its date, side,
   pre-/post-trade value, inflow, asset/cash split, running net deposits, P&L (absolute in the reporting currency, and %),
-  equity exposure, cash quota, and period return, followed by two extra columns per basket asset showing that asset's
-  current worth (units × price) and its close on each trade row — all monetary figures in the selected reporting currency. The table fills ~80 % of the viewport height with a
+  equity exposure, cash quota, and period return. Then, per basket asset, a value column (units × price, in the reporting
+  currency) and its price column(s): for an asset that trades in a non-reporting currency **both** the trading-currency
+  close and the converted reporting-currency close are shown side by side; for an asset already in the reporting currency
+  a single price column is shown. Finally one column per currency pair (`{LOCAL}{BASE}=X`) used in the basket, giving the
+  exact FX rate each trade was converted at. The table fills ~80 % of the viewport height with a
   sticky header row and sticky first column for easy scanning of long logs, and a download button (next to the
-  "Orders" heading) exports the active basket's table (per-asset value + price columns included) as **CSV** or
+  "Orders" heading) exports the active basket's table (per-asset value/price + FX-pair columns included) as **CSV** or
   **Excel (.xlsx)**
 
 ## Requirements

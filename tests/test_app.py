@@ -19,8 +19,9 @@ from src.callbacks.backtesting import (   # noqa: E402
 )
 from src.components import (  # noqa: E402
     _render_basket_list, _metrics_table, _order_rows, _order_table_component,
-    _base_currency_options,
+    _base_currency_options, _asset_currency_map, _basket_item_label,
 )
+from src.callbacks.backtesting import _asset_option_label  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -268,6 +269,23 @@ _ORDERS_STUB = [{
     'period_return': None,
 }]
 
+# A foreign-currency variant: AAPL trades in USD, so the row carries the local
+# (trading-currency) close and the day's FX rate alongside the converted close,
+# exercising the order table's split price + FX-pair columns.
+_ORDERS_STUB_FX = [{
+    **_ORDERS_STUB[0],
+    'asset_values': {'AAPL': 1000.0},
+    'asset_prices': {'AAPL': 135.0},        # converted close (base = EUR)
+    'asset_prices_local': {'AAPL': 150.0},  # trading-currency close (USD)
+    'fx_rates': {'USDEUR=X': 0.90},
+}]
+
+# Same, but the FX rate is missing for that row (→ em-dash in the rate column).
+_ORDERS_STUB_FX_NO_RATE = [{
+    **_ORDERS_STUB_FX[0],
+    'fx_rates': {'USDEUR=X': None},
+}]
+
 BASKET_A = [BASKET_ITEM_AAPL]
 BASKET_B = [BASKET_ITEM_GOOGL]
 
@@ -506,6 +524,48 @@ class TestRenderBasketList:
         assert 'AAPL' in rendered
         assert 'Apple Inc' in rendered
 
+    def test_currency_tag_appears_when_present(self):
+        item = {**BASKET_ITEM_AAPL, 'currency': 'USD'}
+        assert 'AAPL — Apple Inc (USD)' in str(_render_basket_list([item], 'a'))
+
+    def test_blank_currency_gets_no_tag(self):
+        # Blank/placeholder currency → no parenthesised tag, just symbol — name.
+        assert _basket_item_label({**BASKET_ITEM_AAPL, 'currency': '0'}) == 'AAPL — Apple Inc'
+        assert _basket_item_label(BASKET_ITEM_AAPL) == 'AAPL — Apple Inc'  # key absent
+        assert _basket_item_label({**BASKET_ITEM_AAPL, 'currency': 'GBp'}) == 'AAPL — Apple Inc (GBp)'
+
+
+# ---------------------------------------------------------------------------
+# _asset_currency_map / _asset_option_label
+# ---------------------------------------------------------------------------
+
+class TestAssetCurrencyMap:
+    def test_maps_symbol_to_currency(self):
+        assert _asset_currency_map(['aapl.parquet', 'a.parquet'], _CURRENCY_DF) == {
+            'AAPL': 'USD', 'USDEUR=X': 'EUR',
+        }
+
+    def test_no_currency_column_returns_empty(self):
+        df = pd.DataFrame({'symbol': ['AAPL'], 'filename': ['aapl.parquet']})
+        assert _asset_currency_map(['aapl.parquet'], df) == {}
+
+    def test_none_catalogue_returns_empty(self):
+        assert _asset_currency_map(['aapl.parquet'], None) == {}
+
+
+class TestAssetOptionLabel:
+    def test_label_includes_currency_tag(self):
+        row = pd.Series({'symbol': 'AAPL', 'name': 'Apple', 'interval': '1d', 'currency': 'USD'})
+        assert _asset_option_label(row) == 'AAPL — Apple (1d · USD)'
+
+    def test_label_drops_blank_currency(self):
+        row = pd.Series({'symbol': 'IDX', 'name': 'Index', 'interval': '1d', 'currency': '0'})
+        assert _asset_option_label(row) == 'IDX — Index (1d)'
+
+    def test_label_without_currency_column(self):
+        row = pd.Series({'symbol': 'AAPL', 'name': 'Apple', 'interval': '1d'})
+        assert _asset_option_label(row) == 'AAPL — Apple (1d)'
+
 
 # ---------------------------------------------------------------------------
 # _metrics_table
@@ -573,6 +633,33 @@ class TestOrderTable:
         assert 'P&L (EUR)' in _order_rows(_ORDERS_STUB)[0]          # default
         assert 'P&L (USD)' in _order_rows(_ORDERS_STUB, 'USD')[0]   # explicit
         assert 'P&L (€)' not in _order_rows(_ORDERS_STUB, 'USD')[0]
+
+    def test_unknown_currency_keeps_single_plain_price_column(self):
+        # No asset_currency given → currency unknown → one unlabelled price column
+        # (the back-compatible behaviour, exercised by the stub-based tests above).
+        row = _order_rows(_ORDERS_STUB)[0]
+        assert 'AAPL price' in row
+        assert 'AAPL price (EUR)' not in row
+
+    def test_base_currency_asset_gets_single_labelled_price_column(self):
+        # Asset trades in the reporting currency → one column labelled with it.
+        row = _order_rows(_ORDERS_STUB, 'EUR', {'AAPL': 'EUR', 'MSFT': 'EUR'})[0]
+        assert row['AAPL price (EUR)'] == '150.00'
+        assert 'AAPL price (USD)' not in row
+
+    def test_foreign_currency_asset_shows_both_price_columns(self):
+        # AAPL trades in USD, reporting in EUR → both quotes side by side.
+        rows = _order_rows(_ORDERS_STUB_FX, 'EUR', {'AAPL': 'USD'})
+        row = rows[0]
+        assert row['AAPL price (USD)'] == '150.00'   # trading-currency close
+        assert row['AAPL price (EUR)'] == '135.00'   # converted close (150 × 0.90)
+        # The FX pair used for the conversion gets its own rate column, last.
+        assert row['USDEUR=X'] == '0.9000'
+        assert list(row).index('USDEUR=X') == len(row) - 1
+
+    def test_missing_fx_rate_renders_em_dash(self):
+        rows = _order_rows(_ORDERS_STUB_FX_NO_RATE, 'EUR', {'AAPL': 'USD'})
+        assert rows[0]['USDEUR=X'] == '—'
 
 
 # ---------------------------------------------------------------------------

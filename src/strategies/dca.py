@@ -12,14 +12,18 @@ import pandas as pd
 
 from src.backtest import (
     MONTHLY_INVESTMENT,
+    FxColumns,
     OrderEvent,
     OrderRow,
     _asset_prices,
+    _asset_prices_local,
     _asset_values,
+    _fx_rate_values,
     _is_month_end_trading_day,
     _portfolio_value,
     _window_by_month,
     build_equal_weight_index,
+    build_fx_columns,
     build_order_log,
     compute_metrics,
     load_daily_closes,
@@ -31,7 +35,9 @@ from src.utils import log_duration
 
 
 def _dca_order_events(
-    price_df: pd.DataFrame, monthly_investment: float = MONTHLY_INVESTMENT
+    price_df: pd.DataFrame,
+    monthly_investment: float = MONTHLY_INVESTMENT,
+    fx: FxColumns | None = None,
 ) -> list[OrderEvent]:
     """Record one Buy OrderEvent per monthly DCA contribution.
 
@@ -48,6 +54,9 @@ def _dca_order_events(
     ----------
     price_df           – windowed daily closes, one column per asset.
     monthly_investment – fixed amount contributed each month.
+    fx                 – optional FX context (see backtest.FxColumns); when given,
+                         each event also carries the trading-currency quote and the
+                         per-pair FX rates so the order table can show conversions.
 
     Returns
     -------
@@ -57,6 +66,11 @@ def _dca_order_events(
         return []
 
     assert isinstance(price_df.index, pd.DatetimeIndex)
+
+    # FX side-tables (empty when no conversion applies) used to add the
+    # trading-currency price and per-pair rate columns to each order event.
+    asset_rate = fx.asset_rate if fx else {}
+    pair_rate = fx.pair_rate if fx else {}
 
     # Units held per asset; grows on every contribution.  Cash is always 0 for
     # DCA because each contribution is immediately and fully invested.
@@ -85,15 +99,18 @@ def _dca_order_events(
         for col, price in available.items():
             holdings[col] += per_asset / price
 
+        date = month_end_rows.index[i]
         events.append(OrderEvent(
-            date=month_end_rows.index[i],
+            date=date,
             side='Buy',
             value_before=value_before,
             inflow=monthly_investment,
             assets_after=_portfolio_value(holdings, 0.0, prices),
             cash_after=0.0,
             asset_values=_asset_values(holdings, prices),  # per-asset worth
-            asset_prices=_asset_prices(prices),            # per-asset close price
+            asset_prices=_asset_prices(prices),            # per-asset close (base ccy)
+            asset_prices_local=_asset_prices_local(prices, asset_rate, date),  # trading-ccy close
+            fx_rates=_fx_rate_values(pair_rate, date),     # per-pair FX rate this day
         ))
 
     return events
@@ -166,6 +183,10 @@ class DCAStrategy(BacktestStrategy):
         # simulation or carrying delisted assets indefinitely.
         price_df = price_df.ffill(limit=5)
 
+        # FX side-tables aligned to the windowed index, so the order log can show
+        # each asset's trading-currency price and the rate it was converted at.
+        fx = build_fx_columns(base_url, filenames, df_meta, base_currency, price_df.index)
+
         # The windowed row count is exactly the number of points later plotted.
         with log_duration(f'dca: simulate+metrics+orderlog ({price_df.shape[0]} rows)'):
             portfolio, total_invested = simulate_dca(price_df, monthly_investment)
@@ -182,7 +203,7 @@ class DCAStrategy(BacktestStrategy):
             # per-contribution inflows — so initial_capital is 0.
             order_log = (
                 build_order_log(
-                    _dca_order_events(price_df, monthly_investment),
+                    _dca_order_events(price_df, monthly_investment, fx),
                     initial_capital=0.0,
                     bh_index=bh_index,
                 )

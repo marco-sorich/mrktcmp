@@ -101,7 +101,7 @@ from src.utils import log_time
 # are also needed elsewhere (e.g. layout.py builds _basket_ui panels).
 from src.components import (
     _render_basket_list, _metrics_table, _build_strategy_params_ui,
-    _order_rows, _order_table_component,
+    _order_rows, _order_table_component, _asset_currency_map,
 )
 
 # The DCA simulation engine. run_backtest orchestrates data loading, the
@@ -197,6 +197,21 @@ def bt_assetclass_b(asset_class):
     return _bt_assetclass_options(asset_class)
 
 
+def _asset_option_label(row) -> str:
+    """Build a search-dropdown option label for one catalogue row.
+
+    Shows "<symbol> — <name> (<interval> · <currency>)"; the currency tag is
+    dropped for assets whose catalogue currency is blank/unknown (e.g. Indices)
+    or absent (legacy catalogues without a ``currency`` column), so the user sees
+    each asset's trading currency directly in the search results.
+    """
+    base = f"{row['symbol']} — {row['name']} ({row['interval']}"
+    ccy = str(row.get('currency') or '').strip() if 'currency' in row.index else ''
+    if ccy and ccy not in ('0', 'nan', 'None'):
+        return f"{base} · {ccy})"
+    return f"{base})"
+
+
 def _bt_assetclass_options(asset_class):
     """Shared logic: return (options, disabled) for a basket's asset dropdown.
 
@@ -221,7 +236,7 @@ def _bt_assetclass_options(asset_class):
     # Typing in the dropdown triggers bt_search_a/b for finer results.
     filtered = _config.df[_config.df['asset_class'] == asset_class].head(200)
     options = [
-        {'label': f"{row['symbol']} — {row['name']} ({row['interval']})", 'value': row['filename']}
+        {'label': _asset_option_label(row), 'value': row['filename']}
         for _, row in filtered.iterrows()
     ]
     # False = not disabled (i.e. the dropdown is now enabled).
@@ -311,7 +326,7 @@ def _bt_asset_search(search_value, asset_class, current_value):
         filtered = filtered.head(30)
 
     options = [
-        {'label': f"{row['symbol']} — {row['name']} ({row['interval']})", 'value': row['filename']}
+        {'label': _asset_option_label(row), 'value': row['filename']}
         for _, row in filtered.iterrows()
     ]
 
@@ -323,7 +338,7 @@ def _bt_asset_search(search_value, asset_class, current_value):
         if not sel.empty:
             row = sel.iloc[0]
             options.append({
-                'label': f"{row['symbol']} — {row['name']} ({row['interval']})",
+                'label': _asset_option_label(row),
                 'value': current_value,
             })
     return options
@@ -433,8 +448,14 @@ def _manage_basket(basket_id, remove_clicks, selected_asset, basket_data):
             meta = _config.df[_config.df['filename'] == selected_asset]
             if not meta.empty:
                 row = meta.iloc[0]
-                # Append a minimal dict: filename, symbol, and display name.
-                basket.append({'filename': selected_asset, 'symbol': row['symbol'], 'name': row['name']})
+                # Append a minimal dict: filename, symbol, display name and the
+                # trading currency (blank when absent/unknown) so the basket list
+                # can tag each asset with its currency.
+                ccy = ''
+                if 'currency' in row.index and pd.notna(row.get('currency')):
+                    ccy = str(row['currency']).strip()
+                basket.append({'filename': selected_asset, 'symbol': row['symbol'],
+                               'name': row['name'], 'currency': ccy})
 
     else:
         # The callback fired for some other reason (e.g. the remove button
@@ -941,9 +962,13 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
 
     # Format each basket's order log into display rows (None for an empty/failed
     # basket) and stash both in the store.  render_order_table renders the active
-    # one into the page; download_orders exports it as CSV / Excel.
-    orders_store = {'a': _order_rows(orders_a, base_currency),
-                    'b': _order_rows(orders_b, base_currency)}
+    # one into the page; download_orders exports it as CSV / Excel.  The per-asset
+    # currency map lets _order_rows label each asset's trading-currency price
+    # column (and decide whether a separate base-currency column is needed).
+    orders_store = {
+        'a': _order_rows(orders_a, base_currency, _asset_currency_map(filenames_a, _config.df)),
+        'b': _order_rows(orders_b, base_currency, _asset_currency_map(filenames_b, _config.df)),
+    }
 
     # Server-side cost of assembling the figure + metric/order tables. If this is
     # small but the user still waits seconds, the time is the browser rendering
