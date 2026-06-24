@@ -1014,10 +1014,15 @@ def reset_results_on_input_change(basket_a, basket_b, base_currency, strategy_a,
     Whenever the user modifies a basket, the base currency, or the strategy
     before (or after) running a backtest, the previous results no longer match
     the current configuration and would be misleading. This callback resets all
-    result areas to their initial empty state so the user always sees results
-    that correspond to the current inputs.
+    result areas to the initial page-load state: an empty visible chart and a
+    metrics table filled with — placeholders (matching the state established by
+    the layout on first render).
     """
-    return go.Figure(), {'width': '100%', 'display': 'none'}, '', '', {}
+    placeholder_metrics = {k: '—' for k in (
+        'Total Return', 'CAGR', 'Sharpe Ratio', 'Max. Drawdown',
+        'Volatility (p.a.)', 'Calmar Ratio', 'Invested', 'End Value', 'Profit/Loss',
+    )}
+    return go.Figure(), {'width': '100%', 'display': 'block'}, _metrics_table(placeholder_metrics, None), '', {}
 
 
 # ---------------------------------------------------------------------------

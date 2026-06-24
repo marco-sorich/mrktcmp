@@ -374,30 +374,34 @@ class TestRunBacktestCallback:
 
 
 class TestResetResultsOnInputChange:
-    """reset_results_on_input_change clears all result outputs."""
+    """reset_results_on_input_change restores the initial page-load state."""
 
-    def test_returns_hidden_chart_style(self):
+    def test_returns_visible_chart_style(self):
         _, style, *_ = reset_results_on_input_change(None, None, 'EUR', None, None)
-        assert style['display'] == 'none'
+        assert style['display'] == 'block'
 
     def test_returns_empty_figure(self):
         fig, *_ = reset_results_on_input_change(None, None, 'EUR', None, None)
         assert isinstance(fig, go.Figure)
         assert fig.data == ()
 
-    def test_returns_empty_metrics_and_status(self):
-        _, _, metrics, status, _ = reset_results_on_input_change(None, None, 'EUR', None, None)
-        assert metrics == ''
-        assert status == ''
+    def test_returns_metrics_table_with_placeholder_dashes(self):
+        from dash import html
+        _, _, metrics, _, _ = reset_results_on_input_change(None, None, 'EUR', None, None)
+        assert isinstance(metrics, html.Table)
+        import re
+        rendered = str(metrics)
+        assert '—' in rendered
 
-    def test_returns_empty_orders_store(self):
-        *_, orders = reset_results_on_input_change(None, None, 'EUR', None, None)
+    def test_returns_empty_status_and_orders_store(self):
+        *_, status, orders = reset_results_on_input_change(None, None, 'EUR', None, None)
+        assert status == ''
         assert orders == {}
 
     def test_resets_regardless_of_basket_content(self):
         basket = [{'filename': 'aapl.parquet', 'symbol': 'AAPL', 'name': 'Apple', 'currency': 'USD'}]
         _, style, _, _, orders = reset_results_on_input_change(basket, None, 'USD', None, None)
-        assert style['display'] == 'none'
+        assert style['display'] == 'block'
         assert orders == {}
 
 
