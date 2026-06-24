@@ -25,6 +25,11 @@ from dash import html, dcc
 # the table itself is rendered into a separate always-visible div (see below).
 import dash_bootstrap_components as dbc
 
+# go.Figure: used to create an explicit empty figure for the initial chart state so
+# dcc.Graph has a valid figure prop from the start (avoids a Plotly render crash when
+# the component is visible but the callback has not yet set a real figure).
+import plotly.graph_objects as go
+
 # ---------------------------------------------------------------------------
 # Internal imports
 # ---------------------------------------------------------------------------
@@ -167,7 +172,7 @@ def create_layout():
         # src/assets/layout.css which Dash loads automatically.
         html.Div([
             html.Div(
-                dcc.Graph(id='bt-chart', style={'width': '100%', 'display': 'block'}),
+                dcc.Graph(id='bt-chart', figure=go.Figure(), style={'width': '100%', 'display': 'block'}),
                 className='bt-chart-wrapper',
             ),
             html.Div(
