@@ -163,76 +163,92 @@ def create_layout():
             style={'padding': '8px 20px', 'fontSize': '14px', 'cursor': 'pointer', 'marginBottom': '16px'},
         ),
 
-        # Status line – shows messages like "Backtest complete – 5.0 years".
-        # Updated by run_backtest_callback; starts empty.
-        html.Div(id='bt-status', style={'color': '#888', 'fontSize': '13px', 'marginBottom': '8px'}),
+        # dcc.Loading wraps the results area so a spinner is shown while the
+        # run_backtest_callback is executing (Dash detects any child Output update
+        # and activates the overlay automatically — no extra callback needed).
+        # The spinner overlays the results area without shifting page layout.
+        dcc.Loading(
+            id='bt-loading',
+            type='circle',
+            color='#1a56db',
+            overlay_style={'visibility': 'visible', 'opacity': 0.4, 'background': '#fff'},
+            children=[
 
-        # Chart and metrics side by side on wide screens (via layout.css),
-        # stacked on narrow screens. CSS classes are defined in
-        # src/assets/layout.css which Dash loads automatically.
-        html.Div([
-            html.Div(
-                dcc.Graph(id='bt-chart', figure=go.Figure(), style={'width': '100%', 'display': 'block'}),
-                className='bt-chart-wrapper',
-            ),
-            html.Div(
-                _metrics_table(
-                    {k: '—' for k in (
-                        'Total Return', 'CAGR', 'Sharpe Ratio', 'Max. Drawdown',
-                        'Volatility (p.a.)', 'Calmar Ratio', 'Invested', 'End Value', 'Profit/Loss',
-                    )},
-                    None,
-                ),
-                id='bt-metrics',
-                className='bt-metrics-wrapper',
-            ),
-        ], className='results-container'),
+                # Status line – shows messages like "Backtest complete – 5.0 years".
+                # Updated by run_backtest_callback; starts empty.
+                html.Div(id='bt-status',
+                         style={'color': '#888', 'fontSize': '13px', 'marginBottom': '8px'}),
 
-        # Order (transaction) tables – one per basket.  The dbc.Tabs only *pick*
-        # the active basket (tab_id 'a'/'b'); the table is rendered by
-        # render_order_table into bt-orders-content, a single ALWAYS-VISIBLE div.
-        # The table is deliberately NOT placed inside the tab panes: a Bootstrap
-        # tab pane is display:none until activated, and Safari does not repaint
-        # content a callback injects into the active pane until a tab switch
-        # forces a reflow — which left the freshly rendered table blank until the
-        # user toggled Basket B → Basket A.  Rendering into an always-visible div
-        # paints first-time, exactly like the chart and metrics above.
-        html.Div([
-            # Heading row: title on the left, download menu right-aligned.
-            html.Div([
-                html.H3('Orders', style={'margin': 0}),
-                # A download-icon button that drops down to CSV / Excel; the
-                # download_orders callback exports the active basket's table.
-                dbc.DropdownMenu(
-                    label=html.I(className='bi bi-download'),
-                    children=[
-                        dbc.DropdownMenuItem('CSV', id='bt-dl-csv', n_clicks=0),
-                        dbc.DropdownMenuItem('Excel (.xlsx)', id='bt-dl-xlsx', n_clicks=0),
-                    ],
-                    id='bt-orders-dl-menu',
-                    size='sm',
-                    color='light',
-                    align_end=True,                      # menu hugs the right edge
-                    toggle_style={'border': '1px solid #ccc'},
-                ),
-            ], style={'display': 'flex', 'justifyContent': 'space-between',
-                      'alignItems': 'center', 'marginBottom': '8px'}),
-            dbc.Tabs(
-                id='bt-orders-tabs',
-                active_tab='a',
-                children=[
-                    dbc.Tab(label='Basket A', tab_id='a'),
-                    dbc.Tab(label='Basket B', tab_id='b'),
-                ],
-            ),
-            # Holds each basket's display rows ({'a': [...], 'b': [...]}); the run
-            # callback writes it; render_order_table and download_orders read it.
-            dcc.Store(id='bt-orders-store', data={}),
-            # Hidden target that streams the CSV/Excel file to the browser.
-            dcc.Download(id='bt-orders-dl-data'),
-            # The active basket's table is (re-)rendered here on tab/data change.
-            html.Div(id='bt-orders-content', style={'marginTop': '8px'}),
-        ], style={'marginTop': '20px'}),
+                # Chart and metrics side by side on wide screens (via layout.css),
+                # stacked on narrow screens. CSS classes are defined in
+                # src/assets/layout.css which Dash loads automatically.
+                html.Div([
+                    html.Div(
+                        dcc.Graph(id='bt-chart', figure=go.Figure(),
+                                  style={'width': '100%', 'display': 'block'}),
+                        className='bt-chart-wrapper',
+                    ),
+                    html.Div(
+                        _metrics_table(
+                            {k: '—' for k in (
+                                'Total Return', 'CAGR', 'Sharpe Ratio', 'Max. Drawdown',
+                                'Volatility (p.a.)', 'Calmar Ratio', 'Invested', 'End Value', 'Profit/Loss',
+                            )},
+                            None,
+                        ),
+                        id='bt-metrics',
+                        className='bt-metrics-wrapper',
+                    ),
+                ], className='results-container'),
+
+                # Order (transaction) tables – one per basket.  The dbc.Tabs only *pick*
+                # the active basket (tab_id 'a'/'b'); the table is rendered by
+                # render_order_table into bt-orders-content, a single ALWAYS-VISIBLE div.
+                # The table is deliberately NOT placed inside the tab panes: a Bootstrap
+                # tab pane is display:none until activated, and Safari does not repaint
+                # content a callback injects into the active pane until a tab switch
+                # forces a reflow — which left the freshly rendered table blank until the
+                # user toggled Basket B → Basket A.  Rendering into an always-visible div
+                # paints first-time, exactly like the chart and metrics above.
+                html.Div([
+                    # Heading row: title on the left, download menu right-aligned.
+                    html.Div([
+                        html.H3('Orders', style={'margin': 0}),
+                        # A download-icon button that drops down to CSV / Excel; the
+                        # download_orders callback exports the active basket's table.
+                        dbc.DropdownMenu(
+                            label=html.I(className='bi bi-download'),
+                            children=[
+                                dbc.DropdownMenuItem('CSV', id='bt-dl-csv', n_clicks=0),
+                                dbc.DropdownMenuItem('Excel (.xlsx)', id='bt-dl-xlsx', n_clicks=0),
+                            ],
+                            id='bt-orders-dl-menu',
+                            size='sm',
+                            color='light',
+                            align_end=True,                      # menu hugs the right edge
+                            toggle_style={'border': '1px solid #ccc'},
+                        ),
+                    ], style={'display': 'flex', 'justifyContent': 'space-between',
+                              'alignItems': 'center', 'marginBottom': '8px'}),
+                    dbc.Tabs(
+                        id='bt-orders-tabs',
+                        active_tab='a',
+                        children=[
+                            dbc.Tab(label='Basket A', tab_id='a'),
+                            dbc.Tab(label='Basket B', tab_id='b'),
+                        ],
+                    ),
+                    # Holds each basket's display rows ({'a': [...], 'b': [...]}); the run
+                    # callback writes it; render_order_table and download_orders read it.
+                    dcc.Store(id='bt-orders-store', data={}),
+                    # Hidden target that streams the CSV/Excel file to the browser.
+                    dcc.Download(id='bt-orders-dl-data'),
+                    # The active basket's table is (re-)rendered here on tab/data change.
+                    html.Div(id='bt-orders-content', style={'marginTop': '8px'}),
+                ], style={'marginTop': '20px'}),
+
+            ],
+        ),
 
         # Hidden result store (reserved for future drill-down
         # interactions, e.g. clicking a month to inspect it).
