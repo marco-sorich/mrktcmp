@@ -16,6 +16,7 @@ from src.callbacks.backtesting import (   # noqa: E402
     _bt_assetclass_options, _bt_asset_search, _manage_basket,
     run_backtest_callback, update_date_range_slider, update_date_display,
     _build_slider_marks, _downsample_for_plot, render_order_table, download_orders,
+    reset_results_on_input_change,
 )
 from src.components import (  # noqa: E402
     _render_basket_list, _metrics_table, _order_rows, _order_table_component,
@@ -370,6 +371,38 @@ class TestRunBacktestCallback:
         # Basket B was empty → its stored rows are None (placeholder on render).
         assert orders_store['b'] is None
         assert orders_store['a'][0]['Buy/Sell'] == 'Buy'
+
+
+class TestResetResultsOnInputChange:
+    """reset_results_on_input_change restores the initial page-load state."""
+
+    def test_returns_visible_chart_style(self):
+        _, style, *_ = reset_results_on_input_change(None, None, 'EUR', None, None)
+        assert style['display'] == 'block'
+
+    def test_returns_empty_figure(self):
+        fig, *_ = reset_results_on_input_change(None, None, 'EUR', None, None)
+        assert isinstance(fig, go.Figure)
+        assert fig.data == ()
+
+    def test_returns_metrics_table_with_placeholder_dashes(self):
+        from dash import html
+        _, _, metrics, _, _ = reset_results_on_input_change(None, None, 'EUR', None, None)
+        assert isinstance(metrics, html.Table)
+        import re
+        rendered = str(metrics)
+        assert '—' in rendered
+
+    def test_returns_empty_status_and_orders_store(self):
+        *_, status, orders = reset_results_on_input_change(None, None, 'EUR', None, None)
+        assert status == ''
+        assert orders == {}
+
+    def test_resets_regardless_of_basket_content(self):
+        basket = [{'filename': 'aapl.parquet', 'symbol': 'AAPL', 'name': 'Apple', 'currency': 'USD'}]
+        _, style, _, _, orders = reset_results_on_input_change(basket, None, 'USD', None, None)
+        assert style['display'] == 'block'
+        assert orders == {}
 
 
 class TestRenderOrderTable:
