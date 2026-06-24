@@ -991,6 +991,36 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
 
 
 # ---------------------------------------------------------------------------
+# Callback: reset results when any backtest input changes
+# ---------------------------------------------------------------------------
+
+@callback(
+    Output('bt-chart', 'figure', allow_duplicate=True),
+    Output('bt-chart', 'style', allow_duplicate=True),
+    Output('bt-metrics', 'children', allow_duplicate=True),
+    Output('bt-status', 'children', allow_duplicate=True),
+    Output('bt-orders-store', 'data', allow_duplicate=True),
+    Input('bt-basket-store-a', 'data'),
+    Input('bt-basket-store-b', 'data'),
+    Input('bt-base-currency', 'value'),
+    Input('bt-strategy-config-store-a', 'data'),
+    Input('bt-strategy-config-store-b', 'data'),
+    prevent_initial_call=True,
+)
+@log_time
+def reset_results_on_input_change(basket_a, basket_b, base_currency, strategy_a, strategy_b):
+    """Clear chart, KPIs, and order tables when any backtest input changes.
+
+    Whenever the user modifies a basket, the base currency, or the strategy
+    before (or after) running a backtest, the previous results no longer match
+    the current configuration and would be misleading. This callback resets all
+    result areas to their initial empty state so the user always sees results
+    that correspond to the current inputs.
+    """
+    return go.Figure(), {'width': '100%', 'display': 'none'}, '', '', {}
+
+
+# ---------------------------------------------------------------------------
 # Callback: render the active basket's order table into an always-visible div
 # ---------------------------------------------------------------------------
 
