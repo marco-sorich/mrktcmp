@@ -49,15 +49,18 @@ def get_all_strategy_info() -> list[dict[str, str]]:
     """Return display metadata for all registered strategies, in registration order.
 
     Each dict contains:
-      'name'        – the strategy's unique identifier (same as its registry key).
-      'icon'        – Bootstrap icon class name for the GUI (e.g. 'bi-calendar-month').
-      'description' – one-sentence human-readable description.
+      'name'             – the strategy's unique identifier (same as its registry key).
+      'icon'             – Bootstrap icon class name for the GUI (e.g. 'bi-calendar-month').
+      'description'      – one-sentence human-readable description.
+      'long_description' – richer multi-paragraph Markdown shown in the info panel
+                           (defaults to 'description' when a strategy doesn't override it).
     """
     return [
         {
             'name': name,
             'icon': cls.get_icon(),
             'description': cls.get_description(),
+            'long_description': cls.get_long_description(),
         }
         for name, cls in _registry.items()
     ]

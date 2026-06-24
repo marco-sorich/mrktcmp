@@ -150,6 +150,34 @@ class RiskOffStrategy(BacktestStrategy):
         )
 
     @classmethod
+    def get_long_description(cls) -> str:
+        return (
+            "## Risk-Off Signale\n\n"
+            "A **tactical** lump-sum strategy: stay invested in the basket while "
+            "the market looks healthy, and step aside into cash when it does not. "
+            "Every day three simple market signals are evaluated and summed into a "
+            "**0–3 positive-signal count**; dividing by three gives the day's "
+            "target invested fraction (0%, 33%, 67% or 100%).\n\n"
+            "**The three signals** (each contributes one point when positive):\n\n"
+            "- **Trend** — the equal-weight basket index trades above its long-term "
+            "moving average (default 200 trading days).\n"
+            "- **Year-to-date return** — the index is up on the year so far.\n"
+            "- **January barometer** — the index's return over the first trading "
+            "days of the year (default 10) is positive.\n\n"
+            "**How it trades:** the basket is bought or sold to the new target "
+            "**only on the day the target changes**, holding (and letting the "
+            "fraction drift) in between; any uninvested portion sits in cash.\n\n"
+            "**Good for:** dampening large drawdowns in falling markets at the cost "
+            "of lagging in strong, choppy uptrends.\n\n"
+            "**Parameters**\n\n"
+            "- **Initial Investment** — the one-off lump sum available to deploy.\n"
+            "- **Trend SMA Window** — moving-average length (trading days) for the "
+            "trend signal; larger is slower and steadier.\n"
+            "- **January Barometer** — number of opening trading days of the year "
+            "used for the January-barometer signal."
+        )
+
+    @classmethod
     def get_config_schema(cls) -> list[ConfigParam]:
         return [
             ConfigParam(

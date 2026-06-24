@@ -195,6 +195,12 @@ class TestRegistry:
         assert "_test_dummy_a" not in list_strategies()
         assert "_test_dummy_b" not in list_strategies()
 
+    def test_get_long_description_defaults_to_description(self):
+        # _Dummy does not override get_long_description, so the base-class default
+        # must fall back to the one-sentence get_description().
+        dummy_cls = self._make_dummy("_test_dummy_long")
+        assert dummy_cls.get_long_description() == dummy_cls.get_description()
+
 
 # ---------------------------------------------------------------------------
 # Layer 3 – DCAStrategy unit tests
@@ -211,6 +217,12 @@ class TestDCAStrategy:
     def test_get_description_returns_non_empty_string(self):
         assert isinstance(DCAStrategy.get_description(), str)
         assert DCAStrategy.get_description()
+
+    def test_get_long_description_returns_rich_markdown(self):
+        long = DCAStrategy.get_long_description()
+        assert isinstance(long, str) and long
+        # The override must be a fuller write-up, not just the one-liner.
+        assert len(long) > len(DCAStrategy.get_description())
 
     def test_get_config_schema_contains_monthly_investment(self):
         schema = DCAStrategy.get_config_schema()
@@ -303,6 +315,11 @@ class TestBuyHoldStrategy:
     def test_get_description_returns_non_empty_string(self):
         assert isinstance(BuyHoldStrategy.get_description(), str)
         assert BuyHoldStrategy.get_description()
+
+    def test_get_long_description_returns_rich_markdown(self):
+        long = BuyHoldStrategy.get_long_description()
+        assert isinstance(long, str) and long
+        assert len(long) > len(BuyHoldStrategy.get_description())
 
     def test_get_config_schema_contains_initial_investment(self):
         schema = BuyHoldStrategy.get_config_schema()
@@ -462,6 +479,11 @@ class TestRiskOffStrategy:
     def test_get_description_is_non_empty_string(self):
         assert isinstance(RiskOffStrategy.get_description(), str)
         assert RiskOffStrategy.get_description()
+
+    def test_get_long_description_returns_rich_markdown(self):
+        long = RiskOffStrategy.get_long_description()
+        assert isinstance(long, str) and long
+        assert len(long) > len(RiskOffStrategy.get_description())
 
     def test_config_schema_keys_and_defaults(self):
         schema = RiskOffStrategy.get_config_schema()

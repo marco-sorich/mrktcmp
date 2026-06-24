@@ -122,6 +122,34 @@ def _default_strategy_config() -> dict:
     return {'strategy': name, 'params': params}
 
 
+def _strategy_desc_panel(strategy_name: str | None) -> list:
+    """Build the rich-text (Markdown) description panel for *strategy_name*.
+
+    Renders the strategy's get_long_description() — a multi-paragraph Markdown
+    write-up — inside a dcc.Markdown.  Returns [] when no/unknown strategy is
+    given so the collapsible info panel stays empty.
+
+    Called at layout time (initial render) and by the strategy-selector callback
+    whenever the user switches strategies.
+
+    Parameters
+    ----------
+    strategy_name – registered strategy name (e.g. 'DCA'), or None.
+
+    Returns
+    -------
+    Single-element list with a dcc.Markdown, or [].
+    """
+    if not strategy_name:
+        return []
+    from src.strategies.registry import get_strategy
+    try:
+        strategy_cls = get_strategy(strategy_name)
+    except KeyError:
+        return []
+    return [dcc.Markdown(strategy_cls.get_long_description())]
+
+
 def _build_strategy_params_ui(
     strategy_name: str | None,
     basket_id: str,
@@ -266,10 +294,25 @@ def _basket_ui(basket_id):
         # A thin divider separates the asset list from the strategy section.
         html.Hr(style={'margin': '10px 0', 'borderColor': '#eee'}),
 
-        html.Label(
-            'Strategy',
-            style={'fontSize': '12px', 'fontWeight': 'bold', 'marginBottom': '4px', 'display': 'block'},
-        ),
+        # Label row: the "Strategy" caption plus a small info (ⓘ) toggle button
+        # that expands/collapses the rich-text description panel below.
+        html.Div([
+            html.Label(
+                'Strategy',
+                style={'fontSize': '12px', 'fontWeight': 'bold', 'marginBottom': '0', 'display': 'block'},
+            ),
+            html.Button(
+                html.I(className='bi bi-info-circle'),
+                id={'type': 'bt-strategy-desc-toggle', 'basket': basket_id},
+                n_clicks=0,
+                title='Show strategy description',
+                className='strategy-desc-toggle',
+                style={
+                    'border': 'none', 'background': 'none', 'cursor': 'pointer',
+                    'padding': '0', 'color': '#0d6efd', 'fontSize': '14px', 'lineHeight': '1',
+                },
+            ),
+        ], style={'display': 'flex', 'alignItems': 'center', 'gap': '6px', 'marginBottom': '4px'}),
 
         # Dropdown listing every registered strategy with its Bootstrap icon.
         # Dict ID enables a single MATCH callback to serve both baskets.
@@ -282,6 +325,19 @@ def _basket_ui(basket_id):
             clearable=False,
             disabled=True,
             style={'marginBottom': '8px'},
+        ),
+
+        # Collapsible rich-text description of the selected strategy.  Hidden by
+        # default; toggled open by the ⓘ button above and re-filled on strategy
+        # change by the render_strategy_params callback.
+        dbc.Collapse(
+            html.Div(
+                id={'type': 'bt-strategy-desc', 'basket': basket_id},
+                children=_strategy_desc_panel(_default_strategy_config()['strategy']),
+                className='strategy-desc',
+            ),
+            id={'type': 'bt-strategy-desc-collapse', 'basket': basket_id},
+            is_open=False,
         ),
 
         # Container for strategy-specific parameter inputs.  Populated by the

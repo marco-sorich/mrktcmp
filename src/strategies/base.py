@@ -98,6 +98,18 @@ class BacktestStrategy(ABC):
         ...
 
     @classmethod
+    def get_long_description(cls) -> str:
+        """Rich-text (Markdown) description shown in the strategy info panel.
+
+        Defaults to the one-sentence get_description(); strategies override this
+        to provide a fuller multi-paragraph explanation (what it does, how it
+        trades, when it suits, notes on its configurable parameters).  The GUI
+        renders the returned string as Markdown in a collapsible per-basket
+        info panel, so headings, bold text and bullet lists are supported.
+        """
+        return cls.get_description()
+
+    @classmethod
     @abstractmethod
     def get_icon(cls) -> str:
         """Bootstrap icon class name for this strategy (e.g. 'bi-calendar-month').
