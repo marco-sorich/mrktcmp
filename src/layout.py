@@ -25,13 +25,18 @@ from dash import html, dcc
 # the table itself is rendered into a separate always-visible div (see below).
 import dash_bootstrap_components as dbc
 
+# go.Figure: used to create an explicit empty figure for the initial chart state so
+# dcc.Graph has a valid figure prop from the start (avoids a Plotly render crash when
+# the component is visible but the callback has not yet set a real figure).
+import plotly.graph_objects as go
+
 # ---------------------------------------------------------------------------
 # Internal imports
 # ---------------------------------------------------------------------------
 
 # _basket_ui builds the full component subtree for a single basket panel
 # (heading, radio buttons, dropdown, add button, item list, and Store).
-from src.components import _basket_ui, _base_currency_options
+from src.components import _basket_ui, _base_currency_options, _metrics_table
 
 # _config provides module-level globals: app_version (from setuptools-scm),
 # and df/assetsClasses (loaded master.parquet).
@@ -167,10 +172,20 @@ def create_layout():
         # src/assets/layout.css which Dash loads automatically.
         html.Div([
             html.Div(
-                dcc.Graph(id='bt-chart', style={'width': '100%', 'display': 'none'}),
+                dcc.Graph(id='bt-chart', figure=go.Figure(), style={'width': '100%', 'display': 'block'}),
                 className='bt-chart-wrapper',
             ),
-            html.Div(id='bt-metrics', className='bt-metrics-wrapper'),
+            html.Div(
+                _metrics_table(
+                    {k: '—' for k in (
+                        'Total Return', 'CAGR', 'Sharpe Ratio', 'Max. Drawdown',
+                        'Volatility (p.a.)', 'Calmar Ratio', 'Invested', 'End Value', 'Profit/Loss',
+                    )},
+                    None,
+                ),
+                id='bt-metrics',
+                className='bt-metrics-wrapper',
+            ),
         ], className='results-container'),
 
         # Order (transaction) tables – one per basket.  The dbc.Tabs only *pick*
