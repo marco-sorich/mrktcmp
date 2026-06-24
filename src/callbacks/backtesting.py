@@ -101,7 +101,7 @@ from src.utils import log_time
 # are also needed elsewhere (e.g. layout.py builds _basket_ui panels).
 from src.components import (
     _render_basket_list, _metrics_table, _build_strategy_params_ui,
-    _order_rows, _order_table_component, _asset_currency_map,
+    _strategy_desc_panel, _order_rows, _order_table_component, _asset_currency_map,
 )
 
 # The DCA simulation engine. run_backtest orchestrates data loading, the
@@ -656,6 +656,7 @@ def toggle_strategy_dropdown_b(basket_data: list | None) -> bool:
 
 @callback(
     Output({'type': 'bt-strategy-params', 'basket': MATCH}, 'children'),
+    Output({'type': 'bt-strategy-desc', 'basket': MATCH}, 'children'),
     Input({'type': 'bt-strategy', 'basket': MATCH}, 'value'),
     State('bt-basket-store-a', 'data'),
     State('bt-basket-store-b', 'data'),
@@ -666,12 +667,13 @@ def render_strategy_params(
     strategy_name: str | None,
     basket_a: list | None,
     basket_b: list | None,
-) -> list | Any:
-    """Re-render param inputs whenever the user picks a different strategy.
+) -> tuple[list, list] | Any:
+    """Re-render param inputs and the description panel when the strategy changes.
 
     Uses MATCH so a single callback serves both basket A and basket B.
     basket_id is extracted from the triggering component's dict ID.
-    Params are rendered disabled when the corresponding basket is empty.
+    Params are rendered disabled when the corresponding basket is empty; the
+    rich-text description panel is refilled for the newly selected strategy.
     """
     tid = dash.callback_context.triggered_id
     if not isinstance(tid, dict):
@@ -679,7 +681,29 @@ def render_strategy_params(
     basket_id = tid['basket']
     basket_data = basket_a if basket_id == 'a' else basket_b
     disabled = not bool(basket_data)
-    return _build_strategy_params_ui(strategy_name, basket_id, disabled=disabled)
+    return (
+        _build_strategy_params_ui(strategy_name, basket_id, disabled=disabled),
+        _strategy_desc_panel(strategy_name),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Callback: toggle the strategy description panel open/closed (both baskets)
+# ---------------------------------------------------------------------------
+
+@callback(
+    Output({'type': 'bt-strategy-desc-collapse', 'basket': MATCH}, 'is_open'),
+    Input({'type': 'bt-strategy-desc-toggle', 'basket': MATCH}, 'n_clicks'),
+    State({'type': 'bt-strategy-desc-collapse', 'basket': MATCH}, 'is_open'),
+    prevent_initial_call=True,
+)
+@log_time
+def toggle_strategy_desc(n_clicks: int | None, is_open: bool) -> bool:
+    """Flip the description panel's open state each time the ⓘ button is clicked.
+
+    Uses MATCH so a single callback serves both basket A and basket B.
+    """
+    return not is_open
 
 
 # ---------------------------------------------------------------------------

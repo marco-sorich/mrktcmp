@@ -136,6 +136,25 @@ class DCAStrategy(BacktestStrategy):
         )
 
     @classmethod
+    def get_long_description(cls) -> str:
+        return (
+            "## Dollar-Cost Averaging (DCA)\n\n"
+            "Instead of deploying everything at once, invest a **fixed amount "
+            "every month**, each contribution split **equally** across the "
+            "basket's assets. Buying steadily over time means you accumulate "
+            "more units when prices are low and fewer when they are high, which "
+            "smooths out your average entry price.\n\n"
+            "**How it trades:** one purchase per month, on each month's last "
+            "trading day. Units bought in earlier months are kept; the portfolio "
+            "is valued daily in between.\n\n"
+            "**Good for:** investing a regular income, and for reducing the risk "
+            "of committing a lump sum just before a downturn (timing risk).\n\n"
+            "**Parameter**\n\n"
+            "- **Monthly Investment** — the fixed amount contributed each month "
+            "and spread equally over the basket's assets."
+        )
+
+    @classmethod
     def get_config_schema(cls) -> list[ConfigParam]:
         return [
             ConfigParam(

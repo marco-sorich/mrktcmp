@@ -124,6 +124,24 @@ class BuyHoldStrategy(BacktestStrategy):
         )
 
     @classmethod
+    def get_long_description(cls) -> str:
+        return (
+            "## Buy & Hold\n\n"
+            "Invest a single **lump sum** on the first buyable trading day of "
+            "the selected window, split **equally** across every asset in the "
+            "basket, and then simply hold those units until the end — no further "
+            "buying, selling or rebalancing.\n\n"
+            "**How it trades:** one purchase, on day one. The number of units of "
+            "each asset is fixed at that moment and never changes; the portfolio "
+            "value afterwards is just those units re-priced every day.\n\n"
+            "**Good for:** a long-horizon, low-effort benchmark — the baseline "
+            "every active strategy is measured against.\n\n"
+            "**Parameter**\n\n"
+            "- **Initial Investment** — the one-off amount deployed on the first "
+            "day and spread equally over the basket's assets."
+        )
+
+    @classmethod
     def get_config_schema(cls) -> list[ConfigParam]:
         return [
             ConfigParam(
