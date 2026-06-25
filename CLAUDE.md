@@ -14,7 +14,7 @@ python src/app.py
 gunicorn --reload src.app:server
 
 # Production
-gunicorn src.app:server
+gunicorn --config gunicorn.conf.py src.app:server
 
 # Linting
 flake8 --max-complexity=10 --max-line-length=127 ./src
