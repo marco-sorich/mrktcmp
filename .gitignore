@@ -80,6 +80,9 @@ desktop.ini
 # devcontainer
 devcontainer-lock.json
 
+# uv lock file (project uses pip, not uv)
+uv.lock
+
 # setuptools-scm generated
 src/_version.py
 
