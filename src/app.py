@@ -46,6 +46,11 @@ import time
 # Flask and translates the Python component tree into a React web app.
 import dash
 
+# flask: the underlying web framework that Dash wraps. g is a request-scoped
+# namespace used here to store the request start time; flask_request exposes
+# the current HTTP request's headers so we can read the CF-Ray value.
+from flask import g, request as flask_request
+
 # dash_bootstrap_components: provides Bootstrap-themed Dash components and,
 # more importantly here, the CDN links for Bootstrap CSS (dbc.themes.BOOTSTRAP)
 # and Font Awesome icons (dbc.icons.FONT_AWESOME) that are loaded via
@@ -121,6 +126,45 @@ _config.log.debug(f'App initialization time: {(time.time() - _t0)*1000:,.2f}ms')
 # can serve the app in production. The name 'server' is a widely-used
 # convention for Dash apps.
 server = app.server
+
+
+# ---------------------------------------------------------------------------
+# Request logging – log every HTTP request with its Cloudflare Ray ID
+#
+# Render.com best practice: include the CF-Ray header in application logs so
+# that a specific request can be looked up in the Cloudflare dashboard when a
+# user reports an issue (https://render.com/docs/uptime-best-practices).
+# ---------------------------------------------------------------------------
+
+@server.before_request
+def _before_request() -> None:
+    # Record wall-clock time at the start of each request so the after_request
+    # hook can compute the total request duration.
+    g.start_time = time.time()
+
+
+@server.after_request
+def _log_request(response):
+    # g.start_time may be absent if before_request was skipped (e.g. error
+    # handlers that fire before the hook chain).  Fall back to now so the
+    # subtraction yields 0 ms rather than raising an AttributeError.
+    duration_ms = (time.time() - g.get('start_time', time.time())) * 1000
+
+    # Cloudflare sets this header on every proxied request.  When the app is
+    # reached directly (local dev, health checks without CF), it is absent and
+    # we log '-' as a conventional placeholder.
+    cf_ray = flask_request.headers.get('CF-Ray', '-')
+
+    _config.log.info(
+        '%s %s %s CF-Ray=%s %.1fms',
+        flask_request.method,
+        flask_request.path,
+        response.status_code,
+        cf_ray,
+        duration_ms,
+    )
+    return response
+
 
 # ---------------------------------------------------------------------------
 # Entry point – run the development server when executed directly
