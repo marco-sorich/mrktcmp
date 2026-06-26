@@ -138,7 +138,7 @@ gunicorn --reload src.app:server
 
 **Production (gunicorn):**
 ```
-gunicorn src.app:server
+gunicorn --config gunicorn.conf.py src.app:server
 ```
 
 Open `http://127.0.0.1:8050/` in your browser.
