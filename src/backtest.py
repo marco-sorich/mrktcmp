@@ -17,6 +17,10 @@
 # logger (instead of print) lets callers control output format and level.
 import logging
 
+# functools: lru_cache memoises the per-file parquet reads process-wide so each
+# asset / FX-pair file is fetched from BASE_URL at most once per process.
+import functools
+
 # os: read the BASE_CURRENCY environment variable so the default reporting
 # currency can be configured without code changes (mirrors how the GUI default
 # is sourced in config.py — both read the same env var, one source of truth).
@@ -593,6 +597,58 @@ def build_order_log(
 _BLANK_CURRENCIES = {'', '0', 'nan', 'None'}
 
 
+@functools.lru_cache(maxsize=None)
+def _read_close_series(base_url: str, filename: str) -> pd.Series:
+    """Read a parquet file's UTC-normalised Close column once per process.
+
+    This is the single choke point for *all* per-asset and FX-pair parquet reads
+    (``load_daily_closes``, ``_fx_rate_series`` and ``_get_monthly_range`` all
+    funnel through here), so each file is fetched from ``BASE_URL`` at most once
+    for the lifetime of the process — mirroring the one-shot, always-resident
+    ``master.parquet`` held in ``config.df``.  Because only the ``Close`` column
+    is ever consumed anywhere, ``columns=['Close']`` keeps the transfer minimal.
+
+    The cache spans separate Dash callbacks (e.g. the date-slider refresh and the
+    later backtest run), which a per-call cache cannot: dragging the slider then
+    running the backtest reads each asset's file only once in total, and an asset
+    appearing in both baskets — or an FX pair needed by both
+    ``load_daily_closes`` and ``build_fx_columns`` — is likewise read once.
+
+    Callers MUST treat the returned Series as **read-only**: never mutate it in
+    place; derive copies via slicing / arithmetic / dropna / reindex / resample
+    (all of which the callers already do).
+
+    Parameters
+    ----------
+    base_url – root URL/path where the parquet files are hosted.
+    filename – parquet filename to read (asset OHLCV or FX-pair file).
+
+    Returns
+    -------
+    A UTC-indexed Series of close prices (NaNs not yet dropped — callers decide).
+    """
+    ohlcv = pd.read_parquet(f"{base_url}/{filename}", columns=['Close'])
+    close = ohlcv['Close']
+    # Normalise to UTC so every series shares a common timezone regardless of how
+    # the source file stored its index (tz-naive or tz-aware).
+    assert isinstance(close.index, pd.DatetimeIndex)
+    if close.index.tz is None:
+        close.index = close.index.tz_localize('UTC')
+    else:
+        close.index = close.index.tz_convert('UTC')
+    return close
+
+
+def clear_parquet_cache() -> None:
+    """Drop the process-wide Close cache.
+
+    Used by the test-suite to isolate read counts between tests, and available as
+    a data-refresh hook (the cache otherwise assumes the parquet data is static
+    for the process lifetime, exactly like ``config.df``).
+    """
+    _read_close_series.cache_clear()
+
+
 def _fx_rate_series(
     base_url: str,
     df_meta: pd.DataFrame,
@@ -651,15 +707,9 @@ def _fx_rate_series(
         return None
 
     try:
-        fx_ohlcv = pd.read_parquet(f"{base_url}/{match.iloc[0]['filename']}")
-        rate = fx_ohlcv['Close']
-        # Same UTC normalisation as the asset branch so the indices align.
-        assert isinstance(rate.index, pd.DatetimeIndex)
-        if rate.index.tz is None:
-            rate.index = rate.index.tz_localize('UTC')
-        else:
-            rate.index = rate.index.tz_convert('UTC')
-        rate = rate.dropna().sort_index()
+        # Read (UTC-normalised, process-cached) Close of the FX pair; drop gaps
+        # and sort so the rate aligns with the asset calendars in the callers.
+        rate = _read_close_series(base_url, match.iloc[0]['filename']).dropna().sort_index()
         cache[local] = None if rate.empty else rate
     except Exception:
         log.exception("Failed to load FX pair for %s->%s", local, base_ccy)
@@ -722,24 +772,18 @@ def load_daily_closes(
 
             symbol = meta.iloc[0]['symbol']
 
-            # Time the parquet read in isolation: this is the network fetch (the
-            # whole OHLCV file), the prime suspect for multi-second runs.
+            # Time the read in isolation. The Close column comes from the
+            # process-wide cache (_read_close_series), so the first request for a
+            # file pays the network fetch and every later one is a cache hit —
+            # the prime suspect for multi-second runs is thus paid at most once.
             t_read = time.perf_counter()
-            ohlcv = pd.read_parquet(f"{base_url}/{filename}")
+            close = _read_close_series(base_url, filename)
             read_ms = (time.perf_counter() - t_read) * 1000
-            close = ohlcv['Close']
 
-            # Normalise to UTC so all series share a common timezone, matching
-            # the timezone handling in _get_monthly_range.
-            assert isinstance(close.index, pd.DatetimeIndex)
-            if close.index.tz is None:
-                close.index = close.index.tz_localize('UTC')
-            else:
-                close.index = close.index.tz_convert('UTC')
-
-            # Drop rows with no close (gaps before listing). Keep the file's
-            # native cadence (NOT resampled to daily — intraday files stay
-            # intraday, which is why the row count below matters for speed).
+            # Drop rows with no close (gaps before listing). dropna returns a
+            # copy, so the cached series stays pristine for other callers. Keep
+            # the file's native cadence (NOT resampled to daily — intraday files
+            # stay intraday, which is why the row count below matters for speed).
             close = close.dropna()
 
             # Convert the local-currency close into the reporting currency.
@@ -1188,20 +1232,15 @@ def _get_monthly_range(base_url: str, filename: str, df_meta: pd.DataFrame) -> t
     if meta.empty:
         return None, None
     try:
-        # columns=['Close'] tells pyarrow to read only the Close column from
-        # the Parquet file, skipping Open/High/Low/Volume. This is much faster
-        # than loading the full OHLCV dataset when we only need date bounds.
-        # This read fires once per asset on every basket change (slider refresh).
+        # The slider refreshes on every basket change; routing through the
+        # process-wide cache (_read_close_series) means each asset's file is
+        # fetched once across all those refreshes AND the later backtest run,
+        # instead of once per refresh. The cached read already returns only the
+        # UTC-normalised Close column, so we resample directly off it.
         t_read = time.perf_counter()
-        ohlcv = pd.read_parquet(f"{base_url}/{filename}", columns=['Close'])
+        close = _read_close_series(base_url, filename)
         log.debug('[perf] _get_monthly_range read %s: %.1fms', filename,
                   (time.perf_counter() - t_read) * 1000)
-        close = ohlcv['Close']
-        assert isinstance(close.index, pd.DatetimeIndex)
-        if close.index.tz is None:
-            close.index = close.index.tz_localize('UTC')
-        else:
-            close.index = close.index.tz_convert('UTC')
         # Resample to month-end so the reported range matches the month-granular
         # slider the user selects the backtest window with.
         monthly = close.resample('ME').last().dropna()
