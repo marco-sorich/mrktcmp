@@ -20,6 +20,7 @@ from src.backtest import (
     _asset_prices,
     _asset_prices_local,
     _asset_values,
+    _first_all_priced_pos,
     _fx_rate_values,
     _portfolio_value,
     _rebalance_to_target,
@@ -46,23 +47,24 @@ def _lumpsum_order_events(
     This is the Buy & Hold half of the order log; the generic derived columns are
     added afterwards by ``backtest.build_order_log``.  It mirrors
     ``simulate_lumpsum`` (which returns only the daily value curve): the whole
-    lump sum is deployed once, on the first trading day with at least one buyable
-    asset, split equally across the assets priced that day.  Because the entire
+    lump sum is deployed once, on the first trading day on which **every** basket
+    asset is buyable, split equally across all of them.  Because the entire
     amount is invested there is no remaining cash, and as nothing is ever traded
     again exactly one event is produced for the whole window.
 
     Parameters
     ----------
     price_df           – windowed daily closes, one column per asset.
-    initial_investment – one-off lump sum invested on the first buyable day.
+    initial_investment – one-off lump sum invested on the first day the whole
+                         basket is priced.
     fx                 – optional FX context (see backtest.FxColumns); when given,
                          each event also carries the trading-currency quote and the
                          per-pair FX rates so the order table can show conversions.
 
     Returns
     -------
-    A single-element list with the day-one Buy (empty when price_df is empty or
-    no asset is ever buyable).
+    A single-element list with the buy on the first all-priced day (empty when
+    price_df is empty or the whole basket is never priced together).
     """
     if price_df.empty:
         return []
@@ -74,34 +76,33 @@ def _lumpsum_order_events(
     asset_rate = fx.asset_rate if fx else {}
     pair_rate = fx.pair_rate if fx else {}
 
-    # Find the first day on which at least one asset has a valid, positive price;
-    # that is the day the lump sum is deployed.
+    # Find the first day on which *every* asset has a valid, positive price; that
+    # is the day the lump sum is deployed (so it splits equally across the whole
+    # basket).  Reuses the same primitive as simulate_lumpsum to stay in lockstep.
+    buy_pos = _first_all_priced_pos(price_df.to_numpy(dtype=float))
+    if buy_pos is None:
+        return []
+
     holdings: dict[str, float] = {str(col): 0.0 for col in price_df.columns}
-    for i in range(len(price_df)):
-        prices = price_df.iloc[i]
-        # Assets actually buyable this day (valid, positive price).
-        if not any(pd.notna(p) and p > 0 for p in prices):
-            continue
+    prices = price_df.iloc[buy_pos]
 
-        # Deploy 100% equal-weight, reusing the shared rebalance primitive so the
-        # holdings match simulate_lumpsum exactly (cash_after is ~0 = fully invested).
-        holdings, _, _ = _rebalance_to_target(holdings, float(initial_investment), prices, 1.0)
+    # Deploy 100% equal-weight, reusing the shared rebalance primitive so the
+    # holdings match simulate_lumpsum exactly (cash_after is ~0 = fully invested).
+    holdings, _, _ = _rebalance_to_target(holdings, float(initial_investment), prices, 1.0)
 
-        date = price_df.index[i]
-        return [OrderEvent(
-            date=date,
-            side='Buy',
-            value_before=0.0,                 # nothing held before the first buy
-            inflow=initial_investment,        # the whole lump sum enters here
-            assets_after=_portfolio_value(holdings, 0.0, prices),
-            cash_after=0.0,                   # fully invested, no residual cash
-            asset_values=_asset_values(holdings, prices),  # per-asset worth
-            asset_prices=_asset_prices(prices),            # per-asset close (base ccy)
-            asset_prices_local=_asset_prices_local(prices, asset_rate, date),  # trading-ccy close
-            fx_rates=_fx_rate_values(pair_rate, date),     # per-pair FX rate this day
-        )]
-
-    return []
+    date = price_df.index[buy_pos]
+    return [OrderEvent(
+        date=date,
+        side='Buy',
+        value_before=0.0,                 # nothing held before the first buy
+        inflow=initial_investment,        # the whole lump sum enters here
+        assets_after=_portfolio_value(holdings, 0.0, prices),
+        cash_after=0.0,                   # fully invested, no residual cash
+        asset_values=_asset_values(holdings, prices),  # per-asset worth
+        asset_prices=_asset_prices(prices),            # per-asset close (base ccy)
+        asset_prices_local=_asset_prices_local(prices, asset_rate, date),  # trading-ccy close
+        fx_rates=_fx_rate_values(pair_rate, date),     # per-pair FX rate this day
+    )]
 
 
 @register
@@ -119,19 +120,22 @@ class BuyHoldStrategy(BacktestStrategy):
     @classmethod
     def get_description(cls) -> str:
         return (
-            "Buy & Hold: invest a single lump sum on the first day, "
-            "split equally across all basket assets, and hold until the end."
+            "Buy & Hold: invest a single lump sum on the first day every basket "
+            "asset is priced, split equally across all of them, and hold until the end."
         )
 
     @classmethod
     def get_long_description(cls) -> str:
         return (
             "## Buy & Hold\n\n"
-            "Invest a single **lump sum** on the first buyable trading day of "
-            "the selected window, split **equally** across every asset in the "
-            "basket, and then simply hold those units until the end — no further "
-            "buying, selling or rebalancing.\n\n"
-            "**How it trades:** one purchase, on day one. The number of units of "
+            "Invest a single **lump sum** on the first trading day of the selected "
+            "window on which **every** asset in the basket is priced, split "
+            "**equally** across all of them, and then simply hold those units "
+            "until the end — no further buying, selling or rebalancing. Waiting "
+            "for the whole basket to be priced ensures the initial investment is "
+            "shared evenly rather than over-weighting whichever assets listed "
+            "first.\n\n"
+            "**How it trades:** one purchase, on the first all-priced day. The number of units of "
             "each asset is fixed at that moment and never changes; the portfolio "
             "value afterwards is just those units re-priced every day.\n\n"
             "**Good for:** a long-horizon, low-effort benchmark — the baseline "

@@ -17,6 +17,7 @@ from src.backtest import (  # noqa: E402
     FxColumns,
     build_equal_weight_index,
     compute_riskoff_signals,
+    gate_target_until_all_priced,
     run_backtest,
     simulate_riskoff,
 )
@@ -709,6 +710,47 @@ class TestRiskOffPureFunctions:
         )
 
 
+class TestGateTargetUntilAllPriced:
+    _IDX = pd.date_range('2020-01-31', periods=4, freq='ME', tz='UTC')
+
+    def test_zeroes_target_until_whole_basket_is_priced(self):
+        # B lists only on day three → the target is forced to cash on days 1–2 and
+        # passes through unchanged from the first all-priced day on.
+        price = pd.DataFrame(
+            {'A': [100.0, 100.0, 100.0, 100.0], 'B': [np.nan, np.nan, 200.0, 200.0]},
+            index=self._IDX,
+        )
+        target = pd.Series([1.0, 1.0, 1.0, 1.0], index=self._IDX)
+        gated = gate_target_until_all_priced(price, target)
+        assert gated.tolist() == pytest.approx([0.0, 0.0, 1.0, 1.0])
+
+    def test_single_asset_passes_through_unchanged(self):
+        # One asset priced from day one → nothing to gate.
+        price = pd.DataFrame({'A': [100.0, 100.0, 100.0, 100.0]}, index=self._IDX)
+        target = pd.Series([0.0, 0.33, 0.67, 1.0], index=self._IDX)
+        gated = gate_target_until_all_priced(price, target)
+        assert gated.tolist() == pytest.approx([0.0, 0.33, 0.67, 1.0])
+
+    def test_all_cash_when_an_asset_is_never_priced(self):
+        # B never gets a price → the target is zeroed for the whole window.
+        price = pd.DataFrame(
+            {'A': [100.0, 100.0], 'B': [np.nan, np.nan]},
+            index=self._IDX[:2],
+        )
+        target = pd.Series([1.0, 1.0], index=self._IDX[:2])
+        gated = gate_target_until_all_priced(price, target)
+        assert gated.tolist() == pytest.approx([0.0, 0.0])
+
+    def test_does_not_mutate_input(self):
+        price = pd.DataFrame(
+            {'A': [100.0, 100.0], 'B': [np.nan, 200.0]},
+            index=self._IDX[:2],
+        )
+        target = pd.Series([1.0, 1.0], index=self._IDX[:2])
+        gate_target_until_all_priced(price, target)
+        assert target.tolist() == pytest.approx([1.0, 1.0])
+
+
 # ---------------------------------------------------------------------------
 # Layer 7 – per-plugin order-event generators (the strategy-specific halves
 # of the order log; the generic finalize step is tested in test_backtest.py)
@@ -914,3 +956,24 @@ class TestLumpsumOrderEvents:
         events = _lumpsum_order_events(price, 10_000.0)
         assert len(events) == 1
         assert events[0]['date'] == self._IDX[1]
+
+    def test_buy_waits_until_all_assets_priced(self):
+        # B lists only on day three → the buy waits until both A and B are priced,
+        # so the lump sum is split equally across the whole basket.
+        price = pd.DataFrame(
+            {'A': [100.0, 100.0, 100.0, 100.0], 'B': [np.nan, np.nan, 200.0, 200.0]},
+            index=self._IDX,
+        )
+        events = _lumpsum_order_events(price, 10_000.0)
+        assert len(events) == 1
+        assert events[0]['date'] == self._IDX[2]
+        assert events[0]['asset_values'] == pytest.approx({'A': 5_000.0, 'B': 5_000.0})
+
+    def test_no_event_when_an_asset_is_never_priced(self):
+        # B never gets a price → the basket is never fully priced, so nothing is
+        # deployed and no order is recorded.
+        price = pd.DataFrame(
+            {'A': [100.0, 100.0], 'B': [np.nan, np.nan]},
+            index=self._IDX[:2],
+        )
+        assert _lumpsum_order_events(price, 10_000.0) == []

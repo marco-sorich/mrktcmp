@@ -1051,6 +1051,60 @@ def _rebalance_to_target(
     return new_holdings, new_cash, total_value
 
 
+def _first_all_priced_pos(prices_mat: np.ndarray) -> int | None:
+    """Position of the first row on which *every* asset has a valid, positive price.
+
+    The lump-sum strategies (Buy & Hold and Risk-Off) deploy their initial
+    investment only once the **whole basket** is priced, so the money is split
+    equally across *all* assets instead of over-weighting whichever happened to
+    list first.  A valid price is non-NaN and strictly positive (a zero/negative
+    price means suspended/delisted, a NaN a data gap).
+
+    Parameters
+    ----------
+    prices_mat – (days × assets) price matrix; NaN marks a missing close.
+
+    Returns
+    -------
+    The integer row position of the first all-priced day, or ``None`` when no
+    such day exists (some asset never gets a price within the window) — the
+    caller then keeps the lump sum in cash.
+    """
+    buyable = ~np.isnan(prices_mat) & (prices_mat > 0)
+    all_buyable = buyable.all(axis=1)
+    pos = np.flatnonzero(all_buyable)
+    return int(pos[0]) if pos.size else None
+
+
+def gate_target_until_all_priced(
+    price_df: pd.DataFrame, target_fraction: pd.Series
+) -> pd.Series:
+    """Zero a daily target invested fraction until the whole basket is priced.
+
+    The Risk-Off strategy deploys its lump sum only once **every** asset has a
+    valid price, so the initial investment is split equally across all assets
+    rather than over-weighting whichever listed first.  This forces the daily
+    target to 0.0 (fully in cash) on every day before the first day on which
+    every asset has a valid, positive price (see ``_first_all_priced_pos``); from
+    that day on the supplied target passes through unchanged.  When no such day
+    exists the target is all-zero, leaving the lump sum in cash for the whole
+    window — matching ``simulate_lumpsum``'s never-fully-priced behaviour.
+
+    *target_fraction* is expected to already be aligned to *price_df*'s index
+    (the plugin reindexes it before calling); a copy is returned so the caller's
+    series is left untouched.
+    """
+    if price_df.empty:
+        return target_fraction
+    first = _first_all_priced_pos(price_df.to_numpy(dtype=float))
+    gated = target_fraction.copy()
+    if first is None:
+        gated.iloc[:] = 0.0
+    else:
+        gated.iloc[:first] = 0.0
+    return gated
+
+
 def simulate_riskoff(
     price_df: pd.DataFrame,
     target_fraction: pd.Series,
@@ -1144,9 +1198,11 @@ def simulate_lumpsum(
 ) -> tuple[pd.Series, float]:
     """Simulate a single initial lump-sum investment held to the end (buy & hold).
 
-    The whole *initial_investment* is deployed once, on the first trading day
-    that has at least one buyable asset, split equally across the assets priced
-    that day.  Those units are then held unchanged for the rest of the window —
+    The whole *initial_investment* is deployed once, on the first trading day on
+    which **every** basket asset is buyable, split equally across all of them, so
+    the initial investment is shared evenly across the whole basket rather than
+    over-weighting whichever assets listed first.  Those units are then held
+    unchanged for the rest of the window —
     there are no further trades, no rebalancing and no contributions — so the
     daily value curve is simply the fixed holdings re-priced each day.  Because
     no fresh money ever enters after day one, *total_invested* is the lump sum.
@@ -1155,7 +1211,8 @@ def simulate_lumpsum(
     ``_rebalance_to_target`` (target fraction 1.0 = fully invested), then every
     day is valued in a single vectorised numpy pass (Σ units × price over assets
     with a valid price — a NaN price contributes 0 but keeps its units — plus any
-    residual cash).  Days before the first buy hold the lump sum flat as cash.
+    residual cash).  Days before the first all-priced buy day hold the lump sum
+    flat as cash.
 
     Parameters
     ----------
@@ -1179,19 +1236,18 @@ def simulate_lumpsum(
     prices_mat = price_df.to_numpy(dtype=float)
     n_days, n_assets = prices_mat.shape
 
-    # An asset is buyable on a day with a valid, strictly positive price; the
-    # lump sum is deployed on the first day at least one asset is buyable.
-    buyable = ~np.isnan(prices_mat) & (prices_mat > 0)
-    has_buyable = buyable.any(axis=1)
+    # The lump sum is deployed on the first day on which *every* asset is buyable
+    # (valid, strictly positive price), so it is split equally across the whole
+    # basket rather than over-weighting whichever assets listed first.
+    buy_pos = _first_all_priced_pos(prices_mat)
 
-    # Never any tradable price → the lump sum is held flat in cash throughout.
-    if not has_buyable.any():
+    # No day has the whole basket priced → the lump sum is held flat in cash.
+    if buy_pos is None:
         flat = pd.Series(np.full(n_days, float(initial_investment)), index=price_df.index)
         return flat, initial_investment
 
-    # Deploy 100% on the first buyable day, equal-weight across that day's priced
-    # assets, reusing the exact Risk-Off rebalance math (cash_after ≈ 0).
-    buy_pos = int(np.flatnonzero(has_buyable)[0])
+    # Deploy 100% on that first all-priced day, equal-weight across the basket,
+    # reusing the exact Risk-Off rebalance math (cash_after ≈ 0).
     holdings: dict[str, float] = {col: 0.0 for col in columns}
     holdings, cash, _ = _rebalance_to_target(
         holdings, float(initial_investment), price_df.iloc[buy_pos], 1.0

@@ -32,6 +32,7 @@ from src.backtest import (
     build_order_log,
     compute_metrics,
     compute_riskoff_signals,
+    gate_target_until_all_priced,
     load_daily_closes,
     simulate_riskoff,
 )
@@ -166,7 +167,9 @@ class RiskOffStrategy(BacktestStrategy):
             "days of the year (default 10) is positive.\n\n"
             "**How it trades:** the basket is bought or sold to the new target "
             "**only on the day the target changes**, holding (and letting the "
-            "fraction drift) in between; any uninvested portion sits in cash.\n\n"
+            "fraction drift) in between; any uninvested portion sits in cash. The "
+            "lump sum stays fully in cash until every basket asset is priced, so "
+            "the first deployment is split equally across the whole basket.\n\n"
             "**Good for:** dampening large drawdowns in falling markets at the cost "
             "of lagging in strong, choppy uptrends.\n\n"
             "**Parameters**\n\n"
@@ -261,6 +264,12 @@ class RiskOffStrategy(BacktestStrategy):
         #    The windowed row count is exactly the number of points later plotted.
         with log_duration(f'riskoff: simulate+metrics+orderlog ({price_df.shape[0]} rows)'):
             target_fraction = (signals / 3.0).reindex(price_df.index).fillna(0.0)
+            # Hold the lump sum in cash until the whole basket is priced, so the
+            # initial deployment splits the investment equally across all assets
+            # rather than over-weighting whichever listed first. Applied to the
+            # single target series both the simulation and the order log consume,
+            # keeping them in lockstep.
+            target_fraction = gate_target_until_all_priced(price_df, target_fraction)
             portfolio, total_invested = simulate_riskoff(price_df, target_fraction, initial_investment)
             metrics = compute_metrics(portfolio, total_invested)
 
