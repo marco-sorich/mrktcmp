@@ -389,7 +389,6 @@ class TestResetResultsOnInputChange:
         from dash import html
         _, _, metrics, _, _ = reset_results_on_input_change(None, None, 'EUR', None, None)
         assert isinstance(metrics, html.Table)
-        import re
         rendered = str(metrics)
         assert '—' in rendered
 

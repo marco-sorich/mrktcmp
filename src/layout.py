@@ -54,7 +54,7 @@ def create_layout():
         app.layout = create_layout()
 
     The page lets users build two asset baskets and compare how a chosen
-    backtesting strategy (e.g. DCA, Risk-Off Signale) would have performed
+    backtesting strategy (e.g. DCA, Risk-Off) would have performed
     over a user-selected date range.
 
     Returns

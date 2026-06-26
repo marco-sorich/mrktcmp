@@ -134,7 +134,7 @@ class RiskOffStrategy(BacktestStrategy):
 
     @classmethod
     def get_name(cls) -> str:
-        return "Risk-Off Signale"
+        return "Risk-Off"
 
     @classmethod
     def get_icon(cls) -> str:
@@ -143,7 +143,7 @@ class RiskOffStrategy(BacktestStrategy):
     @classmethod
     def get_description(cls) -> str:
         return (
-            "Risk-Off Signale: invest a one-off lump sum and shift between the "
+            "Risk-Off: invest a one-off lump sum and shift between the "
             "basket and cash based on three daily market signals (200-day trend, "
             "year-to-date return, January barometer); the basket is bought/sold to "
             "the new target whenever the signal changes."
@@ -152,7 +152,7 @@ class RiskOffStrategy(BacktestStrategy):
     @classmethod
     def get_long_description(cls) -> str:
         return (
-            "## Risk-Off Signale\n\n"
+            "## Risk-Off\n\n"
             "A **tactical** lump-sum strategy: stay invested in the basket while "
             "the market looks healthy, and step aside into cash when it does not. "
             "Every day three simple market signals are evaluated and summed into a "

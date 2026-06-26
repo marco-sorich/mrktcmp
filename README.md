@@ -17,7 +17,7 @@ A Plotly Dash web application for backtesting across user-defined asset baskets.
   trading day, split equally across available assets, and then held unchanged until the end — one order, no rebalancing
 - **DCA**: a fixed amount (1,000, in the reporting currency) contributed per basket every month (on each month's last trading day),
   split equally across available assets; the portfolio is valued on every trading day
-- **Risk-Off Signale**: a one-off lump sum is held as cash and tactically shifted between the basket and cash.
+- **Risk-Off**: a one-off lump sum is held as cash and tactically shifted between the basket and cash.
   Three market signals are evaluated on the basket as a whole *every day* — 200-day trend, year-to-date return, and the
   January barometer (first 10 trading days of the year) — and the number of *positive* signals sets the target invested
   fraction in thirds (3 → 100 %, 2 → 66 %, 1 → 33 %, 0 → all cash). The basket is bought/sold to the new target on the

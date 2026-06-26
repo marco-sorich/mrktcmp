@@ -468,11 +468,11 @@ class TestRunBacktestBackwardCompat:
 
 class TestRiskOffStrategy:
     def test_is_registered_in_registry(self):
-        assert "Risk-Off Signale" in list_strategies()
-        assert get_strategy("Risk-Off Signale") is RiskOffStrategy
+        assert "Risk-Off" in list_strategies()
+        assert get_strategy("Risk-Off") is RiskOffStrategy
 
     def test_get_name_and_icon(self):
-        assert RiskOffStrategy.get_name() == 'Risk-Off Signale'
+        assert RiskOffStrategy.get_name() == 'Risk-Off'
         icon = RiskOffStrategy.get_icon()
         assert isinstance(icon, str) and icon
 
