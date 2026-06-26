@@ -20,6 +20,8 @@ from src.backtest import (  # noqa: E402
     _asset_prices_local,
     _fx_rate_values,
     _get_monthly_range,
+    _read_close_series,
+    clear_parquet_cache,
 )
 
 # ---------------------------------------------------------------------------
@@ -485,6 +487,38 @@ class TestGetMonthlyRange:
         with patch('src.backtest.pd.read_parquet', side_effect=OSError('fail')):
             s, e = _get_monthly_range(BASE_URL, 'aapl.parquet', SAMPLE_META)
         assert s is None and e is None
+
+
+# ---------------------------------------------------------------------------
+# _read_close_series – process-wide parquet read cache
+# ---------------------------------------------------------------------------
+
+class TestReadCloseSeriesCache:
+    def test_same_file_read_only_once_across_calls(self):
+        # The slider refresh (_get_monthly_range) and the backtest run
+        # (load_daily_closes) both touch the same asset file; the process-wide
+        # cache must collapse that to a single underlying pd.read_parquet.
+        mock = Mock(return_value=_daily_ohlcv(100.0, n_days=400))
+        with patch('src.backtest.pd.read_parquet', mock):
+            _get_monthly_range(BASE_URL, 'aapl.parquet', SAMPLE_META)
+            load_daily_closes(BASE_URL, ['aapl.parquet'], SAMPLE_META, 'EUR')
+            load_daily_closes(BASE_URL, ['aapl.parquet'], SAMPLE_META, 'EUR')
+        aapl_reads = [c for c in mock.call_args_list if 'aapl.parquet' in c.args[0]]
+        assert len(aapl_reads) == 1
+
+    def test_clear_cache_forces_reread(self):
+        mock = Mock(return_value=_daily_ohlcv(100.0, n_days=400))
+        with patch('src.backtest.pd.read_parquet', mock):
+            _read_close_series(BASE_URL, 'aapl.parquet')
+            clear_parquet_cache()
+            _read_close_series(BASE_URL, 'aapl.parquet')
+        assert mock.call_count == 2
+
+    def test_cached_series_is_utc_normalised(self):
+        with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0, n_days=10)):
+            series = _read_close_series(BASE_URL, 'aapl.parquet')
+        assert isinstance(series.index, pd.DatetimeIndex)
+        assert series.index.tz is not None
 
 
 # ---------------------------------------------------------------------------

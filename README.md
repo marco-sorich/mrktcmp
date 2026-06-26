@@ -93,8 +93,10 @@ DatetimeIndex (daily, UTC)   Close
 …
 ```
 
-Files are fetched on demand when a user adds an asset to a basket; only the `Close` column is read
-for the date-range slider, and the full file is read when a backtest is run.
+Files are fetched on demand when a user adds an asset to a basket; only the `Close` column is ever
+read (for both the date-range slider and the backtest). Each asset and FX-pair file is cached
+process-wide after its first read, so across a full workflow — opening the page, adjusting baskets,
+and running the backtest — every file (and `master.parquet`) is loaded from `BASE_URL` only once.
 
 ## Setup
 
