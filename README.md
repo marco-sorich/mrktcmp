@@ -14,14 +14,18 @@ A Plotly Dash web application for backtesting across user-defined asset baskets.
 - Pluggable backtesting strategies — each basket can use a different strategy with its own configurable parameters; a
   click on the ⓘ icon next to the strategy selector expands a rich-text description explaining the selected strategy and its parameters
 - **Buy & Hold** (default): a single lump sum (10,000, in the reporting currency) is invested in full on the first
-  trading day, split equally across available assets, and then held unchanged until the end — one order, no rebalancing
+  trading day on which **every** basket asset is priced, split equally across all of them, and then held unchanged until
+  the end — one order, no rebalancing. Waiting for the whole basket to be priced keeps the initial investment split evenly
+  rather than over-weighting whichever assets listed first
 - **DCA**: a fixed amount (1,000, in the reporting currency) contributed per basket every month (on each month's last trading day),
   split equally across available assets; the portfolio is valued on every trading day
 - **Risk-Off Signale**: a one-off lump sum is held as cash and tactically shifted between the basket and cash.
   Three market signals are evaluated on the basket as a whole *every day* — 200-day trend, year-to-date return, and the
   January barometer (first 10 trading days of the year) — and the number of *positive* signals sets the target invested
   fraction in thirds (3 → 100 %, 2 → 66 %, 1 → 33 %, 0 → all cash). The basket is bought/sold to the new target on the
-  day the signal changes and then held (drifting with the market) until the next change
+  day the signal changes and then held (drifting with the market) until the next change. The lump sum stays fully in cash
+  until the first day every basket asset is priced, so (like Buy & Hold) the initial deployment is split equally across
+  the whole basket
 - All strategies value the portfolio on a **daily** basis, so the chart is a dense daily curve and the risk metrics are
   daily-correct
 - Side-by-side performance metrics: Total Return, CAGR, Sharpe Ratio, Max. Drawdown, Volatility, Calmar Ratio, and more
