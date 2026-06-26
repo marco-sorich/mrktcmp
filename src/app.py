@@ -49,7 +49,13 @@ import dash
 # flask: the underlying web framework that Dash wraps. g is a request-scoped
 # namespace used here to store the request start time; flask_request exposes
 # the current HTTP request's headers so we can read the CF-Ray value.
+import flask
 from flask import g, request as flask_request
+
+# requests: HTTP library used by the /healthz endpoint to probe whether the
+# remote parquet data source is reachable.  Aliased to avoid collision with
+# flask_request (the current Flask request object, imported below).
+import requests as _http
 
 # dash_bootstrap_components: provides Bootstrap-themed Dash components and,
 # more importantly here, the CDN links for Bootstrap CSS (dbc.themes.BOOTSTRAP)
@@ -164,6 +170,46 @@ def _log_request(response):
         duration_ms,
     )
     return response
+
+
+# ---------------------------------------------------------------------------
+# Health check endpoint
+#
+# GET /healthz returns a JSON object with two checks:
+#   catalogue     – master.parquet was successfully loaded at startup
+#   parquet_access – the parquet data source is reachable right now
+#
+# HTTP 200 when both checks pass; 503 when any check fails.
+# ---------------------------------------------------------------------------
+
+@server.route('/healthz')
+def _healthz():
+    """Return application health status as JSON."""
+    checks: dict[str, str] = {}
+
+    # Check 1: catalogue loaded at startup
+    checks['catalogue'] = 'ok' if _config.df is not None else 'error'
+
+    # Check 2: parquet source reachable right now
+    base = _config.base_url
+    if base:
+        target = f"{base}/master.parquet"
+        try:
+            if target.startswith(('http://', 'https://')):
+                # A HEAD request is enough: we only need to know the resource
+                # is reachable, not download it on every health probe.
+                r = _http.head(target, timeout=5)
+                checks['parquet_access'] = 'ok' if r.ok else 'error'
+            else:
+                checks['parquet_access'] = 'ok' if os.path.exists(target) else 'error'
+        except Exception:
+            checks['parquet_access'] = 'error'
+    else:
+        checks['parquet_access'] = 'error'
+
+    overall = 'ok' if all(v == 'ok' for v in checks.values()) else 'error'
+    body = flask.jsonify({'status': overall, 'version': _config.app_version, 'checks': checks})
+    return body, (200 if overall == 'ok' else 503)
 
 
 # ---------------------------------------------------------------------------

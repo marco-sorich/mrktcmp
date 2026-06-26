@@ -789,3 +789,103 @@ class TestDownsampleForPlot:
         assert out.index[0] == s.index[0]       # first point preserved
         assert out.index[-1] == s.index[-1]     # final point always preserved
         assert out.iloc[-1] == s.iloc[-1]
+
+
+# ---------------------------------------------------------------------------
+# /healthz endpoint
+# ---------------------------------------------------------------------------
+
+class TestHealthCheck:
+    """Tests for the GET /healthz health check endpoint."""
+
+    def _client(self):
+        return app_module.server.test_client()
+
+    def test_healthy_returns_200(self):
+        """All checks pass → 200 with status 'ok'."""
+        mock_resp = MagicMock()
+        mock_resp.ok = True
+        with patch.object(config_module, 'df', SAMPLE_DF), \
+             patch.object(config_module, 'base_url', 'https://example.com'), \
+             patch('requests.head', return_value=mock_resp):
+            r = self._client().get('/healthz')
+        assert r.status_code == 200
+        data = r.get_json()
+        assert data['status'] == 'ok'
+        assert data['checks']['catalogue'] == 'ok'
+        assert data['checks']['parquet_access'] == 'ok'
+
+    def test_no_catalogue_returns_503(self):
+        """df is None → catalogue check fails → 503."""
+        mock_resp = MagicMock()
+        mock_resp.ok = True
+        with patch.object(config_module, 'df', None), \
+             patch.object(config_module, 'base_url', 'https://example.com'), \
+             patch('requests.head', return_value=mock_resp):
+            r = self._client().get('/healthz')
+        assert r.status_code == 503
+        data = r.get_json()
+        assert data['status'] == 'error'
+        assert data['checks']['catalogue'] == 'error'
+
+    def test_no_base_url_returns_503(self):
+        """base_url is None → parquet_access check fails → 503."""
+        with patch.object(config_module, 'df', SAMPLE_DF), \
+             patch.object(config_module, 'base_url', None):
+            r = self._client().get('/healthz')
+        assert r.status_code == 503
+        data = r.get_json()
+        assert data['status'] == 'error'
+        assert data['checks']['parquet_access'] == 'error'
+
+    def test_unreachable_parquet_returns_503(self):
+        """HEAD request raises ConnectionError → parquet_access fails → 503."""
+        import requests as real_requests
+        with patch.object(config_module, 'df', SAMPLE_DF), \
+             patch.object(config_module, 'base_url', 'https://example.com'), \
+             patch('requests.head', side_effect=real_requests.ConnectionError):
+            r = self._client().get('/healthz')
+        assert r.status_code == 503
+        data = r.get_json()
+        assert data['checks']['parquet_access'] == 'error'
+
+    def test_http_non_ok_response_returns_503(self):
+        """HEAD returns 404 → parquet_access check reports error."""
+        mock_resp = MagicMock()
+        mock_resp.ok = False
+        with patch.object(config_module, 'df', SAMPLE_DF), \
+             patch.object(config_module, 'base_url', 'https://example.com'), \
+             patch('requests.head', return_value=mock_resp):
+            r = self._client().get('/healthz')
+        assert r.status_code == 503
+        data = r.get_json()
+        assert data['checks']['parquet_access'] == 'error'
+
+    def test_response_includes_version(self):
+        """Response body always carries the app version string."""
+        mock_resp = MagicMock()
+        mock_resp.ok = True
+        with patch.object(config_module, 'df', SAMPLE_DF), \
+             patch.object(config_module, 'base_url', 'https://example.com'), \
+             patch('requests.head', return_value=mock_resp):
+            r = self._client().get('/healthz')
+        data = r.get_json()
+        assert 'version' in data
+        assert isinstance(data['version'], str)
+
+    def test_local_path_exists(self):
+        """base_url is a local directory and master.parquet exists → 200."""
+        with patch.object(config_module, 'df', SAMPLE_DF), \
+             patch.object(config_module, 'base_url', '/data'), \
+             patch('os.path.exists', return_value=True):
+            r = self._client().get('/healthz')
+        assert r.status_code == 200
+
+    def test_local_path_missing(self):
+        """base_url is a local directory but master.parquet is absent → 503."""
+        with patch.object(config_module, 'df', SAMPLE_DF), \
+             patch.object(config_module, 'base_url', '/data'), \
+             patch('os.path.exists', return_value=False):
+            r = self._client().get('/healthz')
+        assert r.status_code == 503
+        assert r.get_json()['checks']['parquet_access'] == 'error'
