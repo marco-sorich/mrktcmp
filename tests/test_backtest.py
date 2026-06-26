@@ -200,16 +200,29 @@ class TestSimulateLumpsum:
         # 50 AAPL sh × 200 + 50 BTC sh × 50 = 10,000 + 2,500 = 12,500.
         assert portfolio.iloc[-1] == pytest.approx(12_500.0)
 
-    def test_lump_sum_held_as_cash_before_first_buyable_day(self):
-        # No buyable price on day one → the lump sum waits in cash until BTC
-        # becomes priced, then is fully deployed.
+    def test_lump_sum_waits_until_all_assets_priced(self):
+        # AAPL is priced from day one but BTC only lists on day two; the lump sum
+        # waits in cash until *both* are priced, then deploys equally across them.
+        df = pd.DataFrame(
+            {'AAPL': [100.0, 100.0, 100.0], 'BTC': [np.nan, 200.0, 200.0]},
+            index=_MONTHLY_IDX[:3],
+        )
+        portfolio, _ = simulate_lumpsum(df, initial_investment=10_000.0)
+        assert portfolio.iloc[0] == pytest.approx(10_000.0)   # still all cash
+        assert portfolio.iloc[1] == pytest.approx(10_000.0)   # deployed on day two
+        # 5,000 into each (50 AAPL sh + 25 BTC sh); a flat market keeps it at 10k.
+        assert portfolio.iloc[2] == pytest.approx(10_000.0)
+
+    def test_lump_sum_held_as_cash_when_an_asset_is_never_priced(self):
+        # AAPL never gets a price → the whole basket is never priced together, so
+        # the lump sum stays in cash for the entire window (no partial deployment).
         df = pd.DataFrame(
             {'AAPL': [np.nan, np.nan], 'BTC': [np.nan, 200.0]},
             index=_MONTHLY_IDX[:2],
         )
         portfolio, _ = simulate_lumpsum(df, initial_investment=10_000.0)
         assert portfolio.iloc[0] == pytest.approx(10_000.0)   # cash
-        assert portfolio.iloc[1] == pytest.approx(10_000.0)   # just invested
+        assert portfolio.iloc[1] == pytest.approx(10_000.0)   # still cash
 
     def test_output_index_matches_input_index(self):
         idx = _MONTHLY_IDX[:6]
