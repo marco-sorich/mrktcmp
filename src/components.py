@@ -484,6 +484,9 @@ def _render_basket_list(basket_data, basket_id, weights=None):
                     step='any',
                     debounce=True,
                     size='sm',
+                    # Bring up the numeric (decimal) keypad on touch devices so the
+                    # weight is quick to enter on a phone.
+                    inputMode='decimal',
                     style={'width': '58px', 'textAlign': 'right'},
                 ),
                 # Live allocation percentage (= this weight's share of the total),
