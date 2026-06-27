@@ -461,12 +461,17 @@ def _render_basket_list(basket_data, basket_id, weights=None):
             # Asset label: "AAPL — Apple Inc (USD)" — the trailing currency tag
             # (omitted for assets with a blank/unknown currency) tells the user
             # which currency the asset trades in, since baskets may mix currencies.
+            # flex '1 1 140px' lets it grow but claim at least ~140px before the
+            # controls wrap below it; wordBreak wraps long names instead of
+            # clipping them, so the asset text stays readable on a narrow phone.
             html.Span(_basket_item_label(item),
-                      style={'overflow': 'hidden', 'textOverflow': 'ellipsis',
-                             'flex': 1, 'minWidth': 0}),
+                      style={'flex': '1 1 140px', 'minWidth': '120px',
+                             'wordBreak': 'break-word'}),
 
             # Right-hand controls: the relative-weight input, its resulting
             # allocation percentage, and the remove button, grouped together.
+            # flexShrink 0 keeps them at their natural size so they never crush the
+            # label; when the row is too narrow they wrap onto their own line.
             html.Div([
                 # Editable relative weight (pattern-matching ID carries the
                 # filename).  debounce=True commits on Enter/blur so the sync
@@ -503,7 +508,8 @@ def _render_basket_list(basket_data, basket_id, weights=None):
                     n_clicks=0,
                     style=_BTN_SMALL,
                 ),
-            ], style={'display': 'flex', 'alignItems': 'center', 'gap': '6px'}),
+            ], style={'display': 'flex', 'alignItems': 'center', 'gap': '6px',
+                      'flexShrink': 0, 'marginLeft': 'auto'}),
         ], style=_BASKET_ITEM_STYLE)
         for item in basket_data
     ])
