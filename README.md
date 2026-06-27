@@ -31,6 +31,12 @@ A Plotly Dash web application for backtesting across user-defined asset baskets.
   day the signal changes and then held (drifting with the market) until the next change. The lump sum stays fully in cash
   until the first day every (positively-weighted) basket asset is priced, so (like Buy & Hold) the initial deployment is
   split across the whole basket by the per-asset weights
+- **Summer Gap**: a seasonal twist on the lump sum (the "Sommerloch" / *Sell in May* idea). The lump sum is invested up
+  front and then, **every year**, the whole basket is sold to cash on the first trading day on/after a configurable sell
+  date (default 1 August) and bought back on the first trading day on/after a configurable buy date (default 1 October) —
+  both dates configurable to the month *and* day. It reuses the Risk-Off engine with a purely calendar-driven target
+  (fully invested outside the window, fully in cash inside it), and the same all-priced gate so the first deployment is
+  split across the whole basket by the per-asset weights
 - All strategies value the portfolio on a **daily** basis, so the chart is a dense daily curve and the risk metrics are
   daily-correct
 - Side-by-side performance metrics: Total Return, CAGR, Sharpe Ratio, Max. Drawdown, Volatility, Calmar Ratio, and more
@@ -200,6 +206,7 @@ src/
     lumpsum.py        # Buy & Hold strategy plugin (one single initial investment)
     dca.py            # Dollar-Cost Averaging strategy plugin
     riskoff.py        # Risk-Off signal strategy plugin (lump sum + tactical cash)
+    summergap.py      # Summer Gap seasonal strategy plugin (lump sum, out for the summer)
   callbacks/
     backtesting.py    # backtesting callbacks
   config.py           # startup singleton: logging, env vars, master.parquet
@@ -210,7 +217,7 @@ src/
 tests/
   test_app.py
   test_backtest.py
-  test_strategies.py  # plugin system: ConfigParam, registry, BuyHold/DCA/RiskOff, backward compat
+  test_strategies.py  # plugin system: ConfigParam, registry, BuyHold/DCA/RiskOff/SummerGap, backward compat
 ```
 
 ## Adding a New Backtesting Strategy

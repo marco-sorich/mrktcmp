@@ -12,6 +12,7 @@ from src.strategies.registry import get_strategy, list_strategies, register  # n
 from src.strategies.dca import DCAStrategy, _dca_order_events  # noqa: E402
 from src.strategies.lumpsum import BuyHoldStrategy, _lumpsum_order_events  # noqa: E402
 from src.strategies.riskoff import RiskOffStrategy, _riskoff_order_events  # noqa: E402
+from src.strategies.summergap import SummerGapStrategy, _seasonal_target  # noqa: E402
 from src.backtest import (  # noqa: E402
     INITIAL_INVESTMENT,
     FxColumns,
@@ -1035,3 +1036,159 @@ class TestLumpsumOrderEvents:
             index=self._IDX[:2],
         )
         assert _lumpsum_order_events(price, 10_000.0) == []
+
+
+# ---------------------------------------------------------------------------
+# Layer 7 – SummerGapStrategy plugin
+# ---------------------------------------------------------------------------
+
+class TestSummerGapStrategy:
+    def test_is_registered_in_registry(self):
+        assert "Summer Gap" in list_strategies()
+        assert get_strategy("Summer Gap") is SummerGapStrategy
+
+    def test_get_name_and_icon(self):
+        assert SummerGapStrategy.get_name() == 'Summer Gap'
+        icon = SummerGapStrategy.get_icon()
+        assert isinstance(icon, str) and icon
+
+    def test_get_description_is_non_empty_string(self):
+        assert isinstance(SummerGapStrategy.get_description(), str)
+        assert SummerGapStrategy.get_description()
+
+    def test_get_long_description_returns_rich_markdown(self):
+        long = SummerGapStrategy.get_long_description()
+        assert isinstance(long, str) and long
+        assert len(long) > len(SummerGapStrategy.get_description())
+
+    def test_config_schema_keys_and_defaults(self):
+        schema = SummerGapStrategy.get_config_schema()
+        by_key = {p.key: p for p in schema}
+        assert set(by_key) == {
+            'initial_investment', 'sell_month', 'sell_day', 'buy_month', 'buy_day',
+        }
+        # Every param must provide a default so the GUI can pre-fill it.
+        for param in schema:
+            assert param.default is not None, f"Param '{param.key}' has no default"
+        assert by_key['initial_investment'].default == float(INITIAL_INVESTMENT)
+        # The seasonal defaults reproduce the classic Aug -> Oct summer gap.
+        assert by_key['sell_month'].default == 'August'
+        assert by_key['sell_day'].default == 1
+        assert by_key['buy_month'].default == 'October'
+        assert by_key['buy_day'].default == 1
+        # Select defaults must be members of their options (also enforced by
+        # ConfigParam, asserted here as a guard against typos).
+        assert by_key['sell_month'].default in by_key['sell_month'].options
+        assert by_key['buy_month'].default in by_key['buy_month'].options
+
+    def test_run_returns_exactly_9_metric_keys(self):
+        strategy = SummerGapStrategy()
+        with patch('src.backtest.pd.read_parquet', return_value=_daily_rising()):
+            portfolio, metrics, orders = strategy.run(
+                BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META, params={}
+            )
+        assert portfolio is not None
+        assert isinstance(metrics, dict)
+        assert set(metrics.keys()) == _EXPECTED_METRIC_KEYS
+        assert len(metrics) == 9
+        assert orders is not None and len(orders) >= 1
+
+    def test_run_with_empty_filenames_returns_none_none(self):
+        strategy = SummerGapStrategy()
+        portfolio, metrics, orders = strategy.run(
+            BASE_URL, [], _START, _END, SAMPLE_META, params={}
+        )
+        assert portfolio is None and metrics is None and orders is None
+
+    def test_run_with_too_short_date_range_returns_none_none(self):
+        # Only 1 month in the window → compute_metrics needs ≥3 → 3×None.
+        strategy = SummerGapStrategy()
+        start = pd.Timestamp('2020-06-30', tz='UTC')
+        end = pd.Timestamp('2020-06-30', tz='UTC')
+        with patch('src.backtest.pd.read_parquet', return_value=_daily_rising()):
+            portfolio, metrics, orders = strategy.run(
+                BASE_URL, ['aapl.parquet'], start, end, SAMPLE_META, params={}
+            )
+        assert portfolio is None and metrics is None and orders is None
+
+    def test_flat_market_still_swaps_in_and_out(self):
+        # Unlike Risk-Off (which stays all-cash in a flat market), the seasonal
+        # target flips regardless of price, so a multi-year window over flat
+        # prices still records Sell (start of Aug) and Buy (start of Oct) trades.
+        strategy = SummerGapStrategy()
+        with patch('src.backtest.pd.read_parquet', return_value=_daily_ohlcv(100.0)):
+            _, metrics, orders = strategy.run(
+                BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META, params={}
+            )
+        assert metrics is not None
+        assert orders is not None and orders
+        sides = [o['side'] for o in orders]
+        assert 'Sell' in sides and 'Buy' in sides
+        # Two full years in the window → two summer gaps → two Sell exits.
+        assert sides.count('Sell') == 2
+        # Sells land in August, buy-backs in October.
+        sell_months = {o['date'].month for o in orders if o['side'] == 'Sell'}
+        buy_back_months = {o['date'].month for o in orders if o['side'] == 'Buy'}
+        assert sell_months == {8}
+        assert buy_back_months <= {1, 10}  # initial deployment (Jan) + Oct re-entries
+
+    def test_custom_initial_investment_scales_invested(self):
+        strategy = SummerGapStrategy()
+        with patch('src.backtest.pd.read_parquet', return_value=_daily_rising()):
+            _, metrics, _ = strategy.run(
+                BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META,
+                params={'initial_investment': 25_000.0},
+            )
+        assert metrics is not None
+        invested = float(metrics['Invested'].replace(',', ''))
+        assert invested == pytest.approx(25_000.0)
+
+
+# ---------------------------------------------------------------------------
+# Layer 8 – Summer Gap pure functions (no Dash / no I/O)
+# ---------------------------------------------------------------------------
+
+class TestSeasonalTarget:
+    # A full year of daily dates to test month-level membership.
+    _YEAR = pd.date_range('2021-01-01', '2021-12-31', freq='D', tz='UTC')
+
+    def test_default_window_is_out_in_august_and_september(self):
+        # Default Aug 1 -> Oct 1: cash through August and September, invested else.
+        target = _seasonal_target(self._YEAR, 8, 1, 10, 1)
+        out_months = {d.month for d, v in target.items() if v == 0.0}
+        in_months = {d.month for d, v in target.items() if v == 1.0}
+        assert out_months == {8, 9}
+        assert in_months == {1, 2, 3, 4, 5, 6, 7, 10, 11, 12}
+
+    def test_boundaries_are_half_open(self):
+        # Sell date is "out", buy date is back "in" (half-open [sell, buy)).
+        target = _seasonal_target(self._YEAR, 8, 1, 10, 1)
+        aug_1 = pd.Timestamp('2021-08-01', tz='UTC')
+        sep_30 = pd.Timestamp('2021-09-30', tz='UTC')
+        oct_1 = pd.Timestamp('2021-10-01', tz='UTC')
+        jul_31 = pd.Timestamp('2021-07-31', tz='UTC')
+        assert target[aug_1] == 0.0
+        assert target[sep_30] == 0.0
+        assert target[oct_1] == 1.0
+        assert target[jul_31] == 1.0
+
+    def test_day_granularity_within_a_month(self):
+        # Sell mid-August (15th), buy mid-September (15th): only that half-month
+        # is out of market.
+        target = _seasonal_target(self._YEAR, 8, 15, 9, 15)
+        assert target[pd.Timestamp('2021-08-14', tz='UTC')] == 1.0
+        assert target[pd.Timestamp('2021-08-15', tz='UTC')] == 0.0
+        assert target[pd.Timestamp('2021-09-14', tz='UTC')] == 0.0
+        assert target[pd.Timestamp('2021-09-15', tz='UTC')] == 1.0
+
+    def test_window_wrapping_year_end(self):
+        # Sell in November, buy back in February → Nov, Dec and Jan are out.
+        target = _seasonal_target(self._YEAR, 11, 1, 2, 1)
+        out_months = {d.month for d, v in target.items() if v == 0.0}
+        assert out_months == {11, 12, 1}
+
+    def test_same_date_stays_fully_invested(self):
+        # Degenerate configuration (sell date == buy date) → no out-of-market
+        # window, fully invested every day.
+        target = _seasonal_target(self._YEAR, 8, 1, 8, 1)
+        assert (target == 1.0).all()
