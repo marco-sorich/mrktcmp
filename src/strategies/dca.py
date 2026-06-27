@@ -20,6 +20,7 @@ from src.backtest import (
     _asset_values,
     _fx_rate_values,
     _is_month_end_trading_day,
+    _normalised_weights,
     _portfolio_value,
     _window_by_month,
     build_equal_weight_index,
@@ -38,6 +39,7 @@ def _dca_order_events(
     price_df: pd.DataFrame,
     monthly_investment: float = MONTHLY_INVESTMENT,
     fx: FxColumns | None = None,
+    weights: dict[str, float] | None = None,
 ) -> list[OrderEvent]:
     """Record one Buy OrderEvent per monthly DCA contribution.
 
@@ -45,10 +47,10 @@ def _dca_order_events(
     are added afterwards by ``backtest.build_order_log``.  It mirrors the
     contribution cadence of ``simulate_dca`` (which returns only the daily value
     curve): a contribution lands on each calendar month's last trading day,
-    split equally across the assets priced that day.  For every such day it
-    captures the portfolio worth just before the buy, the fixed cash inflow, and
-    the resulting holdings value — DCA is always fully invested, so cash_after
-    is 0.
+    split across the assets priced that day **in proportion to their per-asset
+    weights** (equal weight by default).  For every such day it captures the
+    portfolio worth just before the buy, the fixed cash inflow, and the resulting
+    holdings value — DCA is always fully invested, so cash_after is 0.
 
     Parameters
     ----------
@@ -57,6 +59,8 @@ def _dca_order_events(
     fx                 – optional FX context (see backtest.FxColumns); when given,
                          each event also carries the trading-currency quote and the
                          per-pair FX rates so the order table can show conversions.
+    weights            – optional symbol → relative weight; None/empty means equal
+                         weight (must match the value passed to simulate_dca).
 
     Returns
     -------
@@ -91,13 +95,20 @@ def _dca_order_events(
         if not available:
             continue
 
+        # Each buyable asset's share of this month's contribution (equal weight by
+        # default; renormalised over the buyable assets when weights are supplied).
+        shares = _normalised_weights(available.keys(), weights)
+        if sum(shares.values()) <= 0.0:
+            # No positively-weighted asset is buyable this day → skip (matches
+            # simulate_dca, which makes no contribution when the day's weights are 0).
+            continue
+
         # Worth before the buy: last month's holdings valued at today's prices.
         value_before = _portfolio_value(holdings, 0.0, prices)
 
-        # Split the contribution equally and add the bought units.
-        per_asset = monthly_investment / len(available)
+        # Split the contribution by the per-asset shares and add the bought units.
         for col, price in available.items():
-            holdings[col] += per_asset / price
+            holdings[col] += (shares[col] * monthly_investment) / price
 
         date = month_end_rows.index[i]
         events.append(OrderEvent(
@@ -178,6 +189,7 @@ class DCAStrategy(BacktestStrategy):
         df_meta: pd.DataFrame,
         params: dict[str, int | float | str],
         base_currency: str = 'EUR',
+        weights: dict[str, float] | None = None,
     ) -> tuple[pd.Series | None, dict[str, str] | None, list[OrderRow] | None]:
         # resolve_params merges caller-supplied values with schema defaults so
         # that passing params={} is equivalent to using all declared defaults.
@@ -208,12 +220,12 @@ class DCAStrategy(BacktestStrategy):
 
         # The windowed row count is exactly the number of points later plotted.
         with log_duration(f'dca: simulate+metrics+orderlog ({price_df.shape[0]} rows)'):
-            portfolio, total_invested = simulate_dca(price_df, monthly_investment)
+            portfolio, total_invested = simulate_dca(price_df, monthly_investment, weights)
             metrics = compute_metrics(portfolio, total_invested)
 
-            # Normalised equal-weight index (first value = 1.0) used as the B&H
-            # benchmark column in the order log.
-            _bh_raw = build_equal_weight_index(price_df)
+            # Normalised (weighted) basket index (first value = 1.0) used as the
+            # B&H benchmark column in the order log; the same weights as the run.
+            _bh_raw = build_equal_weight_index(price_df, weights)
             bh_index = (_bh_raw / _bh_raw.iloc[0]) if not _bh_raw.empty else None
 
             # compute_metrics returns {} when portfolio is too short (< 3 months)
@@ -222,7 +234,7 @@ class DCAStrategy(BacktestStrategy):
             # per-contribution inflows — so initial_capital is 0.
             order_log = (
                 build_order_log(
-                    _dca_order_events(price_df, monthly_investment, fx),
+                    _dca_order_events(price_df, monthly_investment, fx, weights),
                     initial_capital=0.0,
                     bh_index=bh_index,
                 )

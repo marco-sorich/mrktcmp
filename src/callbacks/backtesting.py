@@ -102,6 +102,7 @@ from src.utils import log_time
 from src.components import (
     _render_basket_list, _metrics_table, _build_strategy_params_ui,
     _strategy_desc_panel, _order_rows, _order_table_component, _asset_currency_map,
+    _weight_percentages,
 )
 
 # The DCA simulation engine. run_backtest orchestrates data loading, the
@@ -357,12 +358,13 @@ def _bt_asset_search(search_value, asset_class, current_value):
     Input({'type': 'bt-remove-a', 'index': ALL}, 'n_clicks'),
     State('bt-asset-a', 'value'),            # currently selected asset filename
     State('bt-basket-store-a', 'data'),      # current basket contents (list of dicts)
+    State('bt-weights-store-a', 'data'),     # current per-asset weights {filename: weight}
     prevent_initial_call=True,
 )
 @log_time
-def manage_basket_a(add_clicks, remove_clicks, selected_asset, basket_data):
+def manage_basket_a(add_clicks, remove_clicks, selected_asset, basket_data, weights):
     """Handle add/remove actions for Basket A."""
-    return _manage_basket('a', remove_clicks, selected_asset, basket_data)
+    return _manage_basket('a', remove_clicks, selected_asset, basket_data, weights)
 
 
 @callback(
@@ -372,15 +374,16 @@ def manage_basket_a(add_clicks, remove_clicks, selected_asset, basket_data):
     Input({'type': 'bt-remove-b', 'index': ALL}, 'n_clicks'),
     State('bt-asset-b', 'value'),
     State('bt-basket-store-b', 'data'),
+    State('bt-weights-store-b', 'data'),
     prevent_initial_call=True,
 )
 @log_time
-def manage_basket_b(add_clicks, remove_clicks, selected_asset, basket_data):
+def manage_basket_b(add_clicks, remove_clicks, selected_asset, basket_data, weights):
     """Handle add/remove actions for Basket B."""
-    return _manage_basket('b', remove_clicks, selected_asset, basket_data)
+    return _manage_basket('b', remove_clicks, selected_asset, basket_data, weights)
 
 
-def _manage_basket(basket_id, remove_clicks, selected_asset, basket_data):
+def _manage_basket(basket_id, remove_clicks, selected_asset, basket_data, weights=None):
     """Core logic for adding/removing an asset from a basket.
 
     Inspects dash.callback_context to determine whether the add button or a
@@ -395,6 +398,10 @@ def _manage_basket(basket_id, remove_clicks, selected_asset, basket_data):
                             dropdown (or None if nothing is selected).
     basket_data    : list – current list of asset dicts in the dcc.Store.
                             Each dict has keys 'filename', 'symbol', 'name'.
+    weights        : dict – current per-asset weights ({filename: weight}); passed
+                            through to _render_basket_list so existing assets keep
+                            their user-set weight across an add/remove (a freshly
+                            added asset is absent here and defaults to 1.0).
 
     Returns
     -------
@@ -464,8 +471,104 @@ def _manage_basket(basket_id, remove_clicks, selected_asset, basket_data):
         return no_update, no_update
 
     # Return the new basket data (written to dcc.Store) and the refreshed
-    # visible list component (written to the basket-list Div's children).
-    return basket, _render_basket_list(basket, basket_id)
+    # visible list component (written to the basket-list Div's children).  The
+    # weights map keeps each surviving asset's user-set weight; the new asset is
+    # absent from it and so renders at the default weight of 1.0.
+    return basket, _render_basket_list(basket, basket_id, weights)
+
+
+# ---------------------------------------------------------------------------
+# Callbacks: per-asset weights (persist edits + live allocation percentages)
+# ---------------------------------------------------------------------------
+
+def _sync_weights(values: list, inputs_meta: list, pct_meta: list) -> tuple[dict, list]:
+    """Persist the current weight inputs and recompute their allocation %.
+
+    Builds the ``{filename: weight}`` map from the live weight inputs (a cleared or
+    invalid field falls back to the default weight 1.0; negatives are clamped to
+    0), then renders each input's share-of-total percentage aligned to the order
+    of the percentage-label outputs.
+
+    Parameters
+    ----------
+    values      – current value of every weight input (ALL pattern order).
+    inputs_meta – callback_context.inputs_list entry for the weight inputs; each
+                  element's ``id['index']`` is the asset's filename.
+    pct_meta    – callback_context.outputs_list entry for the percentage labels;
+                  the returned children list is aligned to this order.
+
+    Returns
+    -------
+    (weights_store, pct_children)
+      weights_store – the {filename: weight} dict to persist.
+      pct_children  – percentage strings, one per percentage-label output.
+    """
+    weights: dict = {}
+    for i, meta in enumerate(inputs_meta):
+        filename = meta['id']['index']
+        val = values[i] if i < len(values) else None
+        try:
+            weight = 1.0 if val is None else max(float(val), 0.0)
+        except (TypeError, ValueError):
+            weight = 1.0
+        weights[filename] = weight
+
+    pct = _weight_percentages(weights)
+    pct_children = [pct.get(meta['id']['index'], '—') for meta in pct_meta]
+    return weights, pct_children
+
+
+@callback(
+    # allow_duplicate: the weights store is also (initialised and) read by
+    # manage_basket; here the weight inputs write it back on every edit.
+    Output('bt-weights-store-a', 'data', allow_duplicate=True),
+    Output({'type': 'bt-weight-pct-a', 'index': ALL}, 'children'),
+    Input({'type': 'bt-weight-a', 'index': ALL}, 'value'),
+    prevent_initial_call=True,
+)
+@log_time
+def sync_weights_a(weight_values: list) -> tuple[dict, list]:
+    """Persist Basket A's weight edits and refresh the live allocation %s."""
+    ctx = dash.callback_context
+    return _sync_weights(weight_values, ctx.inputs_list[0], ctx.outputs_list[1])
+
+
+@callback(
+    Output('bt-weights-store-b', 'data', allow_duplicate=True),
+    Output({'type': 'bt-weight-pct-b', 'index': ALL}, 'children'),
+    Input({'type': 'bt-weight-b', 'index': ALL}, 'value'),
+    prevent_initial_call=True,
+)
+@log_time
+def sync_weights_b(weight_values: list) -> tuple[dict, list]:
+    """Persist Basket B's weight edits and refresh the live allocation %s."""
+    ctx = dash.callback_context
+    return _sync_weights(weight_values, ctx.inputs_list[0], ctx.outputs_list[1])
+
+
+def _symbol_weights(basket_items: list | None, weights_store: dict | None) -> dict | None:
+    """Map each basket asset's symbol to its relative weight for the simulation.
+
+    Looks each asset's filename up in *weights_store* (default 1.0 when absent or
+    invalid; negatives clamped to 0).  Returns ``None`` — meaning "equal weight" to
+    the engines — when the basket is empty or every weight is non-positive, so the
+    common untouched case behaves exactly as before weighting existed.
+
+    The engines key weights by **symbol** (the price-frame columns), so this
+    translates the filename-keyed store into the symbol space.
+    """
+    store = weights_store or {}
+    out: dict[str, float] = {}
+    for item in basket_items or []:
+        raw = store.get(item['filename'], 1.0)
+        try:
+            weight = max(float(raw), 0.0)
+        except (TypeError, ValueError):
+            weight = 1.0
+        out[str(item['symbol'])] = weight
+    if not out or sum(out.values()) <= 0.0:
+        return None
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -819,11 +922,14 @@ def _downsample_for_plot(series: pd.Series, max_points: int = _MAX_PLOT_POINTS) 
     State('bt-strategy-config-store-a', 'data'),  # selected strategy + params for basket A
     State('bt-strategy-config-store-b', 'data'),  # selected strategy + params for basket B
     State('bt-base-currency', 'value'),           # reporting currency for both baskets
+    State('bt-weights-store-a', 'data'),          # per-asset weights for basket A
+    State('bt-weights-store-b', 'data'),          # per-asset weights for basket B
     prevent_initial_call=True,  # do not run at page load (no data yet)
 )
 @log_time
 def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store,
-                          strategy_config_a, strategy_config_b, base_currency):
+                          strategy_config_a, strategy_config_b, base_currency,
+                          weights_a=None, weights_b=None):
     """Execute the DCA simulation for both baskets and update the UI.
 
     Steps:
@@ -847,6 +953,10 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     strategy_config_b : dict – {'strategy': name, 'params': {...}} for basket B.
     base_currency     : str  – reporting currency both baskets are converted into
                                (every asset's prices, metrics and order log).
+    weights_a         : dict – Basket A's per-asset weights ({filename: weight});
+                               translated to symbol-keyed weights and forwarded to
+                               the simulation (None/all-zero → equal weight).
+    weights_b         : dict – Basket B's per-asset weights, as above.
 
     Returns
     -------
@@ -899,6 +1009,11 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     params_a = (strategy_config_a or {}).get('params') or {}
     params_b = (strategy_config_b or {}).get('params') or {}
 
+    # Translate each basket's stored (filename-keyed) weights into the symbol-keyed
+    # form the engines expect; None means equal weight (the untouched default).
+    weights_sym_a = _symbol_weights(basket_a, weights_a)
+    weights_sym_b = _symbol_weights(basket_b, weights_b)
+
     # Run the simulation for each basket, but skip the call entirely if the
     # basket has no assets (saves an unnecessary function call).
     # run_backtest returns (portfolio_series, metrics_dict, order_log) on
@@ -906,13 +1021,13 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     portfolio_a, metrics_a, orders_a = (
         run_backtest(_config.base_url, filenames_a, start_date, end_date, _config.df,
                      strategy=strategy_a, strategy_params=params_a,
-                     base_currency=base_currency)
+                     base_currency=base_currency, weights=weights_sym_a)
         if filenames_a else (None, None, None)
     )
     portfolio_b, metrics_b, orders_b = (
         run_backtest(_config.base_url, filenames_b, start_date, end_date, _config.df,
                      strategy=strategy_b, strategy_params=params_b,
-                     base_currency=base_currency)
+                     base_currency=base_currency, weights=weights_sym_b)
         if filenames_b else (None, None, None)
     )
 
@@ -1029,18 +1144,21 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     Input('bt-base-currency', 'value'),
     Input('bt-strategy-config-store-a', 'data'),
     Input('bt-strategy-config-store-b', 'data'),
+    Input('bt-weights-store-a', 'data'),
+    Input('bt-weights-store-b', 'data'),
     prevent_initial_call=True,
 )
 @log_time
-def reset_results_on_input_change(basket_a, basket_b, base_currency, strategy_a, strategy_b):
+def reset_results_on_input_change(basket_a, basket_b, base_currency, strategy_a, strategy_b,
+                                  weights_a=None, weights_b=None):
     """Clear chart, KPIs, and order tables when any backtest input changes.
 
-    Whenever the user modifies a basket, the base currency, or the strategy
-    before (or after) running a backtest, the previous results no longer match
-    the current configuration and would be misleading. This callback resets all
-    result areas to the initial page-load state: an empty visible chart and a
-    metrics table filled with — placeholders (matching the state established by
-    the layout on first render).
+    Whenever the user modifies a basket, the base currency, the strategy, or a
+    per-asset weight before (or after) running a backtest, the previous results no
+    longer match the current configuration and would be misleading. This callback
+    resets all result areas to the initial page-load state: an empty visible chart
+    and a metrics table filled with — placeholders (matching the state established
+    by the layout on first render).
     """
     placeholder_metrics = {k: '—' for k in (
         'Total Return', 'CAGR', 'Sharpe Ratio', 'Max. Drawdown',

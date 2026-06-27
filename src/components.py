@@ -359,12 +359,43 @@ def _basket_ui(basket_id):
         # data=[] initialises it with an empty list.
         dcc.Store(id=f'bt-basket-store-{basket_id}', data=[]),
 
+        # Persists the per-asset relative weights as {filename: weight}.  Kept
+        # separate from the basket store so editing a weight does NOT retrigger the
+        # date-range slider (which resets the selected window).  Written by the
+        # sync_weights callback; read by _manage_basket (to keep weights through
+        # add/remove) and by the run callback (to weight the simulation).
+        dcc.Store(id=f'bt-weights-store-{basket_id}', data={}),
+
     ], style={'flex': 1, 'minWidth': 0})
 
 
 # ---------------------------------------------------------------------------
 # Helper: render the visible list of assets currently in a basket
 # ---------------------------------------------------------------------------
+
+def _weight_percentages(weight_by_key: dict) -> dict:
+    """Map each key to its share-of-total weight as a percentage string ('40%').
+
+    The per-asset weights the user types are *relative* numbers; what matters for
+    the allocation is each one's share of the basket's total, so the UI shows that
+    normalised percentage next to every weight input.  Negative inputs are clamped
+    to 0; when the weights sum to zero (e.g. every asset zeroed) the share is
+    undefined and rendered as an em-dash for every key.
+
+    Parameters
+    ----------
+    weight_by_key – mapping of any key (here: a basket asset's filename) → its raw
+                    relative weight.
+
+    Returns
+    -------
+    dict with the same keys, each mapped to a formatted percentage string.
+    """
+    total = sum(max(float(w), 0.0) for w in weight_by_key.values())
+    if total <= 0.0:
+        return {k: '—' for k in weight_by_key}
+    return {k: f'{max(float(w), 0.0) / total * 100:.0f}%' for k, w in weight_by_key.items()}
+
 
 def _basket_item_label(item: dict) -> str:
     """Build one basket row's text: "<symbol> — <name>" plus a currency tag.
@@ -381,26 +412,46 @@ def _basket_item_label(item: dict) -> str:
     return label
 
 
-def _render_basket_list(basket_data, basket_id):
+def _render_basket_list(basket_data, basket_id, weights=None):
     """Build the component tree for the basket's item list.
 
-    Each item shows the asset's symbol and name alongside a remove (✕) button.
+    Each item shows the asset's symbol and name, an editable **weight** input with
+    the resulting allocation percentage beside it, and a remove (✕) button.
     Called by _manage_basket every time an asset is added or removed.
+
+    The weights are *relative* numbers (default 1.0, so an untouched basket is
+    equal-weighted and adding an asset automatically re-weights all of them); the
+    percentage shown is each weight's share of the basket total (see
+    ``_weight_percentages``).  Editing a weight is handled by the per-basket
+    sync_weights callback, which persists the value and refreshes the percentage
+    in place without re-rendering this list (so the input keeps focus).
 
     Parameters
     ----------
     basket_data : list of dicts, each with keys 'filename', 'symbol', 'name'.
-    basket_id   : str – 'a' or 'b'. Used to build pattern-matching IDs for
-                        the remove buttons so the manage_basket callback knows
-                        which basket a removal belongs to.
+    basket_id   : str – 'a' or 'b'. Used to build pattern-matching IDs for the
+                        per-row weight inputs and remove buttons so the callbacks
+                        know which basket a control belongs to.
+    weights     : dict or None – filename → relative weight, used to pre-fill each
+                        row's weight input and percentage (missing → default 1.0).
 
     Returns
     -------
-    html.P (empty placeholder) or html.Div (list of rows with remove buttons).
+    html.P (empty placeholder) or html.Div (list of rows with weight inputs and
+    remove buttons).
     """
     # If the basket is empty, show a placeholder message in light grey italic.
     if not basket_data:
         return html.P('No assets', style={'color': '#aaa', 'fontStyle': 'italic', 'margin': '4px 0'})
+
+    # Resolve each row's weight (default 1.0) and its share-of-total percentage so
+    # the inputs and labels start out consistent with the stored weights.
+    weights = weights or {}
+    weight_by_file = {
+        item['filename']: max(float(weights.get(item['filename'], 1.0)), 0.0)
+        for item in basket_data
+    }
+    pct_by_file = _weight_percentages(weight_by_file)
 
     # Build one row per asset using a Python list comprehension.
     # A list comprehension [ expr for item in iterable ] is a concise way to
@@ -410,22 +461,58 @@ def _render_basket_list(basket_data, basket_id):
             # Asset label: "AAPL — Apple Inc (USD)" — the trailing currency tag
             # (omitted for assets with a blank/unknown currency) tells the user
             # which currency the asset trades in, since baskets may mix currencies.
+            # flex '1 1 140px' lets it grow but claim at least ~140px before the
+            # controls wrap below it; wordBreak wraps long names instead of
+            # clipping them, so the asset text stays readable on a narrow phone.
             html.Span(_basket_item_label(item),
-                      style={'overflow': 'hidden', 'textOverflow': 'ellipsis'}),
+                      style={'flex': '1 1 140px', 'minWidth': '120px',
+                             'wordBreak': 'break-word'}),
 
-            # Remove button with a *pattern-matching ID*.
-            # Instead of a plain string id, we use a dict id:
-            #   {'type': 'bt-remove-a', 'index': 'aapl.parquet'}
-            # The 'type' key groups all remove buttons for basket 'a' together.
-            # The 'index' key carries the filename so the callback knows which
-            # asset was removed. Dash's ALL wildcard in the callback Input
-            # matches every button whose id has type == 'bt-remove-a'.
-            html.Button(
-                '✕',
-                id={'type': f'bt-remove-{basket_id}', 'index': item['filename']},
-                n_clicks=0,
-                style=_BTN_SMALL,
-            ),
+            # Right-hand controls: the relative-weight input, its resulting
+            # allocation percentage, and the remove button, grouped together.
+            # flexShrink 0 keeps them at their natural size so they never crush the
+            # label; when the row is too narrow they wrap onto their own line.
+            html.Div([
+                # Editable relative weight (pattern-matching ID carries the
+                # filename).  debounce=True commits on Enter/blur so the sync
+                # callback does not fire on every keystroke.
+                dbc.Input(
+                    id={'type': f'bt-weight-{basket_id}', 'index': item['filename']},
+                    type='number',
+                    value=weight_by_file[item['filename']],
+                    min=0,
+                    step='any',
+                    debounce=True,
+                    size='sm',
+                    # Bring up the numeric (decimal) keypad on touch devices so the
+                    # weight is quick to enter on a phone.
+                    inputMode='decimal',
+                    style={'width': '58px', 'textAlign': 'right'},
+                ),
+                # Live allocation percentage (= this weight's share of the total),
+                # updated in place by the sync_weights callback.
+                html.Span(
+                    pct_by_file[item['filename']],
+                    id={'type': f'bt-weight-pct-{basket_id}', 'index': item['filename']},
+                    style={'fontSize': '12px', 'color': '#666',
+                           'minWidth': '38px', 'textAlign': 'right'},
+                ),
+
+                # Remove button with a *pattern-matching ID*.
+                # Instead of a plain string id, we use a dict id:
+                #   {'type': 'bt-remove-a', 'index': 'aapl.parquet'}
+                # The 'type' key groups all remove buttons for basket 'a' together.
+                # The 'index' key carries the filename so the callback knows which
+                # asset was removed. Dash's ALL wildcard in the callback Input
+                # matches every button whose id has type == 'bt-remove-a'.
+                html.Button(
+                    '✕',
+                    id={'type': f'bt-remove-{basket_id}', 'index': item['filename']},
+                    n_clicks=0,
+                    style=_BTN_SMALL,
+                ),
+            ], style={'display': 'flex', 'alignItems': 'center', 'gap': '6px',
+                      'flexShrink': 0, 'marginLeft': 'auto'}),
         ], style=_BASKET_ITEM_STYLE)
         for item in basket_data
     ])

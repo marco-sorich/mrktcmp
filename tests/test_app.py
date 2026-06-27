@@ -21,8 +21,11 @@ from src.callbacks.backtesting import (   # noqa: E402
 from src.components import (  # noqa: E402
     _render_basket_list, _metrics_table, _order_rows, _order_table_component,
     _base_currency_options, _asset_currency_map, _basket_item_label,
+    _weight_percentages,
 )
-from src.callbacks.backtesting import _asset_option_label  # noqa: E402
+from src.callbacks.backtesting import (  # noqa: E402
+    _asset_option_label, _sync_weights, _symbol_weights,
+)
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -88,6 +91,21 @@ def _make_ctx(triggered_id, triggered_value=1):
     ctx.triggered = [{'prop_id': 'test.n_clicks', 'value': triggered_value}]
     ctx.triggered_id = triggered_id
     return ctx
+
+
+def _collect_dict_ids(component):
+    """Recursively collect every dict-valued component id under *component*."""
+    ids = []
+    cid = getattr(component, 'id', None)
+    if isinstance(cid, dict):
+        ids.append(cid)
+    children = getattr(component, 'children', None)
+    if isinstance(children, (list, tuple)):
+        for child in children:
+            ids.extend(_collect_dict_ids(child))
+    elif children is not None:
+        ids.extend(_collect_dict_ids(children))
+    return ids
 
 
 BASKET_ITEM_AAPL = {'filename': 'aapl.parquet', 'symbol': 'AAPL', 'name': 'Apple Inc'}
@@ -543,12 +561,30 @@ class TestRenderBasketList:
 
     def test_remove_button_id_contains_filename(self):
         result = _render_basket_list([BASKET_ITEM_AAPL], 'a')
-        buttons = [
-            c for row in result.children
-            for c in row.children
-            if hasattr(c, 'id') and isinstance(c.id, dict)
-        ]
-        assert any(b['index'] == 'aapl.parquet' for b in (btn.id for btn in buttons))
+        # The remove button now lives inside a per-row controls sub-Div alongside
+        # the weight input, so collect dict-id components recursively.
+        ids = _collect_dict_ids(result)
+        remove_ids = [i for i in ids if i.get('type') == 'bt-remove-a']
+        assert any(i['index'] == 'aapl.parquet' for i in remove_ids)
+
+    def test_weight_input_and_percent_rendered(self):
+        # Each row carries a weight input and a live percentage label keyed by the
+        # asset's filename; a single asset is 100% of the basket.
+        result = _render_basket_list([BASKET_ITEM_AAPL], 'a', {'aapl.parquet': 1.0})
+        ids = _collect_dict_ids(result)
+        assert {'type': 'bt-weight-a', 'index': 'aapl.parquet'} in ids
+        assert {'type': 'bt-weight-pct-a', 'index': 'aapl.parquet'} in ids
+        assert '100%' in str(result)
+
+    def test_weight_percentages_reflect_relative_weights(self):
+        # Two assets weighted 3:1 → 75% / 25%.
+        result = _render_basket_list(
+            [BASKET_ITEM_AAPL, BASKET_ITEM_GOOGL], 'a',
+            {'aapl.parquet': 3.0, 'googl.parquet': 1.0},
+        )
+        rendered = str(result)
+        assert '75%' in rendered
+        assert '25%' in rendered
 
     def test_symbol_and_name_appear_in_output(self):
         result = _render_basket_list([BASKET_ITEM_AAPL], 'a')
@@ -768,6 +804,87 @@ class TestDownloadOrders:
             ctx.triggered_id = 'bt-dl-csv'
             out = download_orders(1, 0, 'b', {'a': _order_rows(_ORDERS_STUB), 'b': None})
         assert out is no_update
+
+
+# ---------------------------------------------------------------------------
+# Per-asset weighting (UI level)
+# ---------------------------------------------------------------------------
+
+class TestWeightPercentages:
+    def test_shares_of_total(self):
+        assert _weight_percentages({'a': 3.0, 'b': 1.0}) == {'a': '75%', 'b': '25%'}
+
+    def test_all_zero_renders_em_dash(self):
+        assert _weight_percentages({'a': 0.0, 'b': 0.0}) == {'a': '—', 'b': '—'}
+
+    def test_single_asset_is_full(self):
+        assert _weight_percentages({'a': 5.0}) == {'a': '100%'}
+
+
+class TestSyncWeights:
+    def _meta(self, basket_id, filenames, kind):
+        return [{'id': {'type': f'bt-{kind}-{basket_id}', 'index': fn}} for fn in filenames]
+
+    def test_builds_weights_and_percentages(self):
+        files = ['aapl.parquet', 'googl.parquet']
+        weights, pct = _sync_weights(
+            [3.0, 1.0],
+            self._meta('a', files, 'weight'),
+            self._meta('a', files, 'weight-pct'),
+        )
+        assert weights == {'aapl.parquet': 3.0, 'googl.parquet': 1.0}
+        assert pct == ['75%', '25%']
+
+    def test_cleared_input_falls_back_to_default_weight(self):
+        files = ['aapl.parquet', 'googl.parquet']
+        weights, _ = _sync_weights(
+            [None, 2.0],
+            self._meta('a', files, 'weight'),
+            self._meta('a', files, 'weight-pct'),
+        )
+        # A cleared field defaults back to 1.0 rather than zeroing the asset.
+        assert weights == {'aapl.parquet': 1.0, 'googl.parquet': 2.0}
+
+    def test_negative_input_clamped_to_zero(self):
+        weights, _ = _sync_weights(
+            [-5.0], self._meta('a', ['aapl.parquet'], 'weight'),
+            self._meta('a', ['aapl.parquet'], 'weight-pct'),
+        )
+        assert weights == {'aapl.parquet': 0.0}
+
+
+class TestSymbolWeights:
+    def test_maps_filename_weights_to_symbols(self):
+        assert _symbol_weights([BASKET_ITEM_AAPL], {'aapl.parquet': 2.0}) == {'AAPL': 2.0}
+
+    def test_missing_weight_defaults_to_one(self):
+        assert _symbol_weights([BASKET_ITEM_AAPL], {}) == {'AAPL': 1.0}
+
+    def test_empty_basket_is_none(self):
+        assert _symbol_weights([], {'aapl.parquet': 2.0}) is None
+
+    def test_all_zero_weights_is_none(self):
+        # Every weight non-positive → None so the engine falls back to equal weight.
+        assert _symbol_weights([BASKET_ITEM_AAPL], {'aapl.parquet': 0.0}) is None
+
+
+class TestRunBacktestForwardsWeights:
+    def test_symbol_weights_passed_to_run_backtest(self):
+        captured = []
+
+        def _fake(*args, **kwargs):
+            captured.append(kwargs.get('weights'))
+            return (_PORTFOLIO_STUB, _METRICS_STUB, _ORDERS_STUB)
+
+        with patch.object(config_module, 'base_url', 'http://x'), \
+             patch.object(config_module, 'df', SAMPLE_DF), \
+             patch('src.callbacks.backtesting.run_backtest', side_effect=_fake):
+            run_backtest_callback(
+                1, BASKET_A, [], _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, None, 'EUR',
+                {'aapl.parquet': 2.0}, {},
+            )
+        # Basket A's filename weight is translated to its symbol for the engine.
+        assert {'AAPL': 2.0} in captured
 
 
 # ---------------------------------------------------------------------------

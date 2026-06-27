@@ -105,14 +105,17 @@ def create_layout():
             ),
         ], style={'display': 'flex', 'alignItems': 'center', 'marginTop': '12px'}),
 
-        # Two basket panels side by side using a flex row.
-        # gap: 8px adds horizontal space between the panels.
-        # marginTop: 12px adds vertical breathing room below the header.
+        # Two basket panels. On wide screens they sit side by side; on narrow
+        # screens (phones) they stack vertically so each basket — and its asset
+        # labels — gets the full screen width and stays readable. The responsive
+        # switch lives in the `.baskets-row` rule in assets/layout.css (the
+        # default is the mobile-first stacked column; a min-width media query
+        # turns it into a row). The 24px divider spacer is hidden when stacked.
         html.Div([
-            _basket_ui('a'),                       # Basket A controls
-            html.Div(style={'width': '24px'}),     # visual divider spacer
-            _basket_ui('b'),                       # Basket B controls
-        ], style={'display': 'flex', 'gap': '8px', 'marginTop': '12px'}),
+            _basket_ui('a'),                                         # Basket A controls
+            html.Div(className='basket-divider', style={'width': '24px'}),  # divider (desktop only)
+            _basket_ui('b'),                                         # Basket B controls
+        ], className='baskets-row', style={'marginTop': '12px'}),
 
         # Date-range section: slider + human-readable label + store.
         html.Div([

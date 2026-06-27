@@ -917,6 +917,64 @@ class TestRiskOffOrderEvents:
         assert sell['asset_prices'] == pytest.approx({'A': 200.0})
 
 
+class TestAssetWeighting:
+    """Per-asset weights flow from run()/order events into the allocation."""
+
+    def _two_asset_read(self):
+        """read_parquet side-effect: AAPL flat at 100, BTC rising 100→400."""
+        flat = _daily_ohlcv(100.0)
+        rising = _daily_rising(low=100.0, high=400.0)
+
+        def _read(path, columns=None):
+            return rising if 'btc' in path else flat
+        return _read
+
+    def test_buyhold_weights_route_capital(self):
+        strategy = BuyHoldStrategy()
+        with patch('src.backtest.pd.read_parquet', side_effect=self._two_asset_read()):
+            _, m_into_flat, _ = strategy.run(
+                BASE_URL, ['aapl.parquet', 'btc.parquet'], _START, _END, SAMPLE_META,
+                params={}, weights={'AAPL': 1.0, 'BTC': 0.0},
+            )
+            _, m_into_rising, _ = strategy.run(
+                BASE_URL, ['aapl.parquet', 'btc.parquet'], _START, _END, SAMPLE_META,
+                params={}, weights={'AAPL': 0.0, 'BTC': 1.0},
+            )
+        end_flat = float(m_into_flat['End Value'].replace(',', ''))
+        end_rising = float(m_into_rising['End Value'].replace(',', ''))
+        # All capital in the flat asset barely moves; all in the rising asset grows.
+        assert end_rising > end_flat
+
+    def test_run_backtest_forwards_weights(self):
+        # run_backtest must thread weights through to the plugin; weighting only
+        # the rising asset beats weighting only the flat one.
+        strategy = BuyHoldStrategy()
+        with patch('src.backtest.pd.read_parquet', side_effect=self._two_asset_read()):
+            _, m_flat, _ = run_backtest(
+                BASE_URL, ['aapl.parquet', 'btc.parquet'], _START, _END, SAMPLE_META,
+                strategy=strategy, weights={'AAPL': 1.0, 'BTC': 0.0},
+            )
+            _, m_rising, _ = run_backtest(
+                BASE_URL, ['aapl.parquet', 'btc.parquet'], _START, _END, SAMPLE_META,
+                strategy=strategy, weights={'AAPL': 0.0, 'BTC': 1.0},
+            )
+        assert float(m_rising['End Value'].replace(',', '')) > float(m_flat['End Value'].replace(',', ''))
+
+    def test_dca_order_events_split_by_weight(self):
+        # First contribution split 3:1 across two equally-priced assets.
+        idx = pd.date_range('2020-01-01', '2020-03-31', freq='D', tz='UTC')
+        price = pd.DataFrame({'AAPL': 100.0, 'MSFT': 100.0}, index=idx)
+        ev = _dca_order_events(price, 1000.0, None, {'AAPL': 3.0, 'MSFT': 1.0})[0]
+        assert ev['asset_values']['AAPL'] == pytest.approx(750.0)
+        assert ev['asset_values']['MSFT'] == pytest.approx(250.0)
+
+    def test_lumpsum_order_event_splits_by_weight(self):
+        idx = pd.date_range('2020-01-31', periods=4, freq='ME', tz='UTC')
+        price = pd.DataFrame({'A': [100.0] * 4, 'B': [100.0] * 4}, index=idx)
+        ev = _lumpsum_order_events(price, 10_000.0, None, {'A': 3.0, 'B': 1.0})[0]
+        assert ev['asset_values'] == pytest.approx({'A': 7_500.0, 'B': 2_500.0})
+
+
 class TestLumpsumOrderEvents:
     _IDX = pd.date_range('2020-01-31', periods=4, freq='ME', tz='UTC')
 

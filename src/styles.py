@@ -16,8 +16,14 @@
 #     space-between         button to the right edge.
 #   padding / marginBottom – inner spacing and gap between rows.
 #   background / borderRadius / fontSize – cosmetic look.
+#   flexWrap: wrap        – on a container too narrow to hold the asset label and
+#                           the weight/remove controls side by side (e.g. a phone),
+#                           the controls wrap onto a second line instead of
+#                           squeezing the asset text down to a few pixels.
+#   gap                   – spacing that also applies between the wrapped rows.
 _BASKET_ITEM_STYLE = {
     'display': 'flex', 'alignItems': 'center', 'justifyContent': 'space-between',
+    'flexWrap': 'wrap', 'gap': '6px',
     'padding': '4px 8px', 'marginBottom': '2px', 'background': '#f5f5f5',
     'borderRadius': '4px', 'fontSize': '13px',
 }

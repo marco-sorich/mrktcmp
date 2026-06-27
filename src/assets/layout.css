@@ -1,3 +1,32 @@
+/* --- Basket panels -------------------------------------------------------- */
+/* Mobile-first: the two basket panels stack vertically so each one (and its
+   asset labels + weight controls) gets the full screen width and stays readable
+   on a phone.  The min-width media query below switches them back to the
+   side-by-side comparison layout on tablets/desktops. */
+.baskets-row {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+/* The 24px spacer between the panels only makes sense in the side-by-side
+   layout; hide it while the panels are stacked. */
+.basket-divider {
+    display: none;
+}
+
+@media (min-width: 768px) {
+    .baskets-row {
+        flex-direction: row;
+        gap: 8px;
+    }
+
+    .basket-divider {
+        display: block;
+    }
+}
+
+
 .results-container {
     margin-top: 8px;
 }

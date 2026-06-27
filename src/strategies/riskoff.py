@@ -46,6 +46,7 @@ def _riskoff_order_events(
     target_fraction: pd.Series,
     initial_investment: float = INITIAL_INVESTMENT,
     fx: FxColumns | None = None,
+    weights: dict[str, float] | None = None,
 ) -> list[OrderEvent]:
     """Record one OrderEvent per Risk-Off rebalance (each time the target changes).
 
@@ -53,7 +54,8 @@ def _riskoff_order_events(
     columns are added afterwards by ``backtest.build_order_log``.  It mirrors the
     change-driven trading of ``simulate_riskoff``: the lump sum starts as cash
     and, on every day the daily target invested fraction *changes*, the basket is
-    rebalanced to it.  Each such day is captured as an event whose side is 'Buy'
+    rebalanced to it (the invested portion split across the priced assets by their
+    per-asset weights).  Each such day is captured as an event whose side is 'Buy'
     when the target rose (more invested) or 'Sell' when it fell (more cash);
     there is no fresh money, so inflow is always 0.
 
@@ -66,6 +68,8 @@ def _riskoff_order_events(
     fx                 – optional FX context (see backtest.FxColumns); when given,
                          each event also carries the trading-currency quote and the
                          per-pair FX rates so the order table can show conversions.
+    weights            – optional symbol → relative weight; None/empty means equal
+                         weight (must match the value passed to simulate_riskoff).
 
     Returns
     -------
@@ -109,7 +113,7 @@ def _riskoff_order_events(
 
         # Rebalance to the new target at today's prices, then record the split
         # (assets_after excludes cash; cash_after is the post-trade cash).
-        holdings, cash, _ = _rebalance_to_target(holdings, cash, prices, frac)
+        holdings, cash, _ = _rebalance_to_target(holdings, cash, prices, frac, weights)
         current = frac
 
         date = change_rows.index[i]
@@ -220,6 +224,7 @@ class RiskOffStrategy(BacktestStrategy):
         df_meta: pd.DataFrame,
         params: dict[str, int | float | str],
         base_currency: str = 'EUR',
+        weights: dict[str, float] | None = None,
     ) -> tuple[pd.Series | None, dict[str, str] | None, list[OrderRow] | None]:
         # Merge caller-supplied values with schema defaults.
         resolved = self.resolve_params(params)
@@ -240,7 +245,7 @@ class RiskOffStrategy(BacktestStrategy):
         # Signals run over the FULL history (not the window), so their cost scales
         # with the raw row count — logged here to separate it from data loading.
         with log_duration(f'riskoff: index+signals ({daily_df.shape[0]} rows)'):
-            index = build_equal_weight_index(daily_df)
+            index = build_equal_weight_index(daily_df, weights)
             signals = compute_riskoff_signals(index, sma_window, first_n_days)
 
         # 2. Daily closes restricted to the requested window's calendar months.
@@ -265,25 +270,27 @@ class RiskOffStrategy(BacktestStrategy):
         with log_duration(f'riskoff: simulate+metrics+orderlog ({price_df.shape[0]} rows)'):
             target_fraction = (signals / 3.0).reindex(price_df.index).fillna(0.0)
             # Hold the lump sum in cash until the whole basket is priced, so the
-            # initial deployment splits the investment equally across all assets
-            # rather than over-weighting whichever listed first. Applied to the
-            # single target series both the simulation and the order log consume,
-            # keeping them in lockstep.
-            target_fraction = gate_target_until_all_priced(price_df, target_fraction)
-            portfolio, total_invested = simulate_riskoff(price_df, target_fraction, initial_investment)
+            # initial deployment splits the investment across all (positively
+            # weighted) assets by their weights rather than over-weighting whichever
+            # listed first. Applied to the single target series both the simulation
+            # and the order log consume, keeping them in lockstep.
+            target_fraction = gate_target_until_all_priced(price_df, target_fraction, weights)
+            portfolio, total_invested = simulate_riskoff(
+                price_df, target_fraction, initial_investment, weights
+            )
             metrics = compute_metrics(portfolio, total_invested)
 
-            # Normalised equal-weight index for the windowed price_df (first value
-            # = 1.0), used as the B&H benchmark column in the order log.  This is
-            # separate from the full-history `index` used for signal computation.
-            _bh_raw = build_equal_weight_index(price_df)
+            # Normalised (weighted) basket index for the windowed price_df (first
+            # value = 1.0), used as the B&H benchmark column in the order log.  This
+            # is separate from the full-history `index` used for signal computation.
+            _bh_raw = build_equal_weight_index(price_df, weights)
             bh_index = (_bh_raw / _bh_raw.iloc[0]) if not _bh_raw.empty else None
 
             # Build the order log only for a valid run.  The whole lump sum is
             # present from the start, so it seeds net-deposits as initial_capital.
             order_log = (
                 build_order_log(
-                    _riskoff_order_events(price_df, target_fraction, initial_investment, fx),
+                    _riskoff_order_events(price_df, target_fraction, initial_investment, fx, weights),
                     initial_capital=initial_investment,
                     bh_index=bh_index,
                 )
