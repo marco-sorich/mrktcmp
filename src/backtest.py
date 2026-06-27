@@ -34,7 +34,7 @@ import time
 # imports from backtest.py, so importing BacktestStrategy here unconditionally
 # would create a cycle.  Under TYPE_CHECKING the import is only evaluated by
 # static analysis tools (mypy), not at runtime.
-from typing import TYPE_CHECKING, NamedTuple, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Iterable, NamedTuple, NotRequired, TypedDict
 if TYPE_CHECKING:
     from src.strategies.base import BacktestStrategy
 
@@ -101,6 +101,77 @@ def _portfolio_value(holdings: dict[str, float], cash: float, prices: pd.Series)
         if pd.notna(p)
     )
     return cash + invested
+
+
+def _normalised_weights(
+    symbols: Iterable[str], weights: dict[str, float] | None
+) -> dict[str, float]:
+    """Each symbol's share of an allocation, summing to 1.0 across *symbols*.
+
+    This is the single place the per-asset **weighting** rule lives for the
+    per-trade allocators (``_rebalance_to_target`` and the DCA order-event
+    generator).  With no *weights* map (or an empty one) the split is **equal** —
+    every symbol gets ``1/len(symbols)`` — which reproduces exactly the
+    equal-weight behaviour every engine had before weighting existed.  When a
+    *weights* map is given each symbol's share is its (non-negative) relative
+    weight divided by the sum of the relative weights of *these* symbols, so the
+    user's weights are renormalised over whatever subset is actually tradable on a
+    given day (a symbol absent from the map counts as 0).
+
+    If every weight in the subset is zero the result is all-zeros (nothing is
+    allocated to this subset); the caller decides what that means — the allocators
+    here interpret it as "stay in cash / skip the contribution", keeping them in
+    lockstep with the vectorised engines, which simply make no purchase when the
+    day's tradable weights sum to zero.
+
+    Parameters
+    ----------
+    symbols – the asset symbols to split an allocation across (e.g. the priced
+              assets on one trading day).
+    weights – optional symbol → relative weight (non-negative); None/empty means
+              equal weight.
+
+    Returns
+    -------
+    dict mapping every input symbol to its share (the shares sum to 1.0, or to
+    0.0 when a non-empty weight map zeroes the whole subset).
+    """
+    syms = [str(s) for s in symbols]
+    if not syms:
+        return {}
+    # No weights supplied → equal split (the historical default).
+    if not weights:
+        equal = 1.0 / len(syms)
+        return {s: equal for s in syms}
+    # Renormalise the supplied weights over just these symbols.
+    w = {s: max(float(weights.get(s, 0.0)), 0.0) for s in syms}
+    total = sum(w.values())
+    if total <= 0.0:
+        return {s: 0.0 for s in syms}
+    return {s: w[s] / total for s in syms}
+
+
+def _weight_array(columns: Iterable[str], weights: dict[str, float] | None) -> np.ndarray:
+    """Per-column relative weights aligned to *columns*, as a NumPy vector.
+
+    The vectorised counterpart of ``_normalised_weights`` for the matrix engines
+    (``simulate_dca``) and the all-priced gate (``_first_all_priced_pos``).
+    Returns an all-ones vector (equal weight) when no *weights* map is given, so
+    those engines keep their original behaviour byte-for-byte.  With a map each
+    column takes its non-negative relative weight (a column absent from the map →
+    0); a degenerate all-zero result falls back to equal weight so an engine never
+    divides by a zero total across the *whole* basket (per-day zero subsets are
+    still handled by the engines themselves).
+    """
+    cols = [str(c) for c in columns]
+    if not weights:
+        return np.ones(len(cols), dtype=float)
+    arr = np.array([max(float(weights.get(c, 0.0)), 0.0) for c in cols], dtype=float)
+    # Whole-basket all-zero → equal weight (a single asset zeroed still keeps the
+    # rest; only an entirely-zero vector triggers this safety fallback).
+    if not np.any(arr > 0):
+        return np.ones(len(cols), dtype=float)
+    return arr
 
 
 def _asset_values(holdings: dict[str, float], prices: pd.Series) -> dict[str, float]:
@@ -219,13 +290,19 @@ def _window_by_month(
     return price_df.loc[np.asarray(mask)].dropna(how='all', axis=1)
 
 
-def simulate_dca(price_df: pd.DataFrame, monthly_investment: float = MONTHLY_INVESTMENT) -> tuple[pd.Series, float]:
+def simulate_dca(
+    price_df: pd.DataFrame,
+    monthly_investment: float = MONTHLY_INVESTMENT,
+    weights: dict[str, float] | None = None,
+) -> tuple[pd.Series, float]:
     """Simulate monthly DCA on a *daily* price series.
 
     A fixed amount is contributed once per calendar month — on that month's last
-    trading day — split equally across all assets with a valid price that day.
-    The portfolio is then valued on *every* trading day, producing a dense daily
-    value curve even though money only goes in monthly.
+    trading day — split across all assets with a valid price that day **in
+    proportion to their per-asset weights** (equal weight when no *weights* map is
+    given, renormalised over the day's buyable assets otherwise).  The portfolio
+    is then valued on *every* trading day, producing a dense daily value curve
+    even though money only goes in monthly.
 
     For a monthly-cadence price_df every row is its month's only entry, so a
     contribution is made on every row and the result is identical to the
@@ -241,6 +318,11 @@ def simulate_dca(price_df: pd.DataFrame, monthly_investment: float = MONTHLY_INV
     ----------
     price_df           – daily (or monthly) close prices, one column per asset.
     monthly_investment – total amount (reporting currency) invested per month across the basket.
+    weights            – optional symbol → relative weight; None/empty means equal
+                         weight (the historical default).  Each contribution is
+                         split across the day's buyable assets in proportion to
+                         these weights (renormalised over that subset); a
+                         zero-weight asset receives nothing.
 
     Returns
     -------
@@ -261,23 +343,33 @@ def simulate_dca(price_df: pd.DataFrame, monthly_investment: float = MONTHLY_INV
     # Assets buyable on a given day need a valid, strictly positive price. A NaN
     # price means a data gap; a zero/negative price means suspended/delisted.
     buyable = ~np.isnan(prices) & (prices > 0)
-    n_buyable = buyable.sum(axis=1)
+
+    # Per-asset relative weights (all-ones = equal weight); a contribution is
+    # allocated only to assets that are both buyable AND positively weighted, in
+    # proportion to those weights renormalised over that day's allocatable set.
+    weight_vec = _weight_array([str(c) for c in price_df.columns], weights)
+    allocatable = buyable & (weight_vec[None, :] > 0)
+    weight_mat = np.where(allocatable, weight_vec[None, :], 0.0)
+    weight_sum = weight_mat.sum(axis=1)
 
     # Contribute once per calendar month — on its last trading day — but only on
-    # month-ends that have at least one buyable asset.
-    contribute_day = _is_month_end_trading_day(price_df.index) & (n_buyable > 0)
+    # month-ends that have at least one allocatable (buyable, positive-weight) asset.
+    contribute_day = _is_month_end_trading_day(price_df.index) & (weight_sum > 0)
 
-    # Money put into each buyable asset on a contribution day = the monthly amount
-    # split equally among that day's buyable assets (0 € on every other day).
-    per_asset = np.zeros(len(prices))
-    per_asset[contribute_day] = monthly_investment / n_buyable[contribute_day]
+    # Money put into each allocatable asset on a contribution day = the monthly
+    # amount times that asset's share of the day's weights (0 € on every other day
+    # and for any zero-weight or non-buyable asset).
+    per_asset = np.zeros_like(prices)
+    per_asset[contribute_day] = (
+        monthly_investment * weight_mat[contribute_day] / weight_sum[contribute_day][:, None]
+    )
 
-    # Units bought per (day, asset) = per-asset € / price, only where buyable on a
-    # contribution day; dividing by NaN elsewhere yields values we mask back to 0.
+    # Units bought per (day, asset) = per-asset € / price, only where allocatable on
+    # a contribution day; dividing by NaN elsewhere yields values we mask back to 0.
     # cumsum down the days turns these purchases into the holdings carried forward
     # to every later day (units of a NaN-priced asset are retained, not lost).
-    safe_prices = np.where(buyable, prices, np.nan)
-    bought = np.where(buyable & contribute_day[:, None], per_asset[:, None] / safe_prices, 0.0)
+    safe_prices = np.where(allocatable, prices, np.nan)
+    bought = np.where(allocatable & contribute_day[:, None], per_asset / safe_prices, 0.0)
     holdings = np.cumsum(np.nan_to_num(bought), axis=0)
 
     # Value the portfolio every day: Σ units × price over assets with a valid price
@@ -900,22 +992,28 @@ def build_fx_columns(
     return FxColumns(asset_local_ccy, asset_rate, pair_rate)
 
 
-def build_equal_weight_index(daily_df: pd.DataFrame) -> pd.Series:
-    """Combine per-asset daily closes into one equal-weight price index.
+def build_equal_weight_index(
+    daily_df: pd.DataFrame, weights: dict[str, float] | None = None
+) -> pd.Series:
+    """Combine per-asset daily closes into one (optionally weighted) price index.
 
-    Each day's basket return is the simple mean of the individual assets'
+    Each day's basket return is the **weighted** mean of the individual assets'
     daily returns (averaging only over assets that have a price that day, so
-    mixed start dates and single-asset baskets both work).  Compounding those
-    returns yields a single index series (rebased to 100) on which the three
-    market signals are evaluated.
+    mixed start dates and single-asset baskets both work; the weights are
+    renormalised over the assets present each day).  With no *weights* map the
+    weights are all equal, so this reduces exactly to the original equal-weight
+    index — hence the name is kept.  Compounding those returns yields a single
+    index series (rebased to 100) on which the Risk-Off signals are evaluated and
+    from which the Buy & Hold benchmark column is derived.
 
     Parameters
     ----------
     daily_df – DataFrame of daily closes, one column per asset.
+    weights  – optional symbol → relative weight; None/empty means equal weight.
 
     Returns
     -------
-    Series indexed by trading day with the equal-weight index value (base 100),
+    Series indexed by trading day with the (weighted) index value (base 100),
     or an empty Series when *daily_df* is empty.
     """
     if daily_df.empty:
@@ -924,9 +1022,21 @@ def build_equal_weight_index(daily_df: pd.DataFrame) -> pd.Series:
     # Treat non-positive prices as missing so they never enter a return.
     prices = daily_df.where(daily_df > 0)
 
-    # Per-asset day-over-day returns, then the cross-sectional mean per day.
-    # mean(axis=1) skips NaN, so the average spans only the assets present.
-    basket_return = prices.pct_change().mean(axis=1)
+    # Per-asset day-over-day returns.
+    returns = prices.pct_change()
+
+    # Per-asset relative weights (all-ones = equal); broadcast as a column-aligned
+    # Series so the weighted mean is computed only over the assets present each day.
+    weight_vec = _weight_array([str(c) for c in daily_df.columns], weights)
+    weight_ser = pd.Series(weight_vec, index=daily_df.columns)
+
+    # Weighted cross-sectional mean per day = Σ(wᵢ·rᵢ) / Σ(wᵢ) over assets with a
+    # return that day.  Both sums skip NaN, so the average spans only present
+    # assets; an all-ones weight_ser makes this identical to the plain mean.
+    present = returns.notna()
+    weighted_sum = returns.mul(weight_ser, axis=1).sum(axis=1)
+    weight_total = present.mul(weight_ser, axis=1).sum(axis=1)
+    basket_return = weighted_sum / weight_total.replace(0, np.nan)
 
     # The first row (and any all-NaN row) has no return; fill with 0 so the
     # cumulative product is not poisoned to NaN. cumprod of (1+r) rebased to 100
@@ -1007,15 +1117,21 @@ def compute_riskoff_signals(index: pd.Series, sma_window: int = 200, first_n_day
 
 
 def _rebalance_to_target(
-    holdings: dict[str, float], cash: float, prices: pd.Series, inv_frac: float
+    holdings: dict[str, float],
+    cash: float,
+    prices: pd.Series,
+    inv_frac: float,
+    weights: dict[str, float] | None = None,
 ) -> tuple[dict[str, float], float, float]:
     """Buy/sell the whole portfolio to a target invested fraction on one day.
 
-    The target invested value is *inv_frac* × total portfolio value, spread
-    equally across all assets that have a valid price this day; the remainder
-    stays in cash.  This is a one-off adjustment: simulate_riskoff only calls it
-    on the day a signal changes, then holds the resulting position (no daily
-    maintenance), so the actual fraction drifts with the market in between.
+    The target invested value is *inv_frac* × total portfolio value, spread across
+    all assets that have a valid price this day **in proportion to their per-asset
+    weights** (equal weight when no *weights* map is given, renormalised over the
+    priced assets otherwise); the remainder stays in cash.  This is a one-off
+    adjustment: simulate_riskoff only calls it on the day a signal changes, then
+    holds the resulting position (no daily maintenance), so the actual fraction
+    drifts with the market in between.
 
     Parameters
     ----------
@@ -1023,6 +1139,7 @@ def _rebalance_to_target(
     cash     – current uninvested cash.
     prices   – this day's close price per asset (may contain NaN/zero).
     inv_frac – target fraction of the portfolio to be invested (0.0..1.0).
+    weights  – optional symbol → relative weight; None/empty means equal weight.
 
     Returns
     -------
@@ -1039,64 +1156,91 @@ def _rebalance_to_target(
         # Nothing tradable today: carry holdings and cash unchanged.
         return holdings, cash, total_value
 
-    # Buy the target invested amount, split equally across priced assets.
+    # Each priced asset's share of the invested amount (equal weight by default;
+    # renormalised over the priced subset when explicit weights are supplied).
+    shares = _normalised_weights(priced.keys(), weights)
+    if sum(shares.values()) <= 0.0:
+        # No positively-weighted asset is tradable today → stay fully in cash
+        # (mirrors the vectorised engines, which make no purchase in this case).
+        return holdings, cash, total_value
+
+    # Buy the target invested amount, split across priced assets by their shares.
     target_invested = inv_frac * total_value
-    per_asset = target_invested / len(priced)
 
     new_holdings = dict(holdings)
-    for c in priced:
-        new_holdings[c] = per_asset / priced[c]
+    for c, price in priced.items():
+        new_holdings[c] = (shares[c] * target_invested) / price
 
     new_cash = total_value - target_invested
     return new_holdings, new_cash, total_value
 
 
-def _first_all_priced_pos(prices_mat: np.ndarray) -> int | None:
+def _first_all_priced_pos(
+    prices_mat: np.ndarray, weight_vec: np.ndarray | None = None
+) -> int | None:
     """Position of the first row on which *every* asset has a valid, positive price.
 
     The lump-sum strategies (Buy & Hold and Risk-Off) deploy their initial
-    investment only once the **whole basket** is priced, so the money is split
-    equally across *all* assets instead of over-weighting whichever happened to
-    list first.  A valid price is non-NaN and strictly positive (a zero/negative
-    price means suspended/delisted, a NaN a data gap).
+    investment only once the **whole basket** is priced, so the money is split (by
+    the chosen weights) across the assets instead of over-weighting whichever
+    happened to list first.  A valid price is non-NaN and strictly positive (a
+    zero/negative price means suspended/delisted, a NaN a data gap).
+
+    When a *weight_vec* is given, only the columns that actually receive an
+    allocation (positive weight) need to be priced for a day to count as "all
+    priced": a zero-weight asset gets nothing, so the deployment must not wait for
+    it.  An all-ones vector (the equal-weight default) reproduces the original
+    "every column priced" behaviour exactly.
 
     Parameters
     ----------
     prices_mat – (days × assets) price matrix; NaN marks a missing close.
+    weight_vec – optional per-column relative weights (from ``_weight_array``);
+                 only positive-weight columns are required to be priced.
 
     Returns
     -------
     The integer row position of the first all-priced day, or ``None`` when no
-    such day exists (some asset never gets a price within the window) — the
-    caller then keeps the lump sum in cash.
+    such day exists (some required asset never gets a price within the window) —
+    the caller then keeps the lump sum in cash.
     """
     buyable = ~np.isnan(prices_mat) & (prices_mat > 0)
+    if weight_vec is not None:
+        relevant = weight_vec > 0
+        if relevant.any():
+            # Only assets that will be bought must be priced before deploying.
+            buyable = buyable[:, relevant]
     all_buyable = buyable.all(axis=1)
     pos = np.flatnonzero(all_buyable)
     return int(pos[0]) if pos.size else None
 
 
 def gate_target_until_all_priced(
-    price_df: pd.DataFrame, target_fraction: pd.Series
+    price_df: pd.DataFrame,
+    target_fraction: pd.Series,
+    weights: dict[str, float] | None = None,
 ) -> pd.Series:
     """Zero a daily target invested fraction until the whole basket is priced.
 
-    The Risk-Off strategy deploys its lump sum only once **every** asset has a
-    valid price, so the initial investment is split equally across all assets
-    rather than over-weighting whichever listed first.  This forces the daily
-    target to 0.0 (fully in cash) on every day before the first day on which
-    every asset has a valid, positive price (see ``_first_all_priced_pos``); from
-    that day on the supplied target passes through unchanged.  When no such day
-    exists the target is all-zero, leaving the lump sum in cash for the whole
-    window — matching ``simulate_lumpsum``'s never-fully-priced behaviour.
+    The Risk-Off strategy deploys its lump sum only once **every** asset it will
+    actually buy has a valid price, so the initial investment is split by the
+    chosen weights rather than over-weighting whichever listed first.  This forces
+    the daily target to 0.0 (fully in cash) on every day before the first day on
+    which every (positively-weighted) asset has a valid, positive price (see
+    ``_first_all_priced_pos``); from that day on the supplied target passes through
+    unchanged.  When no such day exists the target is all-zero, leaving the lump
+    sum in cash for the whole window — matching ``simulate_lumpsum``'s
+    never-fully-priced behaviour.
 
     *target_fraction* is expected to already be aligned to *price_df*'s index
     (the plugin reindexes it before calling); a copy is returned so the caller's
-    series is left untouched.
+    series is left untouched.  *weights* (None/empty = equal) decides which assets
+    must be priced before the gate opens.
     """
     if price_df.empty:
         return target_fraction
-    first = _first_all_priced_pos(price_df.to_numpy(dtype=float))
+    weight_vec = _weight_array([str(c) for c in price_df.columns], weights)
+    first = _first_all_priced_pos(price_df.to_numpy(dtype=float), weight_vec)
     gated = target_fraction.copy()
     if first is None:
         gated.iloc[:] = 0.0
@@ -1109,6 +1253,7 @@ def simulate_riskoff(
     price_df: pd.DataFrame,
     target_fraction: pd.Series,
     initial_investment: float = INITIAL_INVESTMENT,
+    weights: dict[str, float] | None = None,
 ) -> tuple[pd.Series, float]:
     """Simulate the lump-sum Risk-Off strategy with daily, change-driven trading.
 
@@ -1126,6 +1271,9 @@ def simulate_riskoff(
     target_fraction    – per-day target invested fraction (0..1); reindexed onto
                          price_df's index, missing days defaulting to 0.0 (cash).
     initial_investment – one-off lump sum provided as cash at the start.
+    weights            – optional symbol → relative weight; None/empty means equal
+                         weight.  The invested portion is split across the day's
+                         priced assets in proportion to these weights.
 
     Returns
     -------
@@ -1173,7 +1321,9 @@ def simulate_riskoff(
     snap_holdings = np.zeros((change_pos.size, n_assets))
     snap_cash = np.empty(change_pos.size)
     for j, i in enumerate(change_pos):
-        holdings, cash, _ = _rebalance_to_target(holdings, cash, price_df.iloc[i], float(target[i]))
+        holdings, cash, _ = _rebalance_to_target(
+            holdings, cash, price_df.iloc[i], float(target[i]), weights
+        )
         snap_holdings[j] = [holdings[col] for col in columns]
         snap_cash[j] = cash
 
@@ -1195,12 +1345,14 @@ def simulate_riskoff(
 def simulate_lumpsum(
     price_df: pd.DataFrame,
     initial_investment: float = INITIAL_INVESTMENT,
+    weights: dict[str, float] | None = None,
 ) -> tuple[pd.Series, float]:
     """Simulate a single initial lump-sum investment held to the end (buy & hold).
 
     The whole *initial_investment* is deployed once, on the first trading day on
-    which **every** basket asset is buyable, split equally across all of them, so
-    the initial investment is shared evenly across the whole basket rather than
+    which **every** (positively-weighted) basket asset is buyable, split across
+    them **in proportion to their per-asset weights** (equal weight by default), so
+    the initial investment follows the chosen allocation rather than
     over-weighting whichever assets listed first.  Those units are then held
     unchanged for the rest of the window —
     there are no further trades, no rebalancing and no contributions — so the
@@ -1218,6 +1370,9 @@ def simulate_lumpsum(
     ----------
     price_df           – daily close prices (one column per asset).
     initial_investment – one-off lump sum invested on the first buyable day.
+    weights            – optional symbol → relative weight; None/empty means equal
+                         weight.  The lump sum is split across the basket in
+                         proportion to these weights.
 
     Returns
     -------
@@ -1236,21 +1391,22 @@ def simulate_lumpsum(
     prices_mat = price_df.to_numpy(dtype=float)
     n_days, n_assets = prices_mat.shape
 
-    # The lump sum is deployed on the first day on which *every* asset is buyable
-    # (valid, strictly positive price), so it is split equally across the whole
-    # basket rather than over-weighting whichever assets listed first.
-    buy_pos = _first_all_priced_pos(prices_mat)
+    # The lump sum is deployed on the first day on which *every* asset that will be
+    # bought (positive weight) is buyable, so it follows the chosen allocation
+    # rather than over-weighting whichever assets listed first.
+    weight_vec = _weight_array(columns, weights)
+    buy_pos = _first_all_priced_pos(prices_mat, weight_vec)
 
     # No day has the whole basket priced → the lump sum is held flat in cash.
     if buy_pos is None:
         flat = pd.Series(np.full(n_days, float(initial_investment)), index=price_df.index)
         return flat, initial_investment
 
-    # Deploy 100% on that first all-priced day, equal-weight across the basket,
+    # Deploy 100% on that first all-priced day, weighted across the basket,
     # reusing the exact Risk-Off rebalance math (cash_after ≈ 0).
     holdings: dict[str, float] = {col: 0.0 for col in columns}
     holdings, cash, _ = _rebalance_to_target(
-        holdings, float(initial_investment), price_df.iloc[buy_pos], 1.0
+        holdings, float(initial_investment), price_df.iloc[buy_pos], 1.0, weights
     )
     holdings_vec = np.array([holdings[col] for col in columns])
 
@@ -1370,6 +1526,7 @@ def run_backtest(
     strategy: "BacktestStrategy | None" = None,
     strategy_params: dict[str, int | float | str] | None = None,
     base_currency: str = BASE_CURRENCY,
+    weights: dict[str, float] | None = None,
 ) -> tuple[pd.Series | None, dict[str, str] | None, list[OrderRow] | None]:
     """Orchestrate a backtest for a single basket of assets.
 
@@ -1398,6 +1555,9 @@ def run_backtest(
                       None; the plugin falls back to its declared defaults).
     base_currency   – reporting currency every asset is converted into before
                       simulation (forwarded to the plugin / load_daily_closes).
+    weights         – optional symbol → relative weight controlling how capital is
+                      split across the basket (None/empty = equal weight, the
+                      historical behaviour); forwarded to the plugin / simulation.
 
     Returns
     -------
@@ -1412,7 +1572,7 @@ def run_backtest(
             return None, None, None
         return strategy.run(
             base_url, filenames, start_date, end_date, df_meta,
-            strategy_params or {}, base_currency=base_currency,
+            strategy_params or {}, base_currency=base_currency, weights=weights,
         )
 
     # Bail out immediately if the caller provided nothing useful.
@@ -1437,5 +1597,5 @@ def run_backtest(
     # during a long absence.
     price_df = price_df.ffill(limit=5)
 
-    portfolio, total_invested = simulate_lumpsum(price_df)
+    portfolio, total_invested = simulate_lumpsum(price_df, weights=weights)
     return portfolio, compute_metrics(portfolio, total_invested), None

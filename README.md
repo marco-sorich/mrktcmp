@@ -5,6 +5,11 @@ A Plotly Dash web application for backtesting across user-defined asset baskets.
 ## Features
 
 - Build two asset baskets (Basket A and Basket B) from any combination of assets
+- **Per-asset weighting**: each asset in a basket has an editable *relative* weight (default 1.0) shown next to its live
+  allocation **percentage**. Doing nothing keeps the basket equal-weighted, and adding an asset automatically re-weights
+  all of them; type a number to over- or under-weight an asset (set it to 0 to exclude it). The weights drive how capital
+  is split across the basket in every strategy (the lump-sum deployment, each DCA contribution, every Risk-Off rebalance,
+  and the basket index behind the Risk-Off signals and the Buy & Hold benchmark)
 - **Multi-currency support**: pick a reporting (base) currency from a dropdown (default EUR); every asset's prices are
   converted from its quote currency into that base currency using daily FX rates before the backtest, so baskets mixing
   USD/GBP/EUR/… assets are compared on a common basis (the standard *unhedged* approach). Currency pairs can themselves
@@ -14,18 +19,18 @@ A Plotly Dash web application for backtesting across user-defined asset baskets.
 - Pluggable backtesting strategies — each basket can use a different strategy with its own configurable parameters; a
   click on the ⓘ icon next to the strategy selector expands a rich-text description explaining the selected strategy and its parameters
 - **Buy & Hold** (default): a single lump sum (10,000, in the reporting currency) is invested in full on the first
-  trading day on which **every** basket asset is priced, split equally across all of them, and then held unchanged until
-  the end — one order, no rebalancing. Waiting for the whole basket to be priced keeps the initial investment split evenly
-  rather than over-weighting whichever assets listed first
+  trading day on which **every** (positively-weighted) basket asset is priced, split across them by their per-asset
+  weights (equal by default), and then held unchanged until the end — one order, no rebalancing. Waiting for the whole
+  basket to be priced keeps the initial investment allocated as chosen rather than over-weighting whichever assets listed first
 - **DCA**: a fixed amount (1,000, in the reporting currency) contributed per basket every month (on each month's last trading day),
-  split equally across available assets; the portfolio is valued on every trading day
+  split across the available assets by their per-asset weights (equal by default); the portfolio is valued on every trading day
 - **Risk-Off**: a one-off lump sum is held as cash and tactically shifted between the basket and cash.
   Three market signals are evaluated on the basket as a whole *every day* — 200-day trend, year-to-date return, and the
   January barometer (first 10 trading days of the year) — and the number of *positive* signals sets the target invested
   fraction in thirds (3 → 100 %, 2 → 66 %, 1 → 33 %, 0 → all cash). The basket is bought/sold to the new target on the
   day the signal changes and then held (drifting with the market) until the next change. The lump sum stays fully in cash
-  until the first day every basket asset is priced, so (like Buy & Hold) the initial deployment is split equally across
-  the whole basket
+  until the first day every (positively-weighted) basket asset is priced, so (like Buy & Hold) the initial deployment is
+  split across the whole basket by the per-asset weights
 - All strategies value the portfolio on a **daily** basis, so the chart is a dense daily curve and the risk metrics are
   daily-correct
 - Side-by-side performance metrics: Total Return, CAGR, Sharpe Ratio, Max. Drawdown, Volatility, Calmar Ratio, and more
@@ -239,11 +244,15 @@ tests/
                ),
            ]
 
-       def run(self, base_url, filenames, start_date, end_date, df_meta, params):
+       def run(self, base_url, filenames, start_date, end_date, df_meta, params,
+               base_currency='EUR', weights=None):
            # resolve_params merges caller-supplied values with schema defaults
            # so that params={} (no user input) always works correctly.
            resolved = self.resolve_params(params)
            my_param = float(resolved['my_param'])
+           # Forward base_currency to load_daily_closes() (FX conversion) and the
+           # optional per-asset weights (symbol -> relative weight; None = equal)
+           # to the simulation engines / your order-event generator.
            # ... compute portfolio (pd.Series) and metrics (dict[str, str]) ...
            # Build this strategy's order log: emit your own list of
            # backtest.OrderEvent (the strategy-specific part — when you trade,

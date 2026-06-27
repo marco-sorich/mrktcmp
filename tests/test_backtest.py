@@ -9,6 +9,7 @@ os.environ.pop("BASE_URL", None)
 from src.backtest import (  # noqa: E402
     INITIAL_INVESTMENT,
     OrderEvent,
+    build_equal_weight_index,
     build_order_log,
     build_fx_columns,
     simulate_dca,
@@ -20,7 +21,9 @@ from src.backtest import (  # noqa: E402
     _asset_prices_local,
     _fx_rate_values,
     _get_monthly_range,
+    _normalised_weights,
     _read_close_series,
+    _weight_array,
     clear_parquet_cache,
 )
 
@@ -229,6 +232,80 @@ class TestSimulateLumpsum:
         df = pd.DataFrame({'AAPL': [100.0] * 6}, index=idx)
         portfolio, _ = simulate_lumpsum(df)
         assert list(portfolio.index) == list(idx)
+
+
+# ---------------------------------------------------------------------------
+# Per-asset weighting (engine level)
+# ---------------------------------------------------------------------------
+
+class TestNormalisedWeights:
+    def test_no_weights_is_equal_split(self):
+        assert _normalised_weights(['A', 'B'], None) == {'A': 0.5, 'B': 0.5}
+        assert _normalised_weights(['A', 'B'], {}) == {'A': 0.5, 'B': 0.5}
+
+    def test_explicit_weights_renormalised(self):
+        assert _normalised_weights(['A', 'B'], {'A': 3.0, 'B': 1.0}) == {'A': 0.75, 'B': 0.25}
+
+    def test_missing_symbol_counts_as_zero(self):
+        # B absent from the map → 0; A takes the whole allocation.
+        assert _normalised_weights(['A', 'B'], {'A': 1.0}) == {'A': 1.0, 'B': 0.0}
+
+    def test_all_zero_subset_yields_all_zero(self):
+        assert _normalised_weights(['A', 'B'], {'A': 0.0, 'B': 0.0}) == {'A': 0.0, 'B': 0.0}
+
+    def test_empty_symbols_returns_empty(self):
+        assert _normalised_weights([], {'A': 1.0}) == {}
+
+
+class TestWeightArray:
+    def test_no_weights_is_all_ones(self):
+        assert np.array_equal(_weight_array(['A', 'B'], None), np.array([1.0, 1.0]))
+
+    def test_explicit_weights_preserved(self):
+        assert np.array_equal(_weight_array(['A', 'B'], {'A': 2.0, 'B': 0.0}), np.array([2.0, 0.0]))
+
+    def test_all_zero_falls_back_to_equal(self):
+        # A whole-basket all-zero vector falls back to ones so engines never divide
+        # by a zero total across the basket.
+        assert np.array_equal(_weight_array(['A', 'B'], {'A': 0.0, 'B': 0.0}), np.array([1.0, 1.0]))
+
+
+class TestWeightedSimulations:
+    def test_lumpsum_splits_by_weight(self):
+        # A flat (100→100), B doubles (100→200).  Weighted 3:1 → A 7,500 / B 2,500.
+        df = pd.DataFrame({'A': [100.0, 100.0], 'B': [100.0, 200.0]}, index=_MONTHLY_IDX[:2])
+        weighted, _ = simulate_lumpsum(df, initial_investment=10_000.0, weights={'A': 3.0, 'B': 1.0})
+        # day 0 fully deployed (7,500 + 2,500); day 1: 75×100 + 25×200 = 12,500.
+        assert weighted.iloc[0] == pytest.approx(10_000.0)
+        assert weighted.iloc[-1] == pytest.approx(12_500.0)
+        # Equal weight would instead end at 15,000 (5,000 each), confirming weights bite.
+        equal, _ = simulate_lumpsum(df, initial_investment=10_000.0)
+        assert equal.iloc[-1] == pytest.approx(15_000.0)
+
+    def test_lumpsum_zero_weight_asset_excluded_and_not_awaited(self):
+        # B has weight 0 and is never priced; the lump sum must still deploy fully
+        # into A on day one (it does not wait for the unweighted asset).
+        df = pd.DataFrame({'A': [100.0, 100.0], 'B': [np.nan, np.nan]}, index=_MONTHLY_IDX[:2])
+        portfolio, _ = simulate_lumpsum(df, initial_investment=10_000.0, weights={'A': 1.0, 'B': 0.0})
+        assert portfolio.iloc[0] == pytest.approx(10_000.0)   # all into A immediately
+        assert portfolio.iloc[-1] == pytest.approx(10_000.0)  # flat A
+
+    def test_dca_zero_weight_asset_receives_nothing(self):
+        # Both rows are month-ends.  A flat, B doubles, but B has weight 0 → every
+        # contribution goes into A, so B's rise is ignored.
+        df = pd.DataFrame({'A': [100.0, 100.0], 'B': [100.0, 200.0]}, index=_MONTHLY_IDX[:2])
+        portfolio, total = simulate_dca(df, monthly_investment=1000.0, weights={'A': 1.0, 'B': 0.0})
+        assert total == pytest.approx(2000.0)
+        # Month 0: 1,000 into A (10 sh).  Month 1: another 1,000 into A (20 sh) → 2,000.
+        assert portfolio.iloc[-1] == pytest.approx(2000.0)
+
+    def test_weighted_index_uses_weights(self):
+        # Day-over-day: A +0 %, B +100 %.  Equal mean = +50 % → 150; weighted 3:1
+        # = (3·0 + 1·1)/4 = +25 % → 125.
+        idx = pd.date_range('2020-01-01', periods=2, freq='D', tz='UTC')
+        df = pd.DataFrame({'A': [100.0, 100.0], 'B': [100.0, 200.0]}, index=idx)
+        assert build_equal_weight_index(df).iloc[-1] == pytest.approx(150.0)
+        assert build_equal_weight_index(df, {'A': 3.0, 'B': 1.0}).iloc[-1] == pytest.approx(125.0)
 
 
 # ---------------------------------------------------------------------------

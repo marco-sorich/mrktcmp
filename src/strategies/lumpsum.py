@@ -24,6 +24,7 @@ from src.backtest import (
     _fx_rate_values,
     _portfolio_value,
     _rebalance_to_target,
+    _weight_array,
     _window_by_month,
     build_equal_weight_index,
     build_fx_columns,
@@ -41,16 +42,18 @@ def _lumpsum_order_events(
     price_df: pd.DataFrame,
     initial_investment: float = INITIAL_INVESTMENT,
     fx: FxColumns | None = None,
+    weights: dict[str, float] | None = None,
 ) -> list[OrderEvent]:
     """Record the single Buy OrderEvent of a lump-sum buy-and-hold run.
 
     This is the Buy & Hold half of the order log; the generic derived columns are
     added afterwards by ``backtest.build_order_log``.  It mirrors
     ``simulate_lumpsum`` (which returns only the daily value curve): the whole
-    lump sum is deployed once, on the first trading day on which **every** basket
-    asset is buyable, split equally across all of them.  Because the entire
-    amount is invested there is no remaining cash, and as nothing is ever traded
-    again exactly one event is produced for the whole window.
+    lump sum is deployed once, on the first trading day on which **every**
+    (positively-weighted) basket asset is buyable, split across them by their
+    per-asset weights.  Because the entire amount is invested there is no
+    remaining cash, and as nothing is ever traded again exactly one event is
+    produced for the whole window.
 
     Parameters
     ----------
@@ -60,6 +63,8 @@ def _lumpsum_order_events(
     fx                 – optional FX context (see backtest.FxColumns); when given,
                          each event also carries the trading-currency quote and the
                          per-pair FX rates so the order table can show conversions.
+    weights            – optional symbol → relative weight; None/empty means equal
+                         weight (must match the value passed to simulate_lumpsum).
 
     Returns
     -------
@@ -76,19 +81,20 @@ def _lumpsum_order_events(
     asset_rate = fx.asset_rate if fx else {}
     pair_rate = fx.pair_rate if fx else {}
 
-    # Find the first day on which *every* asset has a valid, positive price; that
-    # is the day the lump sum is deployed (so it splits equally across the whole
-    # basket).  Reuses the same primitive as simulate_lumpsum to stay in lockstep.
-    buy_pos = _first_all_priced_pos(price_df.to_numpy(dtype=float))
+    # Find the first day on which *every* positively-weighted asset has a valid,
+    # positive price; that is the day the lump sum is deployed (so it follows the
+    # chosen weights).  Reuses simulate_lumpsum's primitive to stay in lockstep.
+    weight_vec = _weight_array([str(c) for c in price_df.columns], weights)
+    buy_pos = _first_all_priced_pos(price_df.to_numpy(dtype=float), weight_vec)
     if buy_pos is None:
         return []
 
     holdings: dict[str, float] = {str(col): 0.0 for col in price_df.columns}
     prices = price_df.iloc[buy_pos]
 
-    # Deploy 100% equal-weight, reusing the shared rebalance primitive so the
+    # Deploy 100% by weight, reusing the shared rebalance primitive so the
     # holdings match simulate_lumpsum exactly (cash_after is ~0 = fully invested).
-    holdings, _, _ = _rebalance_to_target(holdings, float(initial_investment), prices, 1.0)
+    holdings, _, _ = _rebalance_to_target(holdings, float(initial_investment), prices, 1.0, weights)
 
     date = price_df.index[buy_pos]
     return [OrderEvent(
@@ -169,6 +175,7 @@ class BuyHoldStrategy(BacktestStrategy):
         df_meta: pd.DataFrame,
         params: dict[str, int | float | str],
         base_currency: str = 'EUR',
+        weights: dict[str, float] | None = None,
     ) -> tuple[pd.Series | None, dict[str, str] | None, list[OrderRow] | None]:
         # resolve_params merges caller-supplied values with schema defaults so
         # that passing params={} is equivalent to using all declared defaults.
@@ -199,12 +206,12 @@ class BuyHoldStrategy(BacktestStrategy):
 
         # The windowed row count is exactly the number of points later plotted.
         with log_duration(f'lumpsum: simulate+metrics+orderlog ({price_df.shape[0]} rows)'):
-            portfolio, total_invested = simulate_lumpsum(price_df, initial_investment)
+            portfolio, total_invested = simulate_lumpsum(price_df, initial_investment, weights)
             metrics = compute_metrics(portfolio, total_invested)
 
-            # Normalised equal-weight index (first value = 1.0) used as the B&H
-            # benchmark column in the order log.
-            _bh_raw = build_equal_weight_index(price_df)
+            # Normalised (weighted) basket index (first value = 1.0) used as the
+            # B&H benchmark column in the order log; the same weights as the run.
+            _bh_raw = build_equal_weight_index(price_df, weights)
             bh_index = (_bh_raw / _bh_raw.iloc[0]) if not _bh_raw.empty else None
 
             # compute_metrics returns {} when portfolio is too short (< 3 months)
@@ -213,7 +220,7 @@ class BuyHoldStrategy(BacktestStrategy):
             # net-deposits tally as initial_capital (like Risk-Off).
             order_log = (
                 build_order_log(
-                    _lumpsum_order_events(price_df, initial_investment, fx),
+                    _lumpsum_order_events(price_df, initial_investment, fx, weights),
                     initial_capital=initial_investment,
                     bh_index=bh_index,
                 )

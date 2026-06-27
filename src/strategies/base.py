@@ -153,6 +153,7 @@ class BacktestStrategy(ABC):
         df_meta: pd.DataFrame,
         params: dict[str, int | float | str],
         base_currency: str = 'EUR',
+        weights: dict[str, float] | None = None,
     ) -> tuple[pd.Series | None, dict[str, str] | None, list[OrderRow] | None]:
         """Execute the backtest for one basket and return results.
 
@@ -168,6 +169,9 @@ class BacktestStrategy(ABC):
                         of run() to merge in the declared defaults for missing keys.
         base_currency – reporting currency every asset is converted into before
                         simulation; forward it to load_daily_closes().
+        weights       – optional symbol → relative weight controlling how capital is
+                        split across the basket (None/empty = equal weight); forward
+                        it to the simulation engines and the order-event generator.
 
         Returns
         -------
