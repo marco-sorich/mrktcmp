@@ -13,6 +13,13 @@ from src.strategies.dca import DCAStrategy, _dca_order_events  # noqa: E402
 from src.strategies.lumpsum import BuyHoldStrategy, _lumpsum_order_events  # noqa: E402
 from src.strategies.riskoff import RiskOffStrategy, _riskoff_order_events  # noqa: E402
 from src.strategies.summergap import SummerGapStrategy, _seasonal_target  # noqa: E402
+from src.strategies.loserrotation import (  # noqa: E402
+    LoserRotationStrategy,
+    _build_rotation_events,
+    _first_trading_day_of_year,
+    _first_trading_day_on_or_after,
+    _select_losers,
+)
 from src.backtest import (  # noqa: E402
     INITIAL_INVESTMENT,
     FxColumns,
@@ -21,6 +28,8 @@ from src.backtest import (  # noqa: E402
     gate_target_until_all_priced,
     run_backtest,
     simulate_riskoff,
+    simulate_rotation,
+    _rotation_order_events,
 )
 
 # ---------------------------------------------------------------------------
@@ -1192,3 +1201,336 @@ class TestSeasonalTarget:
         # window, fully invested every day.
         target = _seasonal_target(self._YEAR, 8, 1, 8, 1)
         assert (target == 1.0).all()
+
+
+# ---------------------------------------------------------------------------
+# Layer 9 – simulate_rotation / _rotation_order_events (generic engine)
+# ---------------------------------------------------------------------------
+
+class TestSimulateRotation:
+    _IDX = pd.date_range('2020-01-01', periods=6, freq='D', tz='UTC')
+
+    def test_empty_price_df_returns_flat_lump_sum(self):
+        portfolio, invested = simulate_rotation(pd.DataFrame(), [], 10_000.0)
+        assert portfolio.empty
+        assert invested == 10_000.0
+
+    def test_no_events_holds_flat_cash(self):
+        price = pd.DataFrame({'A': [100.0] * 6}, index=self._IDX)
+        portfolio, invested = simulate_rotation(price, [], 10_000.0)
+        assert (portfolio == 10_000.0).all()
+        assert invested == 10_000.0
+
+    def test_events_outside_index_are_ignored(self):
+        price = pd.DataFrame({'A': [100.0] * 6}, index=self._IDX)
+        bogus_date = pd.Timestamp('2019-01-01', tz='UTC')
+        portfolio, invested = simulate_rotation(price, [(bogus_date, 1.0, {'A': 1.0})], 10_000.0)
+        assert (portfolio == 10_000.0).all()
+        assert invested == 10_000.0
+
+    def test_rotation_between_two_assets(self):
+        # Fully into A on day 0; sold to cash on day 2 (A has doubled by then);
+        # rotated fully into B on day 3.
+        price = pd.DataFrame({
+            'A': [100.0, 100.0, 200.0, 200.0, 200.0, 200.0],
+            'B': [50.0, 50.0, 50.0, 50.0, 100.0, 100.0],
+        }, index=self._IDX)
+        events = [
+            (self._IDX[0], 1.0, {'A': 1.0}),
+            (self._IDX[2], 0.0, {'A': 1.0}),
+            (self._IDX[3], 1.0, {'B': 1.0}),
+        ]
+        portfolio, invested = simulate_rotation(price, events, 10_000.0)
+        assert portfolio.iloc[0] == pytest.approx(10_000.0)
+        assert portfolio.iloc[1] == pytest.approx(10_000.0)
+        # Sold on day 2 at A=200: the position had doubled before the sale.
+        assert portfolio.iloc[2] == pytest.approx(20_000.0)
+        # Rotated fully into B on day 3 (still worth 20,000 right after the trade).
+        assert portfolio.iloc[3] == pytest.approx(20_000.0)
+        # B then doubles (50 -> 100) by day 4, so the position doubles too.
+        assert portfolio.iloc[4] == pytest.approx(40_000.0)
+        assert portfolio.iloc[5] == pytest.approx(40_000.0)
+        assert invested == 10_000.0
+
+
+class TestRotationOrderEvents:
+    _IDX = pd.date_range('2020-01-01', periods=4, freq='D', tz='UTC')
+
+    def test_empty_frame_or_no_events_returns_no_events(self):
+        assert _rotation_order_events(pd.DataFrame(), [], 10_000.0) == []
+        price = pd.DataFrame({'A': [100.0] * 4}, index=self._IDX)
+        assert _rotation_order_events(price, [], 10_000.0) == []
+
+    def test_buy_and_sell_sides(self):
+        price = pd.DataFrame({'A': [100.0, 100.0, 200.0, 200.0]}, index=self._IDX)
+        events = [
+            (self._IDX[0], 1.0, {'A': 1.0}),
+            (self._IDX[2], 0.0, {'A': 1.0}),
+        ]
+        out = _rotation_order_events(price, events, 10_000.0)
+        assert len(out) == 2
+        buy, sell = out
+        assert buy['side'] == 'Buy'
+        assert sell['side'] == 'Sell'
+        assert buy['inflow'] == 0.0 and sell['inflow'] == 0.0
+        assert buy['asset_values'] == pytest.approx({'A': 10_000.0})
+        assert sell['asset_values'] == pytest.approx({'A': 0.0})
+        assert buy['assets_after'] + buy['cash_after'] == pytest.approx(10_000.0)
+        assert sell['assets_after'] + sell['cash_after'] == pytest.approx(20_000.0)
+
+    def test_events_outside_index_are_skipped(self):
+        price = pd.DataFrame({'A': [100.0] * 4}, index=self._IDX)
+        bogus = pd.Timestamp('2019-01-01', tz='UTC')
+        assert _rotation_order_events(price, [(bogus, 1.0, {'A': 1.0})], 10_000.0) == []
+
+    def test_fx_context_adds_local_price_and_rate(self):
+        price = pd.DataFrame({'AAPL': [100.0, 100.0]}, index=self._IDX[:2])
+        rate = pd.Series([0.9, 0.9], index=self._IDX[:2])
+        fx = FxColumns(
+            asset_local_ccy={'AAPL': 'USD'},
+            asset_rate={'AAPL': rate},
+            pair_rate={'USDEUR=X': rate},
+        )
+        (ev,) = _rotation_order_events(price, [(self._IDX[0], 1.0, {'AAPL': 1.0})], 10_000.0, fx)
+        assert ev['asset_prices_local']['AAPL'] == pytest.approx(100.0 / 0.9)
+        assert ev['fx_rates']['USDEUR=X'] == pytest.approx(0.9)
+
+
+# ---------------------------------------------------------------------------
+# Layer 10 – Loser Rotation strategy plugin
+# ---------------------------------------------------------------------------
+
+class TestLoserRotationPureFunctions:
+    def test_first_trading_day_of_year_present_and_absent(self):
+        idx = pd.date_range('2020-01-03', '2020-12-31', freq='D', tz='UTC')
+        assert _first_trading_day_of_year(idx, 2020) == idx[0]
+        assert _first_trading_day_of_year(idx, 2021) is None
+
+    def test_first_trading_day_on_or_after(self):
+        idx = pd.date_range('2020-01-01', '2020-12-31', freq='D', tz='UTC')
+        assert _first_trading_day_on_or_after(idx, 2020, 7, 1) == pd.Timestamp('2020-07-01', tz='UTC')
+        # No year rows at all.
+        assert _first_trading_day_on_or_after(idx, 2021, 7, 1) is None
+
+    def test_first_trading_day_on_or_after_none_when_date_past_history(self):
+        # History for the year ends before the requested (month, day).
+        idx = pd.date_range('2020-01-01', '2020-06-30', freq='D', tz='UTC')
+        assert _first_trading_day_on_or_after(idx, 2020, 7, 1) is None
+
+
+class TestSelectLosers:
+    _IDX = pd.to_datetime(['2020-01-02', '2020-07-01']).tz_localize('UTC')
+
+    def test_ranks_by_ytd_return_ascending(self):
+        daily_df = pd.DataFrame({
+            'A': [100.0, 150.0],  # +50%
+            'B': [100.0, 80.0],   # -20% (worst)
+            'C': [100.0, 90.0],   # -10%
+        }, index=self._IDX)
+        assert _select_losers(daily_df, self._IDX[0], self._IDX[1], n_losers=2) == ['B', 'C']
+
+    def test_clamps_to_eligible_count(self):
+        daily_df = pd.DataFrame({'A': [100.0, 90.0]}, index=self._IDX)
+        assert _select_losers(daily_df, self._IDX[0], self._IDX[1], n_losers=5) == ['A']
+
+    def test_excludes_assets_missing_either_price(self):
+        daily_df = pd.DataFrame({
+            'A': [100.0, 90.0],
+            'B': [np.nan, 80.0],  # missing at the year-start anchor
+        }, index=self._IDX)
+        assert _select_losers(daily_df, self._IDX[0], self._IDX[1], n_losers=2) == ['A']
+
+    def test_returns_empty_when_none_eligible(self):
+        daily_df = pd.DataFrame({'A': [np.nan, 90.0]}, index=self._IDX)
+        assert _select_losers(daily_df, self._IDX[0], self._IDX[1], n_losers=2) == []
+
+
+class TestBuildRotationEvents:
+    def test_builds_annual_buy_and_sell_events(self):
+        idx = pd.date_range('2020-01-01', '2021-12-31', freq='D', tz='UTC')
+        daily_df = pd.DataFrame({
+            'A': np.linspace(100, 50, len(idx)),   # steadily falling -> always the loser
+            'B': np.linspace(100, 200, len(idx)),  # steadily rising -> always the winner
+        }, index=idx)
+        events = _build_rotation_events(daily_df, daily_df, 7, 1, 10, 1, n_losers=1, weights=None)
+        dates = [e[0] for e in events]
+        assert dates == sorted(dates)
+        buys = [e for e in events if e[1] == 1.0]
+        sells = [e for e in events if e[1] == 0.0]
+        assert len(buys) == 2 and len(sells) == 2
+        assert all(e[0].month == 7 and e[0].day == 1 for e in buys)
+        assert all(e[0].month == 10 and e[0].day == 1 for e in sells)
+        # A is always the (single) loser, so it's the only symbol ever weighted.
+        assert all(e[2] == {'A': 1.0} for e in buys + sells)
+
+    def test_wraparound_sell_date_lands_in_next_year(self):
+        idx = pd.date_range('2020-01-01', '2021-12-31', freq='D', tz='UTC')
+        daily_df = pd.DataFrame({
+            'A': 100.0,
+            'B': np.linspace(100, 300, len(idx)),
+        }, index=idx)
+        # Buy in November, sell in February -> the sell falls in the following year.
+        events = _build_rotation_events(daily_df, daily_df, 11, 1, 2, 1, n_losers=1, weights=None)
+        buys = sorted(e[0] for e in events if e[1] == 1.0)
+        sells = sorted(e[0] for e in events if e[1] == 0.0)
+        assert buys and all(d.month == 11 for d in buys)
+        assert sells and all(d.month == 2 for d in sells)
+        assert sells[0].year == buys[0].year + 1
+
+    def test_events_outside_window_are_dropped(self):
+        idx = pd.date_range('2020-01-01', '2021-12-31', freq='D', tz='UTC')
+        daily_df = pd.DataFrame({
+            'A': 100.0,
+            'B': np.linspace(100, 300, len(idx)),
+        }, index=idx)
+        # The windowed price_df only covers the second year.
+        price_df = daily_df.loc['2021-01-01':]
+        events = _build_rotation_events(daily_df, price_df, 7, 1, 10, 1, n_losers=1, weights=None)
+        assert events
+        assert all(e[0].year == 2021 for e in events)
+
+    def test_weights_restrict_to_selected_losers_only(self):
+        idx = pd.date_range('2020-01-01', '2020-12-31', freq='D', tz='UTC')
+        daily_df = pd.DataFrame({
+            'A': np.linspace(100, 50, len(idx)),
+            'B': np.linspace(100, 200, len(idx)),
+        }, index=idx)
+        events = _build_rotation_events(
+            daily_df, daily_df, 7, 1, 10, 1, n_losers=1, weights={'A': 2.0, 'B': 5.0}
+        )
+        buy = next(e for e in events if e[1] == 1.0)
+        # Only the selected loser (A) appears, keeping its own relative weight.
+        assert buy[2] == {'A': 2.0}
+
+    def test_no_eligible_losers_contributes_no_events(self):
+        # A single-day frame has no distinct year-start anchor to compare against
+        # (year_start == buy_date, so the "return" is always 0 for every asset —
+        # still eligible/rankable, this instead checks the truly-empty-frame path).
+        assert _build_rotation_events(pd.DataFrame(), pd.DataFrame(), 7, 1, 10, 1, 1, None) == []
+
+
+class TestLoserRotationStrategy:
+    def test_is_registered_in_registry(self):
+        assert "Loser Rotation" in list_strategies()
+        assert get_strategy("Loser Rotation") is LoserRotationStrategy
+
+    def test_get_name_and_icon(self):
+        assert LoserRotationStrategy.get_name() == 'Loser Rotation'
+        icon = LoserRotationStrategy.get_icon()
+        assert isinstance(icon, str) and icon
+
+    def test_get_description_is_non_empty_string(self):
+        assert isinstance(LoserRotationStrategy.get_description(), str)
+        assert LoserRotationStrategy.get_description()
+
+    def test_get_long_description_returns_rich_markdown(self):
+        long = LoserRotationStrategy.get_long_description()
+        assert isinstance(long, str) and long
+        assert len(long) > len(LoserRotationStrategy.get_description())
+
+    def test_config_schema_keys_and_defaults(self):
+        schema = LoserRotationStrategy.get_config_schema()
+        by_key = {p.key: p for p in schema}
+        assert set(by_key) == {
+            'initial_investment', 'n_losers', 'buy_month', 'buy_day', 'sell_month', 'sell_day',
+        }
+        for param in schema:
+            assert param.default is not None, f"Param '{param.key}' has no default"
+        assert by_key['initial_investment'].default == float(INITIAL_INVESTMENT)
+        assert by_key['n_losers'].default == 3
+        assert by_key['buy_month'].default == 'July'
+        assert by_key['buy_day'].default == 1
+        assert by_key['sell_month'].default == 'October'
+        assert by_key['sell_day'].default == 1
+        assert by_key['buy_month'].default in by_key['buy_month'].options
+        assert by_key['sell_month'].default in by_key['sell_month'].options
+
+    def test_run_returns_exactly_9_metric_keys(self):
+        strategy = LoserRotationStrategy()
+        with patch('src.backtest.pd.read_parquet', return_value=_daily_rising()):
+            portfolio, metrics, orders = strategy.run(
+                BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META, params={}
+            )
+        assert portfolio is not None
+        assert isinstance(metrics, dict)
+        assert set(metrics.keys()) == _EXPECTED_METRIC_KEYS
+        assert len(metrics) == 9
+        assert orders is not None and len(orders) >= 1
+
+    def test_run_with_empty_filenames_returns_none_none(self):
+        strategy = LoserRotationStrategy()
+        portfolio, metrics, orders = strategy.run(
+            BASE_URL, [], _START, _END, SAMPLE_META, params={}
+        )
+        assert portfolio is None and metrics is None and orders is None
+
+    def test_run_with_too_short_date_range_returns_none_none(self):
+        strategy = LoserRotationStrategy()
+        start = pd.Timestamp('2020-06-30', tz='UTC')
+        end = pd.Timestamp('2020-06-30', tz='UTC')
+        with patch('src.backtest.pd.read_parquet', return_value=_daily_rising()):
+            portfolio, metrics, orders = strategy.run(
+                BASE_URL, ['aapl.parquet'], start, end, SAMPLE_META, params={}
+            )
+        assert portfolio is None and metrics is None and orders is None
+
+    def test_custom_initial_investment_scales_invested(self):
+        strategy = LoserRotationStrategy()
+        with patch('src.backtest.pd.read_parquet', return_value=_daily_rising()):
+            _, metrics, _ = strategy.run(
+                BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META,
+                params={'initial_investment': 25_000.0},
+            )
+        assert metrics is not None
+        invested = float(metrics['Invested'].replace(',', ''))
+        assert invested == pytest.approx(25_000.0)
+
+    def test_n_losers_larger_than_basket_still_runs(self):
+        # Single-asset basket with n_losers=10 (clamped down to the 1 eligible asset).
+        strategy = LoserRotationStrategy()
+        with patch('src.backtest.pd.read_parquet', return_value=_daily_rising()):
+            portfolio, metrics, orders = strategy.run(
+                BASE_URL, ['aapl.parquet'], _START, _END, SAMPLE_META,
+                params={'n_losers': 10},
+            )
+        assert portfolio is not None and metrics is not None
+        assert orders is not None and orders
+
+
+class TestLoserRotationSelection:
+    """Full run() test: the yearly rotation buys into the correct worst YTD performer."""
+
+    META = pd.DataFrame({
+        'asset_class': ['stocks'] * 3,
+        'symbol': ['WIN', 'FLAT', 'LOSE'],
+        'name': ['Winner', 'Flat', 'Loser'],
+        'filename': ['win.parquet', 'flat.parquet', 'lose.parquet'],
+    })
+
+    def _three_asset_read(self):
+        winner = _daily_rising(low=100.0, high=400.0)
+        flat = _daily_ohlcv(100.0)
+        loser = _daily_rising(low=100.0, high=20.0)
+
+        def _read(path, columns=None):
+            if 'win' in path:
+                return winner
+            if 'lose' in path:
+                return loser
+            return flat
+        return _read
+
+    def test_rotation_buys_the_worst_ytd_performer(self):
+        strategy = LoserRotationStrategy()
+        with patch('src.backtest.pd.read_parquet', side_effect=self._three_asset_read()):
+            _, metrics, orders = strategy.run(
+                BASE_URL, ['win.parquet', 'flat.parquet', 'lose.parquet'],
+                _START, _END, self.META, params={'n_losers': 1},
+            )
+        assert metrics is not None
+        assert orders is not None and orders
+        buys = [o for o in orders if o['side'] == 'Buy']
+        assert buys
+        for buy in buys:
+            invested_syms = {sym for sym, val in buy['asset_values'].items() if val > 0}
+            assert invested_syms == {'LOSE'}

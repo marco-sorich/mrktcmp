@@ -37,6 +37,13 @@ A Plotly Dash web application for backtesting across user-defined asset baskets.
   both dates configurable to the month *and* day. It reuses the Risk-Off engine with a purely calendar-driven target
   (fully invested outside the window, fully in cash inside it), and the same all-priced gate so the first deployment is
   split across the whole basket by the per-asset weights
+- **Loser Rotation**: a seasonal, cross-sectional twist inspired by the "losers of the year rebound in July" effect.
+  Once a year, on a configurable buy date (default 1 July), every basket asset's return from the first trading day of
+  that calendar year up to the buy date is ranked, and the lump sum is invested **only into the worst-performing N
+  assets** (a configurable count, split by their per-asset weights). The position is held until a configurable sell
+  date (default 1 October), when it is sold entirely back to cash until next year's buy date re-selects the losers
+  from scratch. Unlike every other strategy — whose per-asset weights are fixed for the whole run — this one's asset
+  *selection* changes every year, so it uses its own dedicated simulation engine
 - All strategies value the portfolio on a **daily** basis, so the chart is a dense daily curve and the risk metrics are
   daily-correct
 - Side-by-side performance metrics: Total Return, CAGR, Sharpe Ratio, Max. Drawdown, Volatility, Calmar Ratio, and more
@@ -195,9 +202,11 @@ src/
   app.py              # Dash application entry point
   backtest.py         # pure simulation engines, all on daily close prices:
                       #   Buy & Hold (load_daily_closes, _window_by_month, simulate_lumpsum),
-                      #   DCA (load_daily_closes, _window_by_month, simulate_dca) and
+                      #   DCA (load_daily_closes, _window_by_month, simulate_dca),
                       #   Risk-Off (load_daily_closes, build_equal_weight_index,
-                      #   compute_riskoff_signals, simulate_riskoff); shared compute_metrics
+                      #   compute_riskoff_signals, simulate_riskoff) and
+                      #   Loser Rotation (simulate_rotation: rebalances to an explicit,
+                      #   per-event list of changing target weights); shared compute_metrics
   strategies/
     __init__.py       # imports all plugins to trigger registration at startup
                       #   (import order = dropdown order; lumpsum first = default)
@@ -207,6 +216,7 @@ src/
     dca.py            # Dollar-Cost Averaging strategy plugin
     riskoff.py        # Risk-Off signal strategy plugin (lump sum + tactical cash)
     summergap.py      # Summer Gap seasonal strategy plugin (lump sum, out for the summer)
+    loserrotation.py  # Loser Rotation strategy plugin (annual rotation into the basket's worst YTD performers)
   callbacks/
     backtesting.py    # backtesting callbacks
   config.py           # startup singleton: logging, env vars, master.parquet
@@ -217,7 +227,7 @@ src/
 tests/
   test_app.py
   test_backtest.py
-  test_strategies.py  # plugin system: ConfigParam, registry, BuyHold/DCA/RiskOff/SummerGap, backward compat
+  test_strategies.py  # plugin system: ConfigParam, registry, BuyHold/DCA/RiskOff/SummerGap/LoserRotation, backward compat
 ```
 
 ## Adding a New Backtesting Strategy
