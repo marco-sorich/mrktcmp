@@ -1393,7 +1393,7 @@ def simulate_rotation(
     # Chronological order, and drop any event whose date isn't actually a row of
     # price_df (e.g. a rotation date outside the windowed range).
     ordered = sorted(events, key=lambda e: e[0])
-    pos_arr = price_df.index.get_indexer([e[0] for e in ordered])
+    pos_arr = price_df.index.get_indexer(pd.DatetimeIndex([e[0] for e in ordered]))
     valid = pos_arr >= 0
     ordered = [e for e, v in zip(ordered, valid) if v]
     event_pos = pos_arr[valid]
@@ -1480,11 +1480,18 @@ def _rotation_order_events(
     # (presumably positive) fraction is always recorded as a Buy.
     current = 0.0
 
-    ordered = sorted((e for e in events if e[0] in price_df.index), key=lambda e: e[0])
+    # Chronological order, and drop any event whose date isn't actually a row of
+    # price_df — mirrors simulate_rotation's own filtering exactly, and resolves
+    # each row via positional .iloc (unambiguously a Series, unlike .loc[date]).
+    ordered = sorted(events, key=lambda e: e[0])
+    pos_arr = price_df.index.get_indexer(pd.DatetimeIndex([e[0] for e in ordered]))
+    valid = pos_arr >= 0
+    ordered = [e for e, v in zip(ordered, valid) if v]
+    positions = pos_arr[valid]
 
     out: list[OrderEvent] = []
-    for date, frac, weights in ordered:
-        prices = price_df.loc[date]
+    for (date, frac, weights), pos in zip(ordered, positions):
+        prices = price_df.iloc[pos]
         value_before = _portfolio_value(holdings, cash, prices)
         side = 'Buy' if frac > current else 'Sell'
 

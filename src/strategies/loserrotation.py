@@ -90,6 +90,8 @@ def _select_losers(
     """
     start_prices = daily_df.loc[year_start]
     buy_prices = daily_df.loc[buy_date]
+    assert isinstance(start_prices, pd.Series)
+    assert isinstance(buy_prices, pd.Series)
     eligible = start_prices.notna() & buy_prices.notna() & (start_prices > 0)
     if not eligible.any():
         return []
