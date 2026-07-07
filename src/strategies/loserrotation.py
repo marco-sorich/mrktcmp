@@ -87,6 +87,15 @@ def _select_losers(
     computed. Ties are broken by column order (pandas' stable sort). Returns
     fewer than *n_losers* symbols when fewer are eligible that year, and an empty
     list when none are.
+
+    *daily_df* should already be forward-filled (see ``_build_rotation_events``):
+    *year_start* and *buy_date* are picked from the basket's **combined** trading
+    calendar (the union of every asset's own trading days), so on either date some
+    basket members may not have traded that exact day (e.g. a market holiday
+    specific to their own exchange) even though they were priced a day or two
+    earlier. Without filling first, those assets would be wrongly marked
+    ineligible for the whole year purely because of a calendar mismatch, not
+    because they were actually unpriced.
     """
     start_prices = daily_df.loc[year_start]
     buy_prices = daily_df.loc[buy_date]
@@ -120,6 +129,16 @@ def _build_rotation_events(
     those are the only ones ``simulate_rotation``/``_rotation_order_events`` can
     trade on.
 
+    *year_start*/*buy_date* are located on the **combined** trading calendar (the
+    union of every basket asset's own trading days), so a basket mixing markets
+    with different holiday calendars (e.g. a US-listed and a Xetra-listed asset)
+    will often find that day isn't a trading day for every member. Ranking is
+    therefore done against a forward-filled copy of *daily_df* (bounded to the
+    same ≤5-trading-day tolerance every plugin already applies to its windowed
+    ``price_df`` for weekends/holidays/delayed data), so an asset merely silent on
+    the exact anchor day still contributes its last known close instead of being
+    wrongly excluded from that year's ranking altogether.
+
     The sell date is searched in the *same* year as the buy date when the sell
     ordinal (month, day) falls after the buy ordinal (the default: buy in July,
     sell in October), and in the *following* year otherwise — mirroring
@@ -146,6 +165,11 @@ def _build_rotation_events(
     buy_ord = buy_month * 100 + buy_day
     sell_ord = sell_month * 100 + sell_day
 
+    # See the docstring above: bridges calendar mismatches between the basket's
+    # own markets (e.g. US vs. Xetra holidays) so an asset silent on the exact
+    # combined-calendar anchor day isn't wrongly excluded from ranking.
+    ranking_df = daily_df.ffill(limit=5)
+
     events: list[tuple[pd.Timestamp, float, dict[str, float] | None]] = []
 
     for year in range(int(price_df.index.year.min()), int(price_df.index.year.max()) + 1):
@@ -154,7 +178,7 @@ def _build_rotation_events(
         if year_start is None or buy_date is None:
             continue
 
-        selected = _select_losers(daily_df, year_start, buy_date, n_losers)
+        selected = _select_losers(ranking_df, year_start, buy_date, n_losers)
         if not selected:
             continue
 

@@ -1408,6 +1408,46 @@ class TestBuildRotationEvents:
         # still eligible/rankable, this instead checks the truly-empty-frame path).
         assert _build_rotation_events(pd.DataFrame(), pd.DataFrame(), 7, 1, 10, 1, 1, None) == []
 
+    def test_calendar_mismatch_does_not_wrongly_exclude_an_asset(self):
+        # Asset A ("loser", steadily falling) misses its own market's first
+        # trading day of 2021 (e.g. a market-specific holiday); Asset B
+        # ("winner", steadily rising) trades that day, so the *combined*
+        # calendar's "first trading day of 2021" is a day A itself didn't
+        # trade. Without bridging that single-day gap, A would be wrongly
+        # excluded from the 2021 ranking entirely, and B (the actual winner)
+        # would be picked instead purely because of the calendar mismatch —
+        # exactly the bug seen with a real US-listed + Xetra-listed basket.
+        idx = pd.date_range('2020-01-01', '2021-12-31', freq='D', tz='UTC')
+        gap_date = pd.Timestamp('2021-01-01', tz='UTC')
+        a_idx = idx[idx != gap_date]
+        series_a = pd.Series(np.linspace(100, 50, len(a_idx)), index=a_idx)
+        series_b = pd.Series(np.linspace(100, 200, len(idx)), index=idx)
+        daily_df = pd.DataFrame({'A': series_a, 'B': series_b})
+
+        events = _build_rotation_events(daily_df, daily_df, 7, 1, 10, 1, n_losers=1, weights=None)
+        buys_2021 = [e for e in events if e[1] == 1.0 and e[0].year == 2021]
+        assert buys_2021
+        assert buys_2021[0][2] == {'A': 1.0}
+
+    def test_four_assets_all_priced_every_year_rotates_every_year(self):
+        # Mirrors the real-world scenario (4 continuously-priced assets,
+        # n_losers=2): every year in the window must contribute a buy/sell
+        # pair selecting exactly the 2 worst performers — no year skipped.
+        idx = pd.date_range('2018-01-01', '2021-12-31', freq='D', tz='UTC')
+        n = len(idx)
+        daily_df = pd.DataFrame({
+            'A': np.linspace(100, 20, n),   # worst performer
+            'B': np.linspace(100, 30, n),   # second-worst performer
+            'C': np.linspace(100, 300, n),  # winner
+            'D': np.linspace(100, 400, n),  # winner
+        }, index=idx)
+        events = _build_rotation_events(daily_df, daily_df, 7, 1, 10, 1, n_losers=2, weights=None)
+        years = sorted({e[0].year for e in events})
+        assert years == [2018, 2019, 2020, 2021]
+        for year in years:
+            buy = next(e for e in events if e[1] == 1.0 and e[0].year == year)
+            assert set(buy[2]) == {'A', 'B'}
+
 
 class TestLoserRotationStrategy:
     def test_is_registered_in_registry(self):
