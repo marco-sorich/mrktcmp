@@ -1,22 +1,27 @@
 # ---------------------------------------------------------------------------
 # strategies/loserrotation.py – "Loser Rotation" seasonal strategy plugin
 #
-# A calendar-driven, cross-sectional strategy modelled on the well-known
-# "losers of the year rebound in July" effect: at the start of the third
-# quarter, funds and ETFs commonly rebalance out of the year's winners into its
-# most beaten-down names, producing a short-lived rebound in a basket's worst
-# performers. Once a year, on a configurable buy date, every basket asset's
-# year-to-date return (from the first trading day of that calendar year up to
-# the buy date) is ranked and the lump sum is bought into only the worst-
-# performing N assets; the position is held until a configurable sell date,
-# when it is sold back to cash until next year's buy date repeats the process
+# A buy-and-hold strategy with an annual, calendar-driven tactical tilt,
+# modelled on the well-known "losers of the year rebound in July" effect: at
+# the start of the third quarter, funds and ETFs commonly rebalance out of the
+# year's winners into its most beaten-down names, producing a short-lived
+# rebound in a basket's worst performers.
+#
+# The lump sum is deployed up front across the whole basket at its per-asset
+# weights, exactly like Buy & Hold, and stays fully invested throughout — the
+# strategy never steps into cash. Once a year, on a configurable buy date, every
+# basket asset's year-to-date return (from the first trading day of that
+# calendar year up to the buy date) is ranked and a configurable share of the
+# portfolio value is shifted into the worst-performing N assets (split equally
+# among them; the remainder stays at the original weighting). On a configurable
+# sell date the original weighting is fully restored. This repeats every year
 # with a freshly ranked selection.
 #
 # Unlike Risk-Off/Summer Gap — whose per-asset weights are one static dict for
 # the whole run and only the aggregate invested fraction varies day to day —
-# this strategy's asset *selection* itself changes every year, so it uses the
-# new backtest.simulate_rotation/_rotation_order_events engine (an explicit
-# list of (date, target_fraction, weights) events) instead of the fixed-weight
+# this strategy's asset *allocation* itself changes over time, so it uses the
+# backtest.simulate_rotation/_rotation_order_events engine (an explicit list of
+# RotationEvents, each with its own weights) instead of the fixed-weight
 # simulate_riskoff/_riskoff_order_events pair.
 # ---------------------------------------------------------------------------
 
@@ -27,7 +32,11 @@ import pandas as pd
 from src.backtest import (
     INITIAL_INVESTMENT,
     OrderRow,
+    RotationEvent,
+    _first_all_priced_pos,
+    _normalised_weights,
     _rotation_order_events,
+    _weight_array,
     _window_by_month,
     build_equal_weight_index,
     build_fx_columns,
@@ -117,17 +126,35 @@ def _build_rotation_events(
     sell_month: int,
     sell_day: int,
     n_losers: int,
+    shift_frac: float,
     weights: dict[str, float] | None,
-) -> list[tuple[pd.Timestamp, float, dict[str, float] | None]]:
-    """Build the annual buy/sell rotation events for every year spanned by *price_df*.
+) -> list[RotationEvent]:
+    """Build the initial deployment plus the annual tilt/reset RotationEvents.
+
+    The portfolio is **always fully invested** (target fraction 1.0 on every
+    event); what changes is the per-asset allocation:
+
+    1. **Initial deployment** — exactly like Buy & Hold: on the first day every
+       positively-weighted basket asset is priced (``_first_all_priced_pos``),
+       the lump sum is deployed at the basket's original per-asset weights.
+       When no such day exists, no events are emitted and the lump sum stays in
+       cash, mirroring ``simulate_lumpsum``'s never-fully-priced behaviour.
+    2. **Annual tilt (Buy)** — on each year's buy date, *shift_frac* of the
+       portfolio value moves into that year's *n_losers* worst YTD performers
+       (split **equally** among them — the basket weights deliberately play no
+       role here, so even an asset the user weighted 0 can be a rotation
+       target); the remaining ``1 - shift_frac`` stays at the original weights.
+       Expressed as one blended weights dict per year.
+    3. **Annual reset (Sell)** — on each year's sell date the original
+       weighting is fully restored, regardless of *shift_frac*.
 
     Uses the **full** *daily_df* (unwindowed) to find each year's 1 January
     anchor, buy date and YTD-return ranking, so the ranking is correct even when
     the requested window starts mid-year — the same full-history-for-signals
     split ``riskoff.py`` uses for its long look-back signals. Only events whose
-    date actually falls inside *price_df*'s (windowed) index are returned, since
-    those are the only ones ``simulate_rotation``/``_rotation_order_events`` can
-    trade on.
+    date actually falls inside *price_df*'s (windowed) index — and not before
+    the initial deployment day — are returned, since those are the only ones
+    ``simulate_rotation``/``_rotation_order_events`` can trade on.
 
     *year_start*/*buy_date* are located on the **combined** trading calendar (the
     union of every basket asset's own trading days), so a basket mixing markets
@@ -145,23 +172,40 @@ def _build_rotation_events(
     ``summergap._seasonal_target``'s wrap-around handling for windows that cross
     the year boundary (e.g. buy in November, sell in February).
 
-    Each selected year contributes a ``(buy_date, 1.0, year_weights)`` event and,
-    when a sell date is found, a ``(sell_date, 0.0, year_weights)`` event —
-    *year_weights* gives the selected losers the caller's relative weight (or 1.0
-    each, i.e. equal split) and implicitly zero-weights every other basket
-    symbol, so the lump sum is only ever invested in that year's selection.
+    A year with no eligible losers contributes no tilt — but its reset is still
+    emitted, so a tilt from a *previous* wrap-around window still ends on
+    schedule and, at worst, the reset re-affirms the original weighting.
 
     Returns
     -------
-    Events in chronological order (not necessarily alternating strictly Buy/Sell
-    if a year has no eligible losers — that year simply contributes no events).
+    RotationEvents in chronological order.
     """
     if price_df.empty:
         return []
     assert isinstance(price_df.index, pd.DatetimeIndex)
     assert isinstance(daily_df.index, pd.DatetimeIndex)
 
-    windowed_dates = set(price_df.index)
+    columns = [str(c) for c in price_df.columns]
+
+    # The basket's original allocation (equal weight when no weights map is
+    # given) — deployed on day one and fully restored on every sell date.
+    original_shares = _normalised_weights(columns, weights)
+
+    # Initial deployment day: first day every positively-weighted asset is
+    # priced, exactly like Buy & Hold. Without one, the lump sum stays in cash.
+    weight_vec = _weight_array(columns, weights)
+    deploy_pos = _first_all_priced_pos(price_df.to_numpy(dtype=float), weight_vec)
+    if deploy_pos is None:
+        return []
+    deploy_date = price_df.index[deploy_pos]
+
+    events: list[RotationEvent] = [
+        RotationEvent(deploy_date, 1.0, original_shares, 'Buy')
+    ]
+
+    # Yearly tilt/reset events are only tradable inside the window and only
+    # once the basket is deployed.
+    windowed_dates = {d for d in price_df.index if d > deploy_date}
     buy_ord = buy_month * 100 + buy_day
     sell_ord = sell_month * 100 + sell_day
 
@@ -170,8 +214,6 @@ def _build_rotation_events(
     # combined-calendar anchor day isn't wrongly excluded from ranking.
     ranking_df = daily_df.ffill(limit=5)
 
-    events: list[tuple[pd.Timestamp, float, dict[str, float] | None]] = []
-
     for year in range(int(price_df.index.year.min()), int(price_df.index.year.max()) + 1):
         year_start = _first_trading_day_of_year(daily_df.index, year)
         buy_date = _first_trading_day_on_or_after(daily_df.index, year, buy_month, buy_day)
@@ -179,28 +221,33 @@ def _build_rotation_events(
             continue
 
         selected = _select_losers(ranking_df, year_start, buy_date, n_losers)
-        if not selected:
-            continue
 
-        # Selected losers keep the caller's relative weight (or 1.0 = equal
-        # split); every other basket symbol is implicitly 0 (absent from the
-        # dict), so _rebalance_to_target only ever allocates to this selection.
-        year_weights = {sym: (float(weights.get(sym, 1.0)) if weights else 1.0) for sym in selected}
+        if selected and buy_date in windowed_dates:
+            # Tilt: shift_frac of the portfolio into the losers (equal split,
+            # independent of the basket weights — see docstring), the rest
+            # stays at the original allocation. Both parts sum to 1.0.
+            loser_share = shift_frac / len(selected)
+            blended = {
+                sym: (loser_share if sym in selected else 0.0)
+                + (1.0 - shift_frac) * original_shares.get(sym, 0.0)
+                for sym in columns
+            }
+            events.append(RotationEvent(buy_date, 1.0, blended, 'Buy'))
 
         sell_year = year if sell_ord > buy_ord else year + 1
         sell_date = _first_trading_day_on_or_after(daily_df.index, sell_year, sell_month, sell_day)
-
-        if buy_date in windowed_dates:
-            events.append((buy_date, 1.0, year_weights))
         if sell_date is not None and sell_date in windowed_dates:
-            events.append((sell_date, 0.0, year_weights))
+            # Reset: fully restore the original weighting (independent of
+            # shift_frac).
+            events.append(RotationEvent(sell_date, 1.0, original_shares, 'Sell'))
 
+    events.sort(key=lambda e: e.date)
     return events
 
 
 @register
 class LoserRotationStrategy(BacktestStrategy):
-    """Loser Rotation: annually rotate a lump sum into the basket's worst YTD performers."""
+    """Loser Rotation: buy & hold with an annual tactical tilt into the worst YTD performers."""
 
     @classmethod
     def get_name(cls) -> str:
@@ -213,45 +260,53 @@ class LoserRotationStrategy(BacktestStrategy):
     @classmethod
     def get_description(cls) -> str:
         return (
-            "Loser Rotation: once a year, invest a lump sum into the basket's "
-            "worst year-to-date performers (a fixed count), buying at a "
-            "configurable date and selling back to cash at another; repeats "
-            "every year with a freshly ranked selection."
+            "Loser Rotation: invest a lump sum like Buy & Hold, then once a "
+            "year shift a configurable share of the portfolio into the "
+            "basket's worst year-to-date performers (a fixed count) at a "
+            "configurable date, and restore the original weighting at another; "
+            "always fully invested, never in cash."
         )
 
     @classmethod
     def get_long_description(cls) -> str:
         return (
             "## Loser Rotation\n\n"
-            "A **seasonal, cross-sectional** strategy inspired by the well-known "
-            "“losers of the year rebound in July” effect: at the start of "
-            "the third quarter, funds and ETFs commonly rebalance out of the "
-            "year's winners into its most beaten-down, fundamentally cheap "
-            "names, producing a short-lived rebound in a basket's worst "
+            "A **buy-and-hold strategy with an annual tactical tilt**, inspired "
+            "by the well-known “losers of the year rebound in July” effect: at "
+            "the start of the third quarter, funds and ETFs commonly rebalance "
+            "out of the year's winners into its most beaten-down, fundamentally "
+            "cheap names, producing a short-lived rebound in a basket's worst "
             "performers.\n\n"
-            "**How it trades:** once a year, on the configured buy date, every "
-            "basket asset's return from the first trading day of that calendar "
-            "year up to the buy date is ranked, and the lump sum is bought "
-            "**only into the worst-performing N assets** (split by their "
-            "per-asset weights, equal by default). The position is held until "
-            "the configured sell date, when it is sold entirely back to cash; "
-            "the basket then sits in cash until next year's buy date, when the "
-            "worst performers are re-selected from scratch. There is no "
-            "rebalancing between the buy and sell dates — the position simply "
-            "drifts with the market.\n\n"
-            "**Good for:** exploring a mean-reversion / sector-rotation effect on "
-            "a basket's own laggards; it adds value only in years the rebound "
-            "actually materialises and can lag a plain buy-and-hold otherwise.\n\n"
+            "**How it trades:** the lump sum is deployed up front across the "
+            "whole basket at its per-asset weights, exactly like Buy & Hold, "
+            "and stays **fully invested throughout** — the strategy never steps "
+            "into cash. Once a year, on the configured buy date, every basket "
+            "asset's return from the first trading day of that calendar year up "
+            "to the buy date is ranked, and the configured **shift percentage** "
+            "of the portfolio value is moved into the **worst-performing N "
+            "assets** (split equally among them — even an asset weighted 0 in "
+            "the basket can be a rotation target); the remainder stays at the "
+            "original weighting. On the configured sell date the **original "
+            "weighting is fully restored**. In between the trades the position "
+            "simply drifts with the market; next year the worst performers are "
+            "re-selected from scratch.\n\n"
+            "**Good for:** exploring a mean-reversion / sector-rotation effect "
+            "on a basket's own laggards while staying invested; it adds value "
+            "only in years the rebound actually materialises and can lag a "
+            "plain buy-and-hold otherwise.\n\n"
             "**Parameters**\n\n"
-            "- **Initial Investment** — the one-off lump sum available to "
-            "deploy.\n"
+            "- **Initial Investment** — the one-off lump sum deployed at the "
+            "start.\n"
             "- **Number of Losers** — how many of the basket's worst "
-            "year-to-date performers to buy each year (fewer are bought if the "
+            "year-to-date performers to tilt into each year (fewer if the "
             "basket doesn't have that many eligible assets).\n"
-            "- **Buy Month / Buy Day** — the calendar date each year the "
-            "worst performers are ranked and bought.\n"
+            "- **Shift into Losers (%)** — the share of the portfolio value "
+            "moved into the losers on each buy date (100% = the whole "
+            "portfolio; the rest stays at the original weighting).\n"
+            "- **Buy Month / Buy Day** — the calendar date each year the worst "
+            "performers are ranked and the tilt is applied.\n"
             "- **Sell Month / Sell Day** — the calendar date each year the "
-            "position is sold back to cash."
+            "original weighting is restored."
         )
 
     @classmethod
@@ -274,6 +329,14 @@ class LoserRotationStrategy(BacktestStrategy):
                 default=3,
                 min_value=1,
                 max_value=20,
+            ),
+            ConfigParam(
+                key='shift_percent',
+                label='Shift into Losers (%)',
+                type='float',
+                default=100.0,
+                min_value=0.0,
+                max_value=100.0,
             ),
             ConfigParam(
                 key='buy_month',
@@ -325,6 +388,9 @@ class LoserRotationStrategy(BacktestStrategy):
         # as floats/strings, but the ranking/rotation logic needs concrete types.
         initial_investment = float(resolved['initial_investment'])
         n_losers = int(resolved['n_losers'])
+        # GUI percentage → fraction, clamped so a stray out-of-range value can
+        # never push the blended weights negative.
+        shift_frac = min(max(float(resolved['shift_percent']) / 100.0, 0.0), 1.0)
         buy_day = int(resolved['buy_day'])
         sell_day = int(resolved['sell_day'])
         # Map the human-readable month names back to calendar month numbers.
@@ -353,14 +419,16 @@ class LoserRotationStrategy(BacktestStrategy):
         assert isinstance(price_df.index, pd.DatetimeIndex)
 
         with log_duration(f'loserrotation: simulate+metrics+orderlog ({price_df.shape[0]} rows)'):
-            # 3. One (buy, sell) event pair per year, each carrying that year's
-            #    freshly ranked bottom-N weights (built from the full history).
+            # 3. The initial Buy & Hold deployment plus one tilt/reset event pair
+            #    per year, each tilt carrying that year's freshly ranked bottom-N
+            #    blend (built from the full history).
             events = _build_rotation_events(
-                daily_df, price_df, buy_month, buy_day, sell_month, sell_day, n_losers, weights
+                daily_df, price_df, buy_month, buy_day, sell_month, sell_day,
+                n_losers, shift_frac, weights,
             )
 
-            # 4. Rebalance to each event's own fraction AND weights, holding
-            #    (and drifting with the market) in between.
+            # 4. Rebalance to each event's own weights (always fully invested),
+            #    holding (and drifting with the market) in between.
             portfolio, total_invested = simulate_rotation(price_df, events, initial_investment)
             metrics = compute_metrics(portfolio, total_invested)
 

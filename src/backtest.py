@@ -1342,12 +1342,42 @@ def simulate_riskoff(
     return pd.Series(daily_value, index=price_df.index), initial_investment
 
 
+class RotationEvent(NamedTuple):
+    """One explicit rebalance instruction for ``simulate_rotation``.
+
+    Unlike Risk-Off's per-day target-fraction Series (one static weights dict for
+    the whole run), each rotation event carries its **own** weights, so a single
+    rebalance can change which assets are held, not just how much is invested.
+
+    Fields
+    ------
+    date            – trading day of the rebalance (a row of the price index;
+                      events whose date is absent from the index are skipped).
+    target_fraction – target invested fraction (0..1) after this rebalance.
+    weights         – symbol → relative weight ``_rebalance_to_target`` applies for
+                      this rebalance (None/empty = equal weight over whatever is
+                      priced that day).
+    side            – 'Buy'/'Sell' label the order log shows for this trade.  With
+                      a constant target fraction (e.g. an always-fully-invested
+                      re-mix of the held assets) the direction cannot be derived
+                      from the fraction, so the strategy names it explicitly —
+                      e.g. 'Buy' for the tilt into new positions, 'Sell' for the
+                      reset back to the base allocation.  Only the order log uses
+                      it; the simulation ignores it.
+    """
+
+    date: pd.Timestamp
+    target_fraction: float
+    weights: dict[str, float] | None
+    side: str
+
+
 def simulate_rotation(
     price_df: pd.DataFrame,
-    events: list[tuple[pd.Timestamp, float, dict[str, float] | None]],
+    events: list[RotationEvent],
     initial_investment: float = INITIAL_INVESTMENT,
 ) -> tuple[pd.Series, float]:
-    """Simulate a lump sum rebalanced to explicit (date, fraction, weights) events.
+    """Simulate a lump sum rebalanced to explicit RotationEvents.
 
     Generalises ``simulate_riskoff`` (whose ``weights`` is one dict closed over the
     whole run — only the aggregate invested *fraction* varies day to day) to
@@ -1361,12 +1391,8 @@ def simulate_rotation(
     Parameters
     ----------
     price_df           – daily close prices (one column per asset).
-    events              – chronological ``(date, target_fraction, weights)`` triples.
-                         *date* should be a row of ``price_df.index``; events whose date
-                         is absent are skipped. *target_fraction* is 0..1. *weights* is
-                         the symbol → relative weight ``_rebalance_to_target`` applies
-                         for that rebalance (None/empty = equal weight over whatever is
-                         priced that day).
+    events              – chronological ``RotationEvent``s; the ``side`` field is
+                         ignored here (it only labels the order log).
     initial_investment – one-off lump sum provided as cash at the start.
 
     Returns
@@ -1392,8 +1418,8 @@ def simulate_rotation(
 
     # Chronological order, and drop any event whose date isn't actually a row of
     # price_df (e.g. a rotation date outside the windowed range).
-    ordered = sorted(events, key=lambda e: e[0])
-    pos_arr = price_df.index.get_indexer(pd.DatetimeIndex([e[0] for e in ordered]))
+    ordered = sorted(events, key=lambda e: e.date)
+    pos_arr = price_df.index.get_indexer(pd.DatetimeIndex([e.date for e in ordered]))
     valid = pos_arr >= 0
     ordered = [e for e, v in zip(ordered, valid) if v]
     event_pos = pos_arr[valid]
@@ -1409,10 +1435,10 @@ def simulate_rotation(
     cash = float(initial_investment)
     snap_holdings = np.zeros((len(ordered), n_assets))
     snap_cash = np.empty(len(ordered))
-    for j, (_, frac, weights) in enumerate(ordered):
+    for j, ev in enumerate(ordered):
         i = event_pos[j]
         holdings, cash, _ = _rebalance_to_target(
-            holdings, cash, price_df.iloc[i], float(frac), weights
+            holdings, cash, price_df.iloc[i], float(ev.target_fraction), ev.weights
         )
         snap_holdings[j] = [holdings[col] for col in columns]
         snap_cash[j] = cash
@@ -1434,27 +1460,27 @@ def simulate_rotation(
 
 def _rotation_order_events(
     price_df: pd.DataFrame,
-    events: list[tuple[pd.Timestamp, float, dict[str, float] | None]],
+    events: list[RotationEvent],
     initial_investment: float = INITIAL_INVESTMENT,
     fx: FxColumns | None = None,
 ) -> list[OrderEvent]:
-    """Record one OrderEvent per rotation event (see ``simulate_rotation``).
+    """Record one OrderEvent per RotationEvent (see ``simulate_rotation``).
 
     The events-list counterpart of ``_riskoff_order_events``: instead of deriving
     change-days from a per-day target-fraction Series and one static weights dict,
-    it walks the (few) explicit ``(date, target_fraction, weights)`` triples
-    directly — each one both a possible aggregate-fraction change *and* a possible
-    re-selection of which assets are held — rebalancing at each one via
-    ``_rebalance_to_target``. The side is 'Buy' when the fraction rose (more
-    invested) or 'Sell' when it fell (more cash); there is no fresh money, so
-    inflow is always 0.
+    it walks the (few) explicit ``RotationEvent``s directly — each one both a
+    possible aggregate-fraction change *and* a possible re-selection of which
+    assets are held — rebalancing at each one via ``_rebalance_to_target``. The
+    Buy/Sell label comes verbatim from the event's ``side`` field (an
+    always-fully-invested re-mix never changes the fraction, so the direction
+    cannot be derived from it); there is no fresh money, so inflow is always 0.
 
     Parameters
     ----------
     price_df           – windowed daily closes, one column per asset.
-    events              – chronological ``(date, target_fraction, weights)`` triples;
-                         events whose date is absent from ``price_df.index`` are
-                         skipped (mirrors ``simulate_rotation``).
+    events              – chronological ``RotationEvent``s; events whose date is
+                         absent from ``price_df.index`` are skipped (mirrors
+                         ``simulate_rotation``).
     initial_investment – one-off lump sum held as cash at the start.
     fx                  – optional FX context (see backtest.FxColumns); when given,
                          each event also carries the trading-currency quote and the
@@ -1476,39 +1502,36 @@ def _rotation_order_events(
 
     holdings: dict[str, float] = {str(col): 0.0 for col in price_df.columns}
     cash = initial_investment
-    # Fraction currently allocated; starts at 0.0 (all cash) so the first event's
-    # (presumably positive) fraction is always recorded as a Buy.
-    current = 0.0
 
     # Chronological order, and drop any event whose date isn't actually a row of
     # price_df — mirrors simulate_rotation's own filtering exactly, and resolves
     # each row via positional .iloc (unambiguously a Series, unlike .loc[date]).
-    ordered = sorted(events, key=lambda e: e[0])
-    pos_arr = price_df.index.get_indexer(pd.DatetimeIndex([e[0] for e in ordered]))
+    ordered = sorted(events, key=lambda e: e.date)
+    pos_arr = price_df.index.get_indexer(pd.DatetimeIndex([e.date for e in ordered]))
     valid = pos_arr >= 0
     ordered = [e for e, v in zip(ordered, valid) if v]
     positions = pos_arr[valid]
 
     out: list[OrderEvent] = []
-    for (date, frac, weights), pos in zip(ordered, positions):
+    for ev, pos in zip(ordered, positions):
         prices = price_df.iloc[pos]
         value_before = _portfolio_value(holdings, cash, prices)
-        side = 'Buy' if frac > current else 'Sell'
 
-        holdings, cash, _ = _rebalance_to_target(holdings, cash, prices, frac, weights)
-        current = frac
+        holdings, cash, _ = _rebalance_to_target(
+            holdings, cash, prices, float(ev.target_fraction), ev.weights
+        )
 
         out.append(OrderEvent(
-            date=date,
-            side=side,
+            date=ev.date,
+            side=ev.side,
             value_before=value_before,
             inflow=0.0,
             assets_after=_portfolio_value(holdings, 0.0, prices),
             cash_after=cash,
             asset_values=_asset_values(holdings, prices),  # per-asset worth
             asset_prices=_asset_prices(prices),            # per-asset close (base ccy)
-            asset_prices_local=_asset_prices_local(prices, asset_rate, date),  # trading-ccy close
-            fx_rates=_fx_rate_values(pair_rate, date),     # per-pair FX rate this day
+            asset_prices_local=_asset_prices_local(prices, asset_rate, ev.date),  # trading-ccy close
+            fx_rates=_fx_rate_values(pair_rate, ev.date),  # per-pair FX rate this day
         ))
 
     return out

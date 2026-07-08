@@ -37,13 +37,16 @@ A Plotly Dash web application for backtesting across user-defined asset baskets.
   both dates configurable to the month *and* day. It reuses the Risk-Off engine with a purely calendar-driven target
   (fully invested outside the window, fully in cash inside it), and the same all-priced gate so the first deployment is
   split across the whole basket by the per-asset weights
-- **Loser Rotation**: a seasonal, cross-sectional twist inspired by the "losers of the year rebound in July" effect.
-  Once a year, on a configurable buy date (default 1 July), every basket asset's return from the first trading day of
-  that calendar year up to the buy date is ranked, and the lump sum is invested **only into the worst-performing N
-  assets** (a configurable count, split by their per-asset weights). The position is held until a configurable sell
-  date (default 1 October), when it is sold entirely back to cash until next year's buy date re-selects the losers
-  from scratch. Unlike every other strategy — whose per-asset weights are fixed for the whole run — this one's asset
-  *selection* changes every year, so it uses its own dedicated simulation engine
+- **Loser Rotation**: Buy & Hold with an annual tactical tilt, inspired by the "losers of the year rebound in July"
+  effect. The lump sum is deployed up front across the whole basket at its per-asset weights (exactly like Buy & Hold)
+  and stays **fully invested throughout** — never in cash. Once a year, on a configurable buy date (default 1 July),
+  every basket asset's return from the first trading day of that calendar year up to the buy date is ranked, and a
+  configurable **shift percentage** (default 100%) of the portfolio value is moved into the **worst-performing N
+  assets** (a configurable count, split equally among them — even a 0-weighted asset can be a rotation target); the
+  remainder stays at the original weighting. On a configurable sell date (default 1 October) the original weighting is
+  fully restored, and next year's buy date re-selects the losers from scratch. Unlike every other strategy — whose
+  per-asset weights are fixed for the whole run — this one's asset *allocation* changes over time, so it uses its own
+  dedicated simulation engine
 - All strategies value the portfolio on a **daily** basis, so the chart is a dense daily curve and the risk metrics are
   daily-correct
 - Side-by-side performance metrics: Total Return, CAGR, Sharpe Ratio, Max. Drawdown, Volatility, Calmar Ratio, and more
@@ -216,7 +219,7 @@ src/
     dca.py            # Dollar-Cost Averaging strategy plugin
     riskoff.py        # Risk-Off signal strategy plugin (lump sum + tactical cash)
     summergap.py      # Summer Gap seasonal strategy plugin (lump sum, out for the summer)
-    loserrotation.py  # Loser Rotation strategy plugin (annual rotation into the basket's worst YTD performers)
+    loserrotation.py  # Loser Rotation strategy plugin (buy & hold + annual tilt into the worst YTD performers)
   callbacks/
     backtesting.py    # backtesting callbacks
   config.py           # startup singleton: logging, env vars, master.parquet

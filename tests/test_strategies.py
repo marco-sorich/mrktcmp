@@ -23,6 +23,7 @@ from src.strategies.loserrotation import (  # noqa: E402
 from src.backtest import (  # noqa: E402
     INITIAL_INVESTMENT,
     FxColumns,
+    RotationEvent,
     build_equal_weight_index,
     compute_riskoff_signals,
     gate_target_until_all_priced,
@@ -1224,7 +1225,8 @@ class TestSimulateRotation:
     def test_events_outside_index_are_ignored(self):
         price = pd.DataFrame({'A': [100.0] * 6}, index=self._IDX)
         bogus_date = pd.Timestamp('2019-01-01', tz='UTC')
-        portfolio, invested = simulate_rotation(price, [(bogus_date, 1.0, {'A': 1.0})], 10_000.0)
+        events = [RotationEvent(bogus_date, 1.0, {'A': 1.0}, 'Buy')]
+        portfolio, invested = simulate_rotation(price, events, 10_000.0)
         assert (portfolio == 10_000.0).all()
         assert invested == 10_000.0
 
@@ -1236,9 +1238,9 @@ class TestSimulateRotation:
             'B': [50.0, 50.0, 50.0, 50.0, 100.0, 100.0],
         }, index=self._IDX)
         events = [
-            (self._IDX[0], 1.0, {'A': 1.0}),
-            (self._IDX[2], 0.0, {'A': 1.0}),
-            (self._IDX[3], 1.0, {'B': 1.0}),
+            RotationEvent(self._IDX[0], 1.0, {'A': 1.0}, 'Buy'),
+            RotationEvent(self._IDX[2], 0.0, {'A': 1.0}, 'Sell'),
+            RotationEvent(self._IDX[3], 1.0, {'B': 1.0}, 'Buy'),
         ]
         portfolio, invested = simulate_rotation(price, events, 10_000.0)
         assert portfolio.iloc[0] == pytest.approx(10_000.0)
@@ -1250,6 +1252,30 @@ class TestSimulateRotation:
         # B then doubles (50 -> 100) by day 4, so the position doubles too.
         assert portfolio.iloc[4] == pytest.approx(40_000.0)
         assert portfolio.iloc[5] == pytest.approx(40_000.0)
+        assert invested == 10_000.0
+
+    def test_remix_keeps_fully_invested_while_changing_assets(self):
+        # The new "tilt" shape: the target fraction stays at 1.0 on every event
+        # (never in cash) while the weights swing between the original mix and
+        # a single asset. The portfolio must stay fully on market value.
+        price = pd.DataFrame({
+            'A': [100.0, 100.0, 100.0, 100.0, 100.0, 100.0],
+            'B': [50.0, 50.0, 50.0, 100.0, 100.0, 100.0],
+        }, index=self._IDX)
+        events = [
+            RotationEvent(self._IDX[0], 1.0, {'A': 0.5, 'B': 0.5}, 'Buy'),   # deploy 50/50
+            RotationEvent(self._IDX[2], 1.0, {'B': 1.0}, 'Buy'),             # tilt fully into B
+            RotationEvent(self._IDX[4], 1.0, {'A': 0.5, 'B': 0.5}, 'Sell'),  # reset to 50/50
+        ]
+        portfolio, invested = simulate_rotation(price, events, 10_000.0)
+        assert portfolio.iloc[0] == pytest.approx(10_000.0)
+        # Tilt happens before B moves, so the value is unchanged on day 2 …
+        assert portfolio.iloc[2] == pytest.approx(10_000.0)
+        # … and the whole portfolio rides B's doubling (50 -> 100) on day 3.
+        assert portfolio.iloc[3] == pytest.approx(20_000.0)
+        # The reset re-mixes at unchanged prices: value stays at 20,000.
+        assert portfolio.iloc[4] == pytest.approx(20_000.0)
+        assert portfolio.iloc[5] == pytest.approx(20_000.0)
         assert invested == 10_000.0
 
 
@@ -1264,8 +1290,8 @@ class TestRotationOrderEvents:
     def test_buy_and_sell_sides(self):
         price = pd.DataFrame({'A': [100.0, 100.0, 200.0, 200.0]}, index=self._IDX)
         events = [
-            (self._IDX[0], 1.0, {'A': 1.0}),
-            (self._IDX[2], 0.0, {'A': 1.0}),
+            RotationEvent(self._IDX[0], 1.0, {'A': 1.0}, 'Buy'),
+            RotationEvent(self._IDX[2], 0.0, {'A': 1.0}, 'Sell'),
         ]
         out = _rotation_order_events(price, events, 10_000.0)
         assert len(out) == 2
@@ -1278,10 +1304,27 @@ class TestRotationOrderEvents:
         assert buy['assets_after'] + buy['cash_after'] == pytest.approx(10_000.0)
         assert sell['assets_after'] + sell['cash_after'] == pytest.approx(20_000.0)
 
+    def test_side_taken_verbatim_when_fraction_is_constant(self):
+        # An always-fully-invested re-mix never changes the fraction, so the
+        # Buy/Sell label must come from the event itself, not a fraction diff.
+        price = pd.DataFrame({'A': [100.0] * 4, 'B': [100.0] * 4}, index=self._IDX)
+        events = [
+            RotationEvent(self._IDX[0], 1.0, {'A': 0.5, 'B': 0.5}, 'Buy'),
+            RotationEvent(self._IDX[1], 1.0, {'A': 1.0}, 'Buy'),
+            RotationEvent(self._IDX[2], 1.0, {'A': 0.5, 'B': 0.5}, 'Sell'),
+        ]
+        out = _rotation_order_events(price, events, 10_000.0)
+        assert [o['side'] for o in out] == ['Buy', 'Buy', 'Sell']
+        # Fully invested at every step (cash stays 0, value stays on market).
+        assert all(o['cash_after'] == pytest.approx(0.0) for o in out)
+        assert out[1]['asset_values'] == pytest.approx({'A': 10_000.0, 'B': 0.0})
+        assert out[2]['asset_values'] == pytest.approx({'A': 5_000.0, 'B': 5_000.0})
+
     def test_events_outside_index_are_skipped(self):
         price = pd.DataFrame({'A': [100.0] * 4}, index=self._IDX)
         bogus = pd.Timestamp('2019-01-01', tz='UTC')
-        assert _rotation_order_events(price, [(bogus, 1.0, {'A': 1.0})], 10_000.0) == []
+        events = [RotationEvent(bogus, 1.0, {'A': 1.0}, 'Buy')]
+        assert _rotation_order_events(price, events, 10_000.0) == []
 
     def test_fx_context_adds_local_price_and_rate(self):
         price = pd.DataFrame({'AAPL': [100.0, 100.0]}, index=self._IDX[:2])
@@ -1291,7 +1334,8 @@ class TestRotationOrderEvents:
             asset_rate={'AAPL': rate},
             pair_rate={'USDEUR=X': rate},
         )
-        (ev,) = _rotation_order_events(price, [(self._IDX[0], 1.0, {'AAPL': 1.0})], 10_000.0, fx)
+        events = [RotationEvent(self._IDX[0], 1.0, {'AAPL': 1.0}, 'Buy')]
+        (ev,) = _rotation_order_events(price, events, 10_000.0, fx)
         assert ev['asset_prices_local']['AAPL'] == pytest.approx(100.0 / 0.9)
         assert ev['fx_rates']['USDEUR=X'] == pytest.approx(0.9)
 
@@ -1346,22 +1390,55 @@ class TestSelectLosers:
 
 
 class TestBuildRotationEvents:
-    def test_builds_annual_buy_and_sell_events(self):
+    @staticmethod
+    def _tilts(events):
+        """The annual tilt events: every Buy after the initial deployment."""
+        return [e for e in events[1:] if e.side == 'Buy']
+
+    def test_initial_deployment_then_annual_tilt_and_reset(self):
         idx = pd.date_range('2020-01-01', '2021-12-31', freq='D', tz='UTC')
         daily_df = pd.DataFrame({
             'A': np.linspace(100, 50, len(idx)),   # steadily falling -> always the loser
             'B': np.linspace(100, 200, len(idx)),  # steadily rising -> always the winner
         }, index=idx)
-        events = _build_rotation_events(daily_df, daily_df, 7, 1, 10, 1, n_losers=1, weights=None)
-        dates = [e[0] for e in events]
+        events = _build_rotation_events(
+            daily_df, daily_df, 7, 1, 10, 1, n_losers=1, shift_frac=1.0, weights=None
+        )
+        dates = [e.date for e in events]
         assert dates == sorted(dates)
-        buys = [e for e in events if e[1] == 1.0]
-        sells = [e for e in events if e[1] == 0.0]
-        assert len(buys) == 2 and len(sells) == 2
-        assert all(e[0].month == 7 and e[0].day == 1 for e in buys)
-        assert all(e[0].month == 10 and e[0].day == 1 for e in sells)
-        # A is always the (single) loser, so it's the only symbol ever weighted.
-        assert all(e[2] == {'A': 1.0} for e in buys + sells)
+        # Always fully invested: every event's target fraction is 1.0.
+        assert all(e.target_fraction == 1.0 for e in events)
+        # Day-one deployment at the original (equal) weighting.
+        deploy = events[0]
+        assert deploy.date == idx[0]
+        assert deploy.side == 'Buy'
+        assert deploy.weights == pytest.approx({'A': 0.5, 'B': 0.5})
+        # One tilt per year on the buy date, fully into the loser A.
+        tilts = self._tilts(events)
+        assert len(tilts) == 2
+        assert all(e.date.month == 7 and e.date.day == 1 for e in tilts)
+        assert all(e.weights == pytest.approx({'A': 1.0, 'B': 0.0}) for e in tilts)
+        # One reset per year on the sell date, restoring the original weights.
+        resets = [e for e in events if e.side == 'Sell']
+        assert len(resets) == 2
+        assert all(e.date.month == 10 and e.date.day == 1 for e in resets)
+        assert all(e.weights == pytest.approx({'A': 0.5, 'B': 0.5}) for e in resets)
+
+    def test_partial_shift_blends_losers_with_original_weights(self):
+        idx = pd.date_range('2020-01-01', '2020-12-31', freq='D', tz='UTC')
+        daily_df = pd.DataFrame({
+            'A': np.linspace(100, 50, len(idx)),
+            'B': np.linspace(100, 200, len(idx)),
+        }, index=idx)
+        events = _build_rotation_events(
+            daily_df, daily_df, 7, 1, 10, 1, n_losers=1, shift_frac=0.5, weights=None
+        )
+        (tilt,) = self._tilts(events)
+        # 50% into the loser A + 50% at the original 50/50 mix = 75/25.
+        assert tilt.weights == pytest.approx({'A': 0.75, 'B': 0.25})
+        # The reset is always a FULL return to the original weights.
+        reset = next(e for e in events if e.side == 'Sell')
+        assert reset.weights == pytest.approx({'A': 0.5, 'B': 0.5})
 
     def test_wraparound_sell_date_lands_in_next_year(self):
         idx = pd.date_range('2020-01-01', '2021-12-31', freq='D', tz='UTC')
@@ -1370,12 +1447,14 @@ class TestBuildRotationEvents:
             'B': np.linspace(100, 300, len(idx)),
         }, index=idx)
         # Buy in November, sell in February -> the sell falls in the following year.
-        events = _build_rotation_events(daily_df, daily_df, 11, 1, 2, 1, n_losers=1, weights=None)
-        buys = sorted(e[0] for e in events if e[1] == 1.0)
-        sells = sorted(e[0] for e in events if e[1] == 0.0)
-        assert buys and all(d.month == 11 for d in buys)
-        assert sells and all(d.month == 2 for d in sells)
-        assert sells[0].year == buys[0].year + 1
+        events = _build_rotation_events(
+            daily_df, daily_df, 11, 1, 2, 1, n_losers=1, shift_frac=1.0, weights=None
+        )
+        tilts = sorted(e.date for e in self._tilts(events))
+        resets = sorted(e.date for e in events if e.side == 'Sell')
+        assert tilts and all(d.month == 11 for d in tilts)
+        assert resets and all(d.month == 2 for d in resets)
+        assert resets[0].year == tilts[0].year + 1
 
     def test_events_outside_window_are_dropped(self):
         idx = pd.date_range('2020-01-01', '2021-12-31', freq='D', tz='UTC')
@@ -1385,28 +1464,47 @@ class TestBuildRotationEvents:
         }, index=idx)
         # The windowed price_df only covers the second year.
         price_df = daily_df.loc['2021-01-01':]
-        events = _build_rotation_events(daily_df, price_df, 7, 1, 10, 1, n_losers=1, weights=None)
+        events = _build_rotation_events(
+            daily_df, price_df, 7, 1, 10, 1, n_losers=1, shift_frac=1.0, weights=None
+        )
         assert events
-        assert all(e[0].year == 2021 for e in events)
+        assert all(e.date.year == 2021 for e in events)
 
-    def test_weights_restrict_to_selected_losers_only(self):
+    def test_tilt_splits_equally_regardless_of_basket_weights(self):
         idx = pd.date_range('2020-01-01', '2020-12-31', freq='D', tz='UTC')
         daily_df = pd.DataFrame({
             'A': np.linspace(100, 50, len(idx)),
+            'B': np.linspace(100, 60, len(idx)),
+            'C': np.linspace(100, 200, len(idx)),
+        }, index=idx)
+        weights = {'A': 2.0, 'B': 5.0, 'C': 3.0}
+        events = _build_rotation_events(
+            daily_df, daily_df, 7, 1, 10, 1, n_losers=2, shift_frac=1.0, weights=weights
+        )
+        # Deployment and reset use the user's weighting (2:5:3)...
+        assert events[0].weights == pytest.approx({'A': 0.2, 'B': 0.5, 'C': 0.3})
+        # ...but the tilt splits the shifted capital EQUALLY across the losers.
+        (tilt,) = self._tilts(events)
+        assert tilt.weights == pytest.approx({'A': 0.5, 'B': 0.5, 'C': 0.0})
+
+    def test_zero_weighted_asset_can_still_be_a_rotation_target(self):
+        idx = pd.date_range('2020-01-01', '2020-12-31', freq='D', tz='UTC')
+        daily_df = pd.DataFrame({
+            'A': np.linspace(100, 50, len(idx)),   # the loser, excluded from the base mix
             'B': np.linspace(100, 200, len(idx)),
         }, index=idx)
         events = _build_rotation_events(
-            daily_df, daily_df, 7, 1, 10, 1, n_losers=1, weights={'A': 2.0, 'B': 5.0}
+            daily_df, daily_df, 7, 1, 10, 1, n_losers=1, shift_frac=1.0,
+            weights={'A': 0.0, 'B': 1.0},
         )
-        buy = next(e for e in events if e[1] == 1.0)
-        # Only the selected loser (A) appears, keeping its own relative weight.
-        assert buy[2] == {'A': 2.0}
+        # The base allocation holds only B (A is weighted 0)...
+        assert events[0].weights == pytest.approx({'A': 0.0, 'B': 1.0})
+        # ...yet the tilt still selects and funds A, the worst YTD performer.
+        (tilt,) = self._tilts(events)
+        assert tilt.weights == pytest.approx({'A': 1.0, 'B': 0.0})
 
-    def test_no_eligible_losers_contributes_no_events(self):
-        # A single-day frame has no distinct year-start anchor to compare against
-        # (year_start == buy_date, so the "return" is always 0 for every asset —
-        # still eligible/rankable, this instead checks the truly-empty-frame path).
-        assert _build_rotation_events(pd.DataFrame(), pd.DataFrame(), 7, 1, 10, 1, 1, None) == []
+    def test_empty_frames_contribute_no_events(self):
+        assert _build_rotation_events(pd.DataFrame(), pd.DataFrame(), 7, 1, 10, 1, 1, 1.0, None) == []
 
     def test_calendar_mismatch_does_not_wrongly_exclude_an_asset(self):
         # Asset A ("loser", steadily falling) misses its own market's first
@@ -1424,15 +1522,17 @@ class TestBuildRotationEvents:
         series_b = pd.Series(np.linspace(100, 200, len(idx)), index=idx)
         daily_df = pd.DataFrame({'A': series_a, 'B': series_b})
 
-        events = _build_rotation_events(daily_df, daily_df, 7, 1, 10, 1, n_losers=1, weights=None)
-        buys_2021 = [e for e in events if e[1] == 1.0 and e[0].year == 2021]
-        assert buys_2021
-        assert buys_2021[0][2] == {'A': 1.0}
+        events = _build_rotation_events(
+            daily_df, daily_df, 7, 1, 10, 1, n_losers=1, shift_frac=1.0, weights=None
+        )
+        tilts_2021 = [e for e in self._tilts(events) if e.date.year == 2021]
+        assert tilts_2021
+        assert tilts_2021[0].weights == pytest.approx({'A': 1.0, 'B': 0.0})
 
     def test_four_assets_all_priced_every_year_rotates_every_year(self):
         # Mirrors the real-world scenario (4 continuously-priced assets,
-        # n_losers=2): every year in the window must contribute a buy/sell
-        # pair selecting exactly the 2 worst performers — no year skipped.
+        # n_losers=2): every year in the window must contribute a tilt/reset
+        # pair targeting exactly the 2 worst performers — no year skipped.
         idx = pd.date_range('2018-01-01', '2021-12-31', freq='D', tz='UTC')
         n = len(idx)
         daily_df = pd.DataFrame({
@@ -1441,12 +1541,14 @@ class TestBuildRotationEvents:
             'C': np.linspace(100, 300, n),  # winner
             'D': np.linspace(100, 400, n),  # winner
         }, index=idx)
-        events = _build_rotation_events(daily_df, daily_df, 7, 1, 10, 1, n_losers=2, weights=None)
-        years = sorted({e[0].year for e in events})
-        assert years == [2018, 2019, 2020, 2021]
-        for year in years:
-            buy = next(e for e in events if e[1] == 1.0 and e[0].year == year)
-            assert set(buy[2]) == {'A', 'B'}
+        events = _build_rotation_events(
+            daily_df, daily_df, 7, 1, 10, 1, n_losers=2, shift_frac=1.0, weights=None
+        )
+        tilts = self._tilts(events)
+        assert sorted(e.date.year for e in tilts) == [2018, 2019, 2020, 2021]
+        for tilt in tilts:
+            funded = {sym for sym, w in tilt.weights.items() if w > 0}
+            assert funded == {'A', 'B'}
 
 
 class TestLoserRotationStrategy:
@@ -1472,12 +1574,16 @@ class TestLoserRotationStrategy:
         schema = LoserRotationStrategy.get_config_schema()
         by_key = {p.key: p for p in schema}
         assert set(by_key) == {
-            'initial_investment', 'n_losers', 'buy_month', 'buy_day', 'sell_month', 'sell_day',
+            'initial_investment', 'n_losers', 'shift_percent',
+            'buy_month', 'buy_day', 'sell_month', 'sell_day',
         }
         for param in schema:
             assert param.default is not None, f"Param '{param.key}' has no default"
         assert by_key['initial_investment'].default == float(INITIAL_INVESTMENT)
         assert by_key['n_losers'].default == 3
+        assert by_key['shift_percent'].default == 100.0
+        assert by_key['shift_percent'].min_value == 0.0
+        assert by_key['shift_percent'].max_value == 100.0
         assert by_key['buy_month'].default == 'July'
         assert by_key['buy_day'].default == 1
         assert by_key['sell_month'].default == 'October'
@@ -1560,7 +1666,7 @@ class TestLoserRotationSelection:
             return flat
         return _read
 
-    def test_rotation_buys_the_worst_ytd_performer(self):
+    def test_rotation_tilts_into_the_worst_ytd_performer(self):
         strategy = LoserRotationStrategy()
         with patch('src.backtest.pd.read_parquet', side_effect=self._three_asset_read()):
             _, metrics, orders = strategy.run(
@@ -1569,8 +1675,45 @@ class TestLoserRotationSelection:
             )
         assert metrics is not None
         assert orders is not None and orders
+
+        # Fully invested throughout: every trade ends with (almost) no cash.
+        for order in orders:
+            assert order['cash_after'] == pytest.approx(0.0, abs=1e-6)
+
         buys = [o for o in orders if o['side'] == 'Buy']
-        assert buys
-        for buy in buys:
-            invested_syms = {sym for sym, val in buy['asset_values'].items() if val > 0}
+        deploy, *tilts = buys
+        # Day-one deployment spreads the lump sum across the whole basket …
+        deployed_syms = {sym for sym, val in deploy['asset_values'].items() if val > 0}
+        assert deployed_syms == {'WIN', 'FLAT', 'LOSE'}
+        # … each annual tilt (default 100% shift) holds only the loser …
+        assert tilts
+        for tilt in tilts:
+            invested_syms = {sym for sym, val in tilt['asset_values'].items() if val > 0}
             assert invested_syms == {'LOSE'}
+        # … and each reset restores the full original (equal) allocation.
+        resets = [o for o in orders if o['side'] == 'Sell']
+        assert resets
+        for reset in resets:
+            reset_syms = {sym for sym, val in reset['asset_values'].items() if val > 0}
+            assert reset_syms == {'WIN', 'FLAT', 'LOSE'}
+
+    def test_partial_shift_keeps_original_positions_alongside_losers(self):
+        strategy = LoserRotationStrategy()
+        with patch('src.backtest.pd.read_parquet', side_effect=self._three_asset_read()):
+            _, metrics, orders = strategy.run(
+                BASE_URL, ['win.parquet', 'flat.parquet', 'lose.parquet'],
+                _START, _END, self.META,
+                params={'n_losers': 1, 'shift_percent': 50.0},
+            )
+        assert metrics is not None
+        assert orders is not None
+        _, *tilts = [o for o in orders if o['side'] == 'Buy']
+        assert tilts
+        for tilt in tilts:
+            values = tilt['asset_values']
+            total = sum(values.values())
+            # 50% into the loser + its 1/3 share of the remaining 50% = 2/3.
+            assert values['LOSE'] / total == pytest.approx(2.0 / 3.0, rel=1e-6)
+            # The winners keep their 1/3-of-50% slice each (1/6 of the total).
+            assert values['WIN'] / total == pytest.approx(1.0 / 6.0, rel=1e-6)
+            assert values['FLAT'] / total == pytest.approx(1.0 / 6.0, rel=1e-6)
