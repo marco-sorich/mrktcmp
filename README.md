@@ -37,6 +37,16 @@ A Plotly Dash web application for backtesting across user-defined asset baskets.
   both dates configurable to the month *and* day. It reuses the Risk-Off engine with a purely calendar-driven target
   (fully invested outside the window, fully in cash inside it), and the same all-priced gate so the first deployment is
   split across the whole basket by the per-asset weights
+- **Loser Rotation**: Buy & Hold with an annual tactical tilt, inspired by the "losers of the year rebound in July"
+  effect. The lump sum is deployed up front across the whole basket at its per-asset weights (exactly like Buy & Hold)
+  and stays **fully invested throughout** — never in cash. Once a year, on a configurable buy date (default 1 July),
+  every basket asset's return from the first trading day of that calendar year up to the buy date is ranked, and a
+  configurable **shift percentage** (default 100%) of the portfolio value is moved into the **worst-performing N
+  assets** (a configurable count, split equally among them — even a 0-weighted asset can be a rotation target); the
+  remainder stays at the original weighting. On a configurable sell date (default 1 October) the original weighting is
+  fully restored, and next year's buy date re-selects the losers from scratch. Unlike every other strategy — whose
+  per-asset weights are fixed for the whole run — this one's asset *allocation* changes over time, so it uses its own
+  dedicated simulation engine
 - All strategies value the portfolio on a **daily** basis, so the chart is a dense daily curve and the risk metrics are
   daily-correct
 - Side-by-side performance metrics: Total Return, CAGR, Sharpe Ratio, Max. Drawdown, Volatility, Calmar Ratio, and more
@@ -195,9 +205,11 @@ src/
   app.py              # Dash application entry point
   backtest.py         # pure simulation engines, all on daily close prices:
                       #   Buy & Hold (load_daily_closes, _window_by_month, simulate_lumpsum),
-                      #   DCA (load_daily_closes, _window_by_month, simulate_dca) and
+                      #   DCA (load_daily_closes, _window_by_month, simulate_dca),
                       #   Risk-Off (load_daily_closes, build_equal_weight_index,
-                      #   compute_riskoff_signals, simulate_riskoff); shared compute_metrics
+                      #   compute_riskoff_signals, simulate_riskoff) and
+                      #   Loser Rotation (simulate_rotation: rebalances to an explicit,
+                      #   per-event list of changing target weights); shared compute_metrics
   strategies/
     __init__.py       # imports all plugins to trigger registration at startup
                       #   (import order = dropdown order; lumpsum first = default)
@@ -207,6 +219,7 @@ src/
     dca.py            # Dollar-Cost Averaging strategy plugin
     riskoff.py        # Risk-Off signal strategy plugin (lump sum + tactical cash)
     summergap.py      # Summer Gap seasonal strategy plugin (lump sum, out for the summer)
+    loserrotation.py  # Loser Rotation strategy plugin (buy & hold + annual tilt into the worst YTD performers)
   callbacks/
     backtesting.py    # backtesting callbacks
   config.py           # startup singleton: logging, env vars, master.parquet
@@ -217,7 +230,7 @@ src/
 tests/
   test_app.py
   test_backtest.py
-  test_strategies.py  # plugin system: ConfigParam, registry, BuyHold/DCA/RiskOff/SummerGap, backward compat
+  test_strategies.py  # plugin system: ConfigParam, registry, BuyHold/DCA/RiskOff/SummerGap/LoserRotation, backward compat
 ```
 
 ## Adding a New Backtesting Strategy

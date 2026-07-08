@@ -6,3 +6,4 @@ import src.strategies.lumpsum  # noqa: F401
 import src.strategies.dca  # noqa: F401
 import src.strategies.riskoff  # noqa: F401
 import src.strategies.summergap  # noqa: F401
+import src.strategies.loserrotation  # noqa: F401

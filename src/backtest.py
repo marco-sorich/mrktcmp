@@ -1342,6 +1342,201 @@ def simulate_riskoff(
     return pd.Series(daily_value, index=price_df.index), initial_investment
 
 
+class RotationEvent(NamedTuple):
+    """One explicit rebalance instruction for ``simulate_rotation``.
+
+    Unlike Risk-Off's per-day target-fraction Series (one static weights dict for
+    the whole run), each rotation event carries its **own** weights, so a single
+    rebalance can change which assets are held, not just how much is invested.
+
+    Fields
+    ------
+    date            – trading day of the rebalance (a row of the price index;
+                      events whose date is absent from the index are skipped).
+    target_fraction – target invested fraction (0..1) after this rebalance.
+    weights         – symbol → relative weight ``_rebalance_to_target`` applies for
+                      this rebalance (None/empty = equal weight over whatever is
+                      priced that day).
+    side            – 'Buy'/'Sell' label the order log shows for this trade.  With
+                      a constant target fraction (e.g. an always-fully-invested
+                      re-mix of the held assets) the direction cannot be derived
+                      from the fraction, so the strategy names it explicitly —
+                      e.g. 'Buy' for the tilt into new positions, 'Sell' for the
+                      reset back to the base allocation.  Only the order log uses
+                      it; the simulation ignores it.
+    """
+
+    date: pd.Timestamp
+    target_fraction: float
+    weights: dict[str, float] | None
+    side: str
+
+
+def simulate_rotation(
+    price_df: pd.DataFrame,
+    events: list[RotationEvent],
+    initial_investment: float = INITIAL_INVESTMENT,
+) -> tuple[pd.Series, float]:
+    """Simulate a lump sum rebalanced to explicit RotationEvents.
+
+    Generalises ``simulate_riskoff`` (whose ``weights`` is one dict closed over the
+    whole run — only the aggregate invested *fraction* varies day to day) to
+    strategies whose asset **selection** also changes over time: each event
+    carries its own target invested fraction *and* its own per-asset weights, so a
+    single rebalance can change both how much is invested and which assets it goes
+    into — e.g. an annual "rotate into new positions" strategy. Trades happen only
+    on the given event dates; the position is simply held (and drifts with the
+    market) in between, exactly like ``simulate_riskoff``.
+
+    Parameters
+    ----------
+    price_df           – daily close prices (one column per asset).
+    events              – chronological ``RotationEvent``s; the ``side`` field is
+                         ignored here (it only labels the order log).
+    initial_investment – one-off lump sum provided as cash at the start.
+
+    Returns
+    -------
+    (portfolio_series, total_invested)
+      portfolio_series – portfolio value (holdings + cash) on every trading day.
+      total_invested   – the initial lump sum (constant; no contributions).
+
+    Implemented as a hybrid like ``simulate_riskoff``: the loop only walks the
+    (few) event dates, reusing ``_rebalance_to_target``'s math to snapshot the
+    post-trade holdings/cash, then the dense daily valuation is one vectorised
+    numpy pass.
+    """
+    if price_df.empty:
+        return pd.Series(dtype=float), initial_investment
+
+    assert isinstance(price_df.index, pd.DatetimeIndex)
+
+    # Column order shared by the holdings dict (string keys) and the price matrix.
+    columns = [str(col) for col in price_df.columns]
+    prices_mat = price_df.to_numpy(dtype=float)
+    n_days, n_assets = prices_mat.shape
+
+    # Chronological order, and drop any event whose date isn't actually a row of
+    # price_df (e.g. a rotation date outside the windowed range).
+    ordered = sorted(events, key=lambda e: e.date)
+    pos_arr = price_df.index.get_indexer(pd.DatetimeIndex([e.date for e in ordered]))
+    valid = pos_arr >= 0
+    ordered = [e for e, v in zip(ordered, valid) if v]
+    event_pos = pos_arr[valid]
+
+    # No usable event → never deployed, so the lump sum is held flat in cash.
+    if not ordered:
+        flat = pd.Series(np.full(n_days, float(initial_investment)), index=price_df.index)
+        return flat, initial_investment
+
+    # Walk only the event dates, rebalancing to each one's own target fraction AND
+    # weights with the shared primitive, snapshotting the resulting holdings/cash.
+    holdings: dict[str, float] = {col: 0.0 for col in columns}
+    cash = float(initial_investment)
+    snap_holdings = np.zeros((len(ordered), n_assets))
+    snap_cash = np.empty(len(ordered))
+    for j, ev in enumerate(ordered):
+        i = event_pos[j]
+        holdings, cash, _ = _rebalance_to_target(
+            holdings, cash, price_df.iloc[i], float(ev.target_fraction), ev.weights
+        )
+        snap_holdings[j] = [holdings[col] for col in columns]
+        snap_cash[j] = cash
+
+    # Each day takes the holdings/cash of the most recent event at or before it;
+    # days before the first event are still all cash (no holdings yet).
+    seg = np.searchsorted(event_pos, np.arange(n_days), side='right') - 1
+    has_position = seg >= 0
+    seg_clip = np.clip(seg, 0, None)
+    holdings_mat = np.where(has_position[:, None], snap_holdings[seg_clip], 0.0)
+    cash_arr = np.where(has_position, snap_cash[seg_clip], float(initial_investment))
+
+    # Value every day: Σ units × price over assets with a valid price (NaN priced
+    # → 0 but units retained), plus cash — mirroring _portfolio_value exactly.
+    daily_value = (holdings_mat * np.where(np.isnan(prices_mat), 0.0, prices_mat)).sum(axis=1) + cash_arr
+
+    return pd.Series(daily_value, index=price_df.index), initial_investment
+
+
+def _rotation_order_events(
+    price_df: pd.DataFrame,
+    events: list[RotationEvent],
+    initial_investment: float = INITIAL_INVESTMENT,
+    fx: FxColumns | None = None,
+) -> list[OrderEvent]:
+    """Record one OrderEvent per RotationEvent (see ``simulate_rotation``).
+
+    The events-list counterpart of ``_riskoff_order_events``: instead of deriving
+    change-days from a per-day target-fraction Series and one static weights dict,
+    it walks the (few) explicit ``RotationEvent``s directly — each one both a
+    possible aggregate-fraction change *and* a possible re-selection of which
+    assets are held — rebalancing at each one via ``_rebalance_to_target``. The
+    Buy/Sell label comes verbatim from the event's ``side`` field (an
+    always-fully-invested re-mix never changes the fraction, so the direction
+    cannot be derived from it); there is no fresh money, so inflow is always 0.
+
+    Parameters
+    ----------
+    price_df           – windowed daily closes, one column per asset.
+    events              – chronological ``RotationEvent``s; events whose date is
+                         absent from ``price_df.index`` are skipped (mirrors
+                         ``simulate_rotation``).
+    initial_investment – one-off lump sum held as cash at the start.
+    fx                  – optional FX context (see backtest.FxColumns); when given,
+                         each event also carries the trading-currency quote and the
+                         per-pair FX rates so the order table can show conversions.
+
+    Returns
+    -------
+    Chronological list of OrderEvents (empty when price_df or events is empty).
+    """
+    if price_df.empty or not events:
+        return []
+
+    assert isinstance(price_df.index, pd.DatetimeIndex)
+
+    # FX side-tables (empty when no conversion applies) used to add the
+    # trading-currency price and per-pair rate columns to each order event.
+    asset_rate = fx.asset_rate if fx else {}
+    pair_rate = fx.pair_rate if fx else {}
+
+    holdings: dict[str, float] = {str(col): 0.0 for col in price_df.columns}
+    cash = initial_investment
+
+    # Chronological order, and drop any event whose date isn't actually a row of
+    # price_df — mirrors simulate_rotation's own filtering exactly, and resolves
+    # each row via positional .iloc (unambiguously a Series, unlike .loc[date]).
+    ordered = sorted(events, key=lambda e: e.date)
+    pos_arr = price_df.index.get_indexer(pd.DatetimeIndex([e.date for e in ordered]))
+    valid = pos_arr >= 0
+    ordered = [e for e, v in zip(ordered, valid) if v]
+    positions = pos_arr[valid]
+
+    out: list[OrderEvent] = []
+    for ev, pos in zip(ordered, positions):
+        prices = price_df.iloc[pos]
+        value_before = _portfolio_value(holdings, cash, prices)
+
+        holdings, cash, _ = _rebalance_to_target(
+            holdings, cash, prices, float(ev.target_fraction), ev.weights
+        )
+
+        out.append(OrderEvent(
+            date=ev.date,
+            side=ev.side,
+            value_before=value_before,
+            inflow=0.0,
+            assets_after=_portfolio_value(holdings, 0.0, prices),
+            cash_after=cash,
+            asset_values=_asset_values(holdings, prices),  # per-asset worth
+            asset_prices=_asset_prices(prices),            # per-asset close (base ccy)
+            asset_prices_local=_asset_prices_local(prices, asset_rate, ev.date),  # trading-ccy close
+            fx_rates=_fx_rate_values(pair_rate, ev.date),  # per-pair FX rate this day
+        ))
+
+    return out
+
+
 def simulate_lumpsum(
     price_df: pd.DataFrame,
     initial_investment: float = INITIAL_INVESTMENT,
