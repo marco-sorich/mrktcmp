@@ -215,16 +215,22 @@ def _build_strategy_params_ui(
     return widgets
 
 
-def _basket_ui(basket_id):
-    """Return the complete HTML/component tree for a single basket panel.
+def _asset_panel(basket_id):
+    """Return the asset-selection panel for a single basket.
 
-    Each basket panel contains:
-      • A heading ("Basket A" or "Basket B").
+    The asset panel contains:
+      • A heading ("Basket A" or "Basket B"; has the ID bt-basket-title-{id}
+        so the shared-basket mode can retitle Basket A to "Basket (A & B)").
       • Asset-class radio buttons that filter the search dropdown.
       • A searchable asset dropdown + an add (＋) button side by side.
       • A list area that displays the assets currently in the basket.
-      • An invisible dcc.Store that persists the basket's contents between
-        callbacks (browser-side JSON storage, no server round-trip).
+      • Invisible dcc.Stores persisting the basket contents and per-asset
+        weights between callbacks (browser-side JSON, no server round-trip).
+
+    The strategy controls live in the separate ``_strategy_panel`` so the
+    layout can place all asset panels in one row and all strategy panels in
+    the next — which lets the shared-basket mode hide Basket B's asset panel
+    while both strategy panels stay visible.
 
     Parameters
     ----------
@@ -234,7 +240,7 @@ def _basket_ui(basket_id):
 
     Returns
     -------
-    html.Div containing all controls for one basket.
+    html.Div containing the asset controls for one basket.
     """
     # Map basket_id to a human-readable label for the heading.
     label = 'A' if basket_id == 'a' else 'B'
@@ -244,8 +250,10 @@ def _basket_ui(basket_id):
     # from overflowing when it contains long text (a common flexbox gotcha).
     return html.Div([
 
-        # Section heading displayed above the basket controls.
-        html.H3(f'Basket {label}', style={'marginBottom': '8px'}),
+        # Section heading displayed above the basket controls.  The ID lets the
+        # basket-mode callback retitle Basket A when it serves both baskets.
+        html.H3(f'Basket {label}', id=f'bt-basket-title-{basket_id}',
+                style={'marginBottom': '8px'}),
 
         # dcc.RadioItems renders a group of radio buttons (mutually exclusive
         # choices). Here it lists the asset classes loaded at startup so the
@@ -290,16 +298,66 @@ def _basket_ui(basket_id):
         # zero height when the basket is empty.
         html.Div(id=f'bt-basket-list-{basket_id}', style={'minHeight': '32px'}),
 
-        # --------------- Strategy selector ----------------------------------
-        # A thin divider separates the asset list from the strategy section.
-        html.Hr(style={'margin': '10px 0', 'borderColor': '#eee'}),
+        # dcc.Store is an invisible component that holds JSON data in the
+        # browser's memory for the duration of the session. We use it to
+        # persist the list of assets in each basket between callbacks.
+        # data=[] initialises it with an empty list.
+        dcc.Store(id=f'bt-basket-store-{basket_id}', data=[]),
 
-        # Label row: the "Strategy" caption plus a small info (ⓘ) toggle button
-        # that expands/collapses the rich-text description panel below.
+        # Persists the per-asset relative weights as {filename: weight}.  Kept
+        # separate from the basket store so editing a weight does NOT retrigger the
+        # date-range slider (which resets the selected window).  Written by the
+        # sync_weights callback; read by _manage_basket (to keep weights through
+        # add/remove) and by the run callback (to weight the simulation).
+        dcc.Store(id=f'bt-weights-store-{basket_id}', data={}),
+
+    ], style={'flex': 1, 'minWidth': 0})
+
+
+# ---------------------------------------------------------------------------
+# Helper: build the strategy panel for one basket
+# ---------------------------------------------------------------------------
+
+# Chart trace colours reused as the strategy-panel heading colours so each
+# strategy panel is visually tied to its basket's curve (A = blue, B = red).
+_BASKET_COLOURS = {'a': '#1a56db', 'b': '#c0392b'}
+
+
+def _strategy_panel(basket_id):
+    """Return the strategy-configuration panel for a single basket.
+
+    Split out of the former single basket panel (see ``_asset_panel``) so the
+    layout can render all strategy panels side by side in their own row: in the
+    shared-basket mode Basket B's *asset* panel is hidden while both strategy
+    panels remain visible and independently configurable.
+
+    The panel contains:
+      • A heading ("Strategy A" / "Strategy B") coloured like the basket's
+        chart trace, plus the info (ⓘ) toggle for the description panel.
+      • The strategy dropdown listing every registered strategy.
+      • A collapsible rich-text (Markdown) strategy description.
+      • The strategy-specific parameter inputs.
+      • The invisible dcc.Store holding the resolved strategy config.
+
+    Parameters
+    ----------
+    basket_id : str – either 'a' or 'b'; keys all per-basket component IDs.
+
+    Returns
+    -------
+    html.Div containing the strategy controls for one basket.
+    """
+    label = 'A' if basket_id == 'a' else 'B'
+
+    return html.Div([
+
+        # Heading row: the coloured "Strategy A/B" caption plus a small info (ⓘ)
+        # toggle button that expands/collapses the description panel below.
         html.Div([
-            html.Label(
-                'Strategy',
-                style={'fontSize': '12px', 'fontWeight': 'bold', 'marginBottom': '0', 'display': 'block'},
+            html.H4(
+                f'Strategy {label}',
+                style={'fontSize': '1rem', 'fontWeight': 'bold', 'margin': '0',
+                       'color': _BASKET_COLOURS[basket_id]},
             ),
             html.Button(
                 html.I(className='bi bi-info-circle'),
@@ -352,19 +410,6 @@ def _basket_ui(basket_id):
         # Invisible store that holds the currently selected strategy name and
         # its resolved parameter values.  Read by the main backtest callback.
         dcc.Store(id=f'bt-strategy-config-store-{basket_id}', data=_default_strategy_config()),
-
-        # dcc.Store is an invisible component that holds JSON data in the
-        # browser's memory for the duration of the session. We use it to
-        # persist the list of assets in each basket between callbacks.
-        # data=[] initialises it with an empty list.
-        dcc.Store(id=f'bt-basket-store-{basket_id}', data=[]),
-
-        # Persists the per-asset relative weights as {filename: weight}.  Kept
-        # separate from the basket store so editing a weight does NOT retrigger the
-        # date-range slider (which resets the selected window).  Written by the
-        # sync_weights callback; read by _manage_basket (to keep weights through
-        # add/remove) and by the run callback (to weight the simulation).
-        dcc.Store(id=f'bt-weights-store-{basket_id}', data={}),
 
     ], style={'flex': 1, 'minWidth': 0})
 
@@ -522,10 +567,10 @@ def _render_basket_list(basket_data, basket_id, weights=None):
 # Helper: build the side-by-side metrics comparison table
 # ---------------------------------------------------------------------------
 
-def _metrics_table(metrics_a, metrics_b):
+def _metrics_table(metrics_a, metrics_b, label_a='Basket A', label_b='Basket B'):
     """Build an HTML table comparing performance metrics for both baskets.
 
-    The table has three columns: Metric | Basket A | Basket B. Basket A values
+    The table has three columns: Metric | <label_a> | <label_b>. Basket A values
     appear in blue, Basket B values in red. If one basket has no results (e.g.
     it was left empty), its column shows '—' for every metric.
 
@@ -534,6 +579,10 @@ def _metrics_table(metrics_a, metrics_b):
     metrics_a : dict or None – metric_name → formatted string for basket A.
                                Example: {'Total Return': '+25.3%', 'CAGR': '8.1%'}
     metrics_b : dict or None – same structure for basket B.
+    label_a   : str – header label for basket A's column (default 'Basket A').
+                      The shared-basket mode passes the strategy names instead
+                      (e.g. 'A: DCA') since both columns then hold the same assets.
+    label_b   : str – header label for basket B's column (default 'Basket B').
 
     Returns
     -------
@@ -552,9 +601,9 @@ def _metrics_table(metrics_a, metrics_b):
     # html.Tr = table row, html.Th = header cell, html.Td = data cell.
     rows = [
         html.Tr([
-            html.Th('Metric',   style={'textAlign': 'left',  'padding': '4px 8px', 'background': '#f0f0f0'}),
-            html.Th('Basket A', style={'textAlign': 'right', 'padding': '4px 8px', 'background': '#e8f0fe'}),
-            html.Th('Basket B', style={'textAlign': 'right', 'padding': '4px 8px', 'background': '#fce8e6'}),
+            html.Th('Metric', style={'textAlign': 'left',  'padding': '4px 8px', 'background': '#f0f0f0'}),
+            html.Th(label_a,  style={'textAlign': 'right', 'padding': '4px 8px', 'background': '#e8f0fe'}),
+            html.Th(label_b,  style={'textAlign': 'right', 'padding': '4px 8px', 'background': '#fce8e6'}),
         ])
     ] + [
         # For each metric key k, look it up in each basket's dict.

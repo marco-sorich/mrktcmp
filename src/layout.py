@@ -34,9 +34,12 @@ import plotly.graph_objects as go
 # Internal imports
 # ---------------------------------------------------------------------------
 
-# _basket_ui builds the full component subtree for a single basket panel
-# (heading, radio buttons, dropdown, add button, item list, and Store).
-from src.components import _basket_ui, _base_currency_options, _metrics_table
+# _asset_panel builds the asset-selection subtree for a single basket
+# (heading, radio buttons, dropdown, add button, item list, and Stores);
+# _strategy_panel builds the matching strategy-configuration subtree.
+# They are separate so the shared-basket mode can hide Basket B's asset
+# panel while both strategy panels stay visible.
+from src.components import _asset_panel, _strategy_panel, _base_currency_options, _metrics_table
 
 # _config provides module-level globals: app_version (from setuptools-scm),
 # and df/assetsClasses (loaded master.parquet).
@@ -105,17 +108,52 @@ def create_layout():
             ),
         ], style={'display': 'flex', 'alignItems': 'center', 'marginTop': '12px'}),
 
-        # Two basket panels. On wide screens they sit side by side; on narrow
+        # Basket-mode switch: with '2 baskets' each basket has its own asset
+        # panel; with '1 shared basket' Basket A's assets (and weights) apply to
+        # BOTH strategies — Basket B's asset panel is hidden and its stores are
+        # mirrored from A by the sync_shared_basket callback, so the same basket
+        # can be compared under two different strategies without configuring the
+        # assets twice.
+        html.Div([
+            html.Label('Baskets:', style={'fontWeight': 'bold', 'marginRight': '8px'}),
+            dcc.RadioItems(
+                id='bt-basket-mode',
+                options=[
+                    {'label': '2 separate baskets', 'value': 'separate'},
+                    {'label': '1 shared basket for both strategies', 'value': 'shared'},
+                ],
+                value='separate',
+                inline=True,
+                inputStyle={'marginRight': '4px'},
+                labelStyle={'marginRight': '16px'},
+            ),
+        ], style={'display': 'flex', 'alignItems': 'center', 'marginTop': '12px'}),
+
+        # Asset panels. On wide screens they sit side by side; on narrow
         # screens (phones) they stack vertically so each basket — and its asset
         # labels — gets the full screen width and stays readable. The responsive
         # switch lives in the `.baskets-row` rule in assets/layout.css (the
         # default is the mobile-first stacked column; a min-width media query
         # turns it into a row). The 24px divider spacer is hidden when stacked.
+        # In shared-basket mode the toggle_basket_mode callback hides Basket B's
+        # panel and the divider; flex:1 then stretches Basket A to full width.
         html.Div([
-            _basket_ui('a'),                                         # Basket A controls
-            html.Div(className='basket-divider', style={'width': '24px'}),  # divider (desktop only)
-            _basket_ui('b'),                                         # Basket B controls
+            _asset_panel('a'),                                       # Basket A assets
+            html.Div(id='bt-asset-divider', className='basket-divider',
+                     style={'width': '24px'}),                       # divider (desktop only)
+            html.Div(_asset_panel('b'), id='bt-asset-panel-b',
+                     style={'flex': 1, 'minWidth': 0}),              # Basket B assets
         ], className='baskets-row', style={'marginTop': '12px'}),
+
+        # Strategy panels, one per basket, side by side below the asset panels
+        # (same responsive stacking as the asset row).  Visible in BOTH basket
+        # modes: in shared-basket mode the assets are configured once above and
+        # each strategy panel applies its own strategy to that shared basket.
+        html.Div([
+            _strategy_panel('a'),                                    # Strategy for basket A
+            html.Div(className='basket-divider', style={'width': '24px'}),  # divider (desktop only)
+            _strategy_panel('b'),                                    # Strategy for basket B
+        ], className='baskets-row', style={'marginTop': '16px'}),
 
         # Date-range section: slider + human-readable label + store.
         html.Div([

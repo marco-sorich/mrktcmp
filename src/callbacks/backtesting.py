@@ -77,6 +77,10 @@ import plotly.graph_objects as go
 #              how many there will be.
 from dash import Input, Output, State, callback, no_update, ALL, MATCH, dcc
 
+# dbc.Tab: used by toggle_basket_mode to relabel the order-table tabs when the
+# basket mode changes (Basket A/B ↔ Strategy A/B).
+import dash_bootstrap_components as dbc
+
 # dash.callback_context: provides runtime information about the callback
 # that just fired (which Input triggered it, what its new value is, etc.).
 # Only available inside a running callback; imported from the dash namespace
@@ -527,9 +531,14 @@ def _sync_weights(values: list, inputs_meta: list, pct_meta: list) -> tuple[dict
     prevent_initial_call=True,
 )
 @log_time
-def sync_weights_a(weight_values: list) -> tuple[dict, list]:
+def sync_weights_a(weight_values: list) -> tuple:
     """Persist Basket A's weight edits and refresh the live allocation %s."""
     ctx = dash.callback_context
+    # Guard: when the last weight input disappears (basket emptied / list
+    # replaced), the ALL pattern fires with no inputs; writing {} would wipe
+    # the stored weights for nothing, so leave the store untouched.
+    if not ctx.inputs_list[0]:
+        return no_update, []
     return _sync_weights(weight_values, ctx.inputs_list[0], ctx.outputs_list[1])
 
 
@@ -537,13 +546,119 @@ def sync_weights_a(weight_values: list) -> tuple[dict, list]:
     Output('bt-weights-store-b', 'data', allow_duplicate=True),
     Output({'type': 'bt-weight-pct-b', 'index': ALL}, 'children'),
     Input({'type': 'bt-weight-b', 'index': ALL}, 'value'),
+    State('bt-basket-mode', 'value'),
     prevent_initial_call=True,
 )
 @log_time
-def sync_weights_b(weight_values: list) -> tuple[dict, list]:
-    """Persist Basket B's weight edits and refresh the live allocation %s."""
+def sync_weights_b(weight_values: list, basket_mode: str | None) -> tuple:
+    """Persist Basket B's weight edits and refresh the live allocation %s.
+
+    In shared-basket mode Basket B's weights are mirrored from Basket A by
+    sync_shared_basket; B's own (hidden) weight inputs must not write the store
+    then, or a re-render racing the mirror could clobber the mirrored weights.
+    """
     ctx = dash.callback_context
+    # Guard: no matching weight inputs (basket emptied / list replaced) →
+    # writing {} would wipe the stored weights; leave the store untouched.
+    if not ctx.inputs_list[0]:
+        return no_update, []
+    if basket_mode == 'shared':
+        # The mirror callback owns the store; still refresh the (hidden)
+        # percentage labels so the list is consistent if it becomes visible.
+        _, pct_children = _sync_weights(weight_values, ctx.inputs_list[0], ctx.outputs_list[1])
+        return no_update, pct_children
     return _sync_weights(weight_values, ctx.inputs_list[0], ctx.outputs_list[1])
+
+
+# ---------------------------------------------------------------------------
+# Callbacks: shared-basket mode (one basket configured once, used by A and B)
+# ---------------------------------------------------------------------------
+
+def _sync_shared_basket(mode, basket_a, weights_a, basket_b, weights_b, triggered_id):
+    """Core logic keeping Basket B mirrored to Basket A in shared-basket mode.
+
+    In shared mode ('1 shared basket') the user configures assets and weights
+    only once — in Basket A's panel — and both strategies run on that basket.
+    Rather than special-casing every consumer, Basket B's stores are kept as a
+    live copy of A's, so all downstream callbacks (date slider, run, strategy
+    enable/disable, reset) work unchanged.
+
+    Parameters
+    ----------
+    mode         : str  – 'separate' or 'shared' (bt-basket-mode value).
+    basket_a     : list – Basket A's asset dicts (the mirror source).
+    weights_a    : dict – Basket A's {filename: weight} map (mirror source).
+    basket_b     : list – Basket B's current asset dicts (used on unlink).
+    weights_b    : dict – Basket B's current weights (used on unlink).
+    triggered_id : str/dict – dash.callback_context.triggered_id, to tell a
+                   mode *switch* apart from a Basket A change.
+
+    Returns
+    -------
+    (store_b, weights_store_b, list_b_children) – new values for Basket B's
+    basket store, weights store, and visible asset list, or no_update each.
+    """
+    if mode == 'shared':
+        # Mirror A → B (assets and weights) and re-render B's (hidden) list so
+        # it is already correct if the user switches back to separate mode.
+        basket = list(basket_a or [])
+        weights = dict(weights_a or {})
+        return basket, weights, _render_basket_list(basket, 'b', weights)
+
+    if triggered_id == 'bt-basket-mode':
+        # Just switched shared → separate: keep the mirrored copy as Basket B's
+        # editable starting point (stores untouched) and re-render its list.
+        return no_update, no_update, _render_basket_list(list(basket_b or []), 'b', weights_b)
+
+    # Separate mode and Basket A changed: B is independent — nothing to do.
+    return no_update, no_update, no_update
+
+
+@callback(
+    # allow_duplicate: manage_basket_b also writes Basket B's store and list;
+    # in shared mode this callback mirrors them from Basket A instead.
+    Output('bt-basket-store-b', 'data', allow_duplicate=True),
+    Output('bt-weights-store-b', 'data', allow_duplicate=True),
+    Output('bt-basket-list-b', 'children', allow_duplicate=True),
+    Input('bt-basket-mode', 'value'),        # mode switch
+    Input('bt-basket-store-a', 'data'),      # mirror source: assets
+    Input('bt-weights-store-a', 'data'),     # mirror source: weights
+    State('bt-basket-store-b', 'data'),
+    State('bt-weights-store-b', 'data'),
+    prevent_initial_call=True,
+)
+@log_time
+def sync_shared_basket(mode, basket_a, weights_a, basket_b, weights_b):
+    """Keep Basket B's stores mirrored to Basket A while in shared-basket mode."""
+    return _sync_shared_basket(mode, basket_a, weights_a, basket_b, weights_b,
+                               dash.callback_context.triggered_id)
+
+
+@callback(
+    Output('bt-asset-panel-b', 'style'),     # hide/show Basket B's asset panel
+    Output('bt-asset-divider', 'style'),     # hide/show the panel divider
+    Output('bt-basket-title-a', 'children'),  # retitle Basket A's asset panel
+    Output('bt-orders-tabs', 'children'),    # relabel the order-table tabs
+    Input('bt-basket-mode', 'value'),
+)
+@log_time
+def toggle_basket_mode(mode):
+    """Adapt the page to the selected basket mode.
+
+    Shared mode hides Basket B's asset panel and the divider (Basket A's panel
+    then stretches to full width via flex:1), retitles Basket A's panel to make
+    clear it feeds both strategies, and relabels the order tabs by strategy.
+    Separate mode restores the two-panel layout; the divider style deliberately
+    leaves 'display' unset so the responsive CSS rule keeps hiding it on phones.
+    """
+    shared = mode == 'shared'
+    tabs = [
+        dbc.Tab(label='Strategy A' if shared else 'Basket A', tab_id='a'),
+        dbc.Tab(label='Strategy B' if shared else 'Basket B', tab_id='b'),
+    ]
+    if shared:
+        return {'display': 'none'}, {'display': 'none'}, 'Basket (A & B)', tabs
+    return {'flex': 1, 'minWidth': 0}, {'width': '24px'}, 'Basket A', tabs
 
 
 def _symbol_weights(basket_items: list | None, weights_store: dict | None) -> dict | None:
@@ -924,12 +1039,13 @@ def _downsample_for_plot(series: pd.Series, max_points: int = _MAX_PLOT_POINTS) 
     State('bt-base-currency', 'value'),           # reporting currency for both baskets
     State('bt-weights-store-a', 'data'),          # per-asset weights for basket A
     State('bt-weights-store-b', 'data'),          # per-asset weights for basket B
+    State('bt-basket-mode', 'value'),             # 'separate' or 'shared' basket mode
     prevent_initial_call=True,  # do not run at page load (no data yet)
 )
 @log_time
 def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store,
                           strategy_config_a, strategy_config_b, base_currency,
-                          weights_a=None, weights_b=None):
+                          weights_a=None, weights_b=None, basket_mode=None):
     """Execute the DCA simulation for both baskets and update the UI.
 
     Steps:
@@ -957,6 +1073,11 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
                                translated to symbol-keyed weights and forwarded to
                                the simulation (None/all-zero → equal weight).
     weights_b         : dict – Basket B's per-asset weights, as above.
+    basket_mode       : str  – 'separate' or 'shared'.  In shared mode both
+                               baskets hold the same assets (mirrored by
+                               sync_shared_basket), so the chart traces and
+                               metric columns are labelled by strategy name
+                               instead of 'Basket A/B'.
 
     Returns
     -------
@@ -1048,6 +1169,16 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
                       n_pts_a, n_ord_a, n_pts_b, n_ord_b)
     _t_render = time.perf_counter()
 
+    # Trace / metric-column labels.  With two separate baskets the classic
+    # 'Basket A/B' names identify the curves; in shared-basket mode both run the
+    # SAME assets, so the strategies are what differ — label by strategy name.
+    name_a = (strategy_config_a or {}).get('strategy') or 'DCA'
+    name_b = (strategy_config_b or {}).get('strategy') or 'DCA'
+    if basket_mode == 'shared':
+        label_a, label_b = f'A: {name_a}', f'B: {name_b}'
+    else:
+        label_a, label_b = 'Basket A', 'Basket B'
+
     # Build the portfolio value chart.
     fig = go.Figure()
 
@@ -1059,7 +1190,7 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
         fig.add_trace(go.Scatter(
             x=plot_a.index,       # x-axis: daily dates
             y=plot_a.round(2),    # y-axis: portfolio value in the base currency
-            name='Basket A',
+            name=label_a,
             line=dict(color='#1a56db', width=2),  # blue line, 2px thick
         ))
 
@@ -1068,7 +1199,7 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
         fig.add_trace(go.Scatter(
             x=plot_b.index,
             y=plot_b.round(2),
-            name='Basket B',
+            name=label_b,
             line=dict(color='#c0392b', width=2),  # red line
         ))
 
@@ -1097,7 +1228,7 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     )
 
     # Build the side-by-side metrics table and assemble the status message.
-    metrics_div = _metrics_table(metrics_a, metrics_b)
+    metrics_div = _metrics_table(metrics_a, metrics_b, label_a, label_b)
 
     # Format each basket's order log into display rows (None for an empty/failed
     # basket) and stash both in the store.  render_order_table renders the active
@@ -1115,8 +1246,6 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     _config.log.debug('[perf] build figure+tables: %.1fms',
                       (time.perf_counter() - _t_render) * 1000)
 
-    name_a = (strategy_config_a or {}).get('strategy') or 'DCA'
-    name_b = (strategy_config_b or {}).get('strategy') or 'DCA'
     status = (
         f'Backtest complete – {d0_label} to {d1_label} ({n_months} months). '
         f'Strategy A: {name_a}, Strategy B: {name_b}.'
@@ -1146,19 +1275,20 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     Input('bt-strategy-config-store-b', 'data'),
     Input('bt-weights-store-a', 'data'),
     Input('bt-weights-store-b', 'data'),
+    Input('bt-basket-mode', 'value'),
     prevent_initial_call=True,
 )
 @log_time
 def reset_results_on_input_change(basket_a, basket_b, base_currency, strategy_a, strategy_b,
-                                  weights_a=None, weights_b=None):
+                                  weights_a=None, weights_b=None, basket_mode=None):
     """Clear chart, KPIs, and order tables when any backtest input changes.
 
-    Whenever the user modifies a basket, the base currency, the strategy, or a
-    per-asset weight before (or after) running a backtest, the previous results no
-    longer match the current configuration and would be misleading. This callback
-    resets all result areas to the initial page-load state: an empty visible chart
-    and a metrics table filled with — placeholders (matching the state established
-    by the layout on first render).
+    Whenever the user modifies a basket, the base currency, the strategy, a
+    per-asset weight, or the basket mode before (or after) running a backtest, the
+    previous results no longer match the current configuration and would be
+    misleading. This callback resets all result areas to the initial page-load
+    state: an empty visible chart and a metrics table filled with — placeholders
+    (matching the state established by the layout on first render).
     """
     placeholder_metrics = {k: '—' for k in (
         'Total Return', 'CAGR', 'Sharpe Ratio', 'Max. Drawdown',

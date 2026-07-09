@@ -25,6 +25,7 @@ from src.components import (  # noqa: E402
 )
 from src.callbacks.backtesting import (  # noqa: E402
     _asset_option_label, _sync_weights, _symbol_weights,
+    _sync_shared_basket, sync_weights_a, sync_weights_b, toggle_basket_mode,
 )
 
 # ---------------------------------------------------------------------------
@@ -377,6 +378,32 @@ class TestRunBacktestCallback:
         assert orders_store['a'][0]['Buy/Sell'] == 'Buy'
         assert orders_store['b'][0]['Buy/Sell'] == 'Buy'
 
+    def test_shared_mode_labels_traces_and_metrics_by_strategy(self):
+        # In shared-basket mode both baskets hold the same assets, so the chart
+        # traces and metric columns carry the strategy names instead.
+        with patch.object(config_module, 'base_url', 'http://x'), \
+             patch.object(config_module, 'df', SAMPLE_DF), \
+             patch('src.callbacks.backtesting.run_backtest',
+                   return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _ORDERS_STUB)):
+            fig, _, metrics, _, _ = run_backtest_callback(
+                1, BASKET_A, BASKET_A, _SLIDER_VAL, _DATE_STORE,
+                _STRATEGY_CFG, {'strategy': 'Risk-Off', 'params': {}}, 'EUR',
+                None, None, 'shared')
+        assert [t.name for t in fig.data] == ['A: DCA', 'B: Risk-Off']
+        rendered = str(metrics)
+        assert 'A: DCA' in rendered
+        assert 'B: Risk-Off' in rendered
+
+    def test_separate_mode_keeps_basket_labels(self):
+        with patch.object(config_module, 'base_url', 'http://x'), \
+             patch.object(config_module, 'df', SAMPLE_DF), \
+             patch('src.callbacks.backtesting.run_backtest',
+                   return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _ORDERS_STUB)):
+            fig, *_ = run_backtest_callback(
+                1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE,
+                _STRATEGY_CFG, _STRATEGY_CFG, 'EUR')
+        assert [t.name for t in fig.data] == ['Basket A', 'Basket B']
+
     def test_only_basket_a_filled_also_succeeds(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF), \
@@ -656,6 +683,17 @@ class TestMetricsTable:
         assert 'Basket A' in texts
         assert 'Basket B' in texts
 
+    def test_custom_column_labels(self):
+        # The shared-basket mode labels the columns by strategy instead of
+        # 'Basket A/B' (both columns then hold the same assets).
+        metrics = {'Total Return': '+10.0%'}
+        result = _metrics_table(metrics, metrics, 'A: DCA', 'B: Risk-Off')
+        header = result.children[0]
+        texts = [th.children for th in header.children]
+        assert 'A: DCA' in texts
+        assert 'B: Risk-Off' in texts
+        assert 'Basket A' not in texts
+
     def test_metrics_values_appear_in_rows(self):
         metrics_a = {'Total Return': '+10.0%'}
         metrics_b = {'Total Return': '-5.0%'}
@@ -851,6 +889,119 @@ class TestSyncWeights:
             self._meta('a', ['aapl.parquet'], 'weight-pct'),
         )
         assert weights == {'aapl.parquet': 0.0}
+
+
+class TestSyncWeightsGuards:
+    """The sync_weights callbacks must not clobber a store they do not own."""
+
+    def _ctx(self, basket_id, filenames):
+        ctx = MagicMock()
+        ctx.inputs_list = [
+            [{'id': {'type': f'bt-weight-{basket_id}', 'index': fn}} for fn in filenames]
+        ]
+        ctx.outputs_list = [
+            None,
+            [{'id': {'type': f'bt-weight-pct-{basket_id}', 'index': fn}} for fn in filenames],
+        ]
+        return ctx
+
+    def test_no_weight_inputs_leaves_store_a_untouched(self):
+        # When the last weight input disappears (basket emptied / list replaced)
+        # the ALL pattern fires with no inputs; writing {} would wipe the store.
+        with patch('dash.callback_context', self._ctx('a', [])):
+            store, pct = sync_weights_a([])
+        assert store == no_update
+        assert pct == []
+
+    def test_no_weight_inputs_leaves_store_b_untouched(self):
+        with patch('dash.callback_context', self._ctx('b', [])):
+            store, pct = sync_weights_b([], 'separate')
+        assert store == no_update
+        assert pct == []
+
+    def test_shared_mode_does_not_write_store_b(self):
+        # In shared mode the mirror callback owns Basket B's weights store; the
+        # (hidden) inputs still refresh their percentage labels only.
+        with patch('dash.callback_context', self._ctx('b', ['aapl.parquet'])):
+            store, pct = sync_weights_b([2.0], 'shared')
+        assert store == no_update
+        assert pct == ['100%']
+
+    def test_separate_mode_writes_store_b(self):
+        with patch('dash.callback_context', self._ctx('b', ['aapl.parquet'])):
+            store, _ = sync_weights_b([2.0], 'separate')
+        assert store == {'aapl.parquet': 2.0}
+
+
+# ---------------------------------------------------------------------------
+# Shared-basket mode (_sync_shared_basket / toggle_basket_mode)
+# ---------------------------------------------------------------------------
+
+class TestSyncSharedBasket:
+    def test_shared_mirrors_basket_and_weights_from_a(self):
+        from dash import html
+        store_b, weights_b, list_b = _sync_shared_basket(
+            'shared', [BASKET_ITEM_AAPL], {'aapl.parquet': 2.0},
+            [BASKET_ITEM_GOOGL], {'googl.parquet': 1.0}, 'bt-basket-store-a',
+        )
+        assert store_b == [BASKET_ITEM_AAPL]
+        assert weights_b == {'aapl.parquet': 2.0}
+        # The (hidden) list is re-rendered from the mirrored data.
+        assert isinstance(list_b, html.Div)
+        assert 'AAPL' in str(list_b)
+
+    def test_shared_with_empty_a_mirrors_empty(self):
+        from dash import html
+        store_b, weights_b, list_b = _sync_shared_basket(
+            'shared', None, None, [BASKET_ITEM_GOOGL], {}, 'bt-basket-mode',
+        )
+        assert store_b == []
+        assert weights_b == {}
+        assert isinstance(list_b, html.P)  # 'No assets' placeholder
+
+    def test_unlink_keeps_bs_copy_and_rerenders_list(self):
+        # Switching shared → separate keeps the mirrored copy as B's editable
+        # starting point: stores untouched, only the visible list re-rendered.
+        store_b, weights_b, list_b = _sync_shared_basket(
+            'separate', [BASKET_ITEM_AAPL], {}, [BASKET_ITEM_AAPL],
+            {'aapl.parquet': 3.0}, 'bt-basket-mode',
+        )
+        assert store_b == no_update
+        assert weights_b == no_update
+        assert 'AAPL' in str(list_b)
+
+    def test_separate_mode_ignores_basket_a_changes(self):
+        result = _sync_shared_basket(
+            'separate', [BASKET_ITEM_AAPL], {}, [BASKET_ITEM_GOOGL], {},
+            'bt-basket-store-a',
+        )
+        assert result == (no_update, no_update, no_update)
+
+
+class TestToggleBasketMode:
+    def test_shared_hides_panel_b_and_retitles_a(self):
+        panel_style, divider_style, title, tabs = toggle_basket_mode('shared')
+        assert panel_style == {'display': 'none'}
+        assert divider_style == {'display': 'none'}
+        assert title == 'Basket (A & B)'
+        assert [t.label for t in tabs] == ['Strategy A', 'Strategy B']
+
+    def test_separate_restores_two_panel_layout(self):
+        panel_style, divider_style, title, tabs = toggle_basket_mode('separate')
+        assert panel_style == {'flex': 1, 'minWidth': 0}
+        # 'display' deliberately unset so the responsive CSS keeps hiding the
+        # divider on phones.
+        assert 'display' not in divider_style
+        assert title == 'Basket A'
+        assert [t.label for t in tabs] == ['Basket A', 'Basket B']
+
+    def test_tab_ids_stay_stable_across_modes(self):
+        # The tab_ids drive render_order_table/download_orders; only the labels
+        # may change with the mode.
+        *_, tabs_shared = toggle_basket_mode('shared')
+        *_, tabs_separate = toggle_basket_mode('separate')
+        assert [t.tab_id for t in tabs_shared] == ['a', 'b']
+        assert [t.tab_id for t in tabs_separate] == ['a', 'b']
 
 
 class TestSymbolWeights:
