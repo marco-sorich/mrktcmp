@@ -21,11 +21,11 @@ from src.callbacks.backtesting import (   # noqa: E402
 from src.components import (  # noqa: E402
     _render_basket_list, _metrics_table, _order_rows, _order_table_component,
     _base_currency_options, _asset_currency_map, _basket_item_label,
-    _weight_percentages,
+    _weight_percentages, _basket_membership_pcts,
 )
 from src.callbacks.backtesting import (  # noqa: E402
     _asset_option_label, _sync_weights, _symbol_weights,
-    _sync_shared_basket, sync_weights_a, sync_weights_b, toggle_basket_mode,
+    _sync_membership, _derive_baskets, sync_weights, sync_membership,
 )
 
 # ---------------------------------------------------------------------------
@@ -204,54 +204,64 @@ class TestBtAssetSearch:
 
 class TestManageBasket:
     def test_add_asset_to_empty_basket(self):
-        ctx = _make_ctx('bt-add-a')
+        ctx = _make_ctx('bt-add')
         with patch('dash.callback_context', ctx), patch.object(config_module, 'df', SAMPLE_DF):
-            basket, _ = _manage_basket('a', [], 'aapl.parquet', [])
+            basket, membership, weights, _ = _manage_basket([], 'aapl.parquet', [], {}, {})
         assert len(basket) == 1
         assert basket[0]['filename'] == 'aapl.parquet'
         assert basket[0]['symbol'] == 'AAPL'
+        # A newly added asset defaults to a member of BOTH baskets.
+        assert membership == {'aapl.parquet': {'a': True, 'b': True}}
 
     def test_duplicate_asset_is_not_added_twice(self):
-        ctx = _make_ctx('bt-add-a')
+        ctx = _make_ctx('bt-add')
         with patch('dash.callback_context', ctx), patch.object(config_module, 'df', SAMPLE_DF):
-            basket, _ = _manage_basket('a', [], 'aapl.parquet', [BASKET_ITEM_AAPL])
+            basket, _, _, _ = _manage_basket([], 'aapl.parquet', [BASKET_ITEM_AAPL], {}, {})
         assert len(basket) == 1
 
     def test_add_with_no_selected_asset_returns_no_update(self):
-        ctx = _make_ctx('bt-add-a')
+        ctx = _make_ctx('bt-add')
         with patch('dash.callback_context', ctx), patch.object(config_module, 'df', SAMPLE_DF):
-            result = _manage_basket('a', [], None, [BASKET_ITEM_AAPL])
-        assert result == (no_update, no_update)
+            result = _manage_basket([], None, [BASKET_ITEM_AAPL], {}, {})
+        assert result == (no_update, no_update, no_update, no_update)
 
-    def test_remove_existing_asset_from_basket(self):
-        triggered = {'type': 'bt-remove-a', 'index': 'aapl.parquet'}
+    def test_remove_existing_asset_drops_membership_and_weight(self):
+        triggered = {'type': 'bt-remove', 'index': 'aapl.parquet'}
         ctx = _make_ctx(triggered, triggered_value=1)
         with patch('dash.callback_context', ctx):
-            basket, _ = _manage_basket('a', [1], None, [BASKET_ITEM_AAPL, BASKET_ITEM_GOOGL])
+            basket, membership, weights, _ = _manage_basket(
+                [1], None, [BASKET_ITEM_AAPL, BASKET_ITEM_GOOGL],
+                {'aapl.parquet': 3.0, 'googl.parquet': 1.0},
+                {'aapl.parquet': {'a': True, 'b': False}, 'googl.parquet': {'a': True, 'b': True}},
+            )
         filenames = [item['filename'] for item in basket]
         assert 'aapl.parquet' not in filenames
         assert 'googl.parquet' in filenames
+        # The removed asset's membership + weight entries are pruned.
+        assert 'aapl.parquet' not in membership
+        assert 'aapl.parquet' not in weights
+        assert membership == {'googl.parquet': {'a': True, 'b': True}}
 
     def test_remove_with_zero_n_clicks_is_ignored(self):
-        triggered = {'type': 'bt-remove-a', 'index': 'aapl.parquet'}
+        triggered = {'type': 'bt-remove', 'index': 'aapl.parquet'}
         ctx = _make_ctx(triggered, triggered_value=0)
         with patch('dash.callback_context', ctx):
-            basket, _ = _manage_basket('a', [0], None, [BASKET_ITEM_AAPL])
+            basket, _, _, _ = _manage_basket([0], None, [BASKET_ITEM_AAPL], {}, {})
         assert len(basket) == 1
 
     def test_unrelated_trigger_returns_no_update(self):
         ctx = _make_ctx('some-other-button')
         with patch('dash.callback_context', ctx):
-            result = _manage_basket('a', [], None, [])
-        assert result == (no_update, no_update)
+            result = _manage_basket([], None, [], {}, {})
+        assert result == (no_update, no_update, no_update, no_update)
 
     def test_no_triggered_context_returns_no_update(self):
         ctx = MagicMock()
         ctx.triggered = []
         ctx.triggered_id = None
         with patch('dash.callback_context', ctx):
-            result = _manage_basket('a', [], None, [])
-        assert result == (no_update, no_update)
+            result = _manage_basket([], None, [], {}, {})
+        assert result == (no_update, no_update, no_update, no_update)
 
 
 # ---------------------------------------------------------------------------
@@ -378,23 +388,25 @@ class TestRunBacktestCallback:
         assert orders_store['a'][0]['Buy/Sell'] == 'Buy'
         assert orders_store['b'][0]['Buy/Sell'] == 'Buy'
 
-    def test_shared_mode_labels_traces_and_metrics_by_strategy(self):
-        # In shared-basket mode both baskets hold the same assets, so the chart
-        # traces and metric columns carry the strategy names instead.
+    def test_traces_and_metrics_labelled_by_strategy(self):
+        # Chart traces and metric columns always carry the basket letter AND the
+        # strategy name, so the two curves are distinguishable whether the baskets
+        # share assets or not.
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF), \
              patch('src.callbacks.backtesting.run_backtest',
                    return_value=(_PORTFOLIO_STUB, _METRICS_STUB, _ORDERS_STUB)):
             fig, _, metrics, _, _ = run_backtest_callback(
                 1, BASKET_A, BASKET_A, _SLIDER_VAL, _DATE_STORE,
-                _STRATEGY_CFG, {'strategy': 'Risk-Off', 'params': {}}, 'EUR',
-                None, None, 'shared')
+                _STRATEGY_CFG, {'strategy': 'Risk-Off', 'params': {}}, 'EUR')
         assert [t.name for t in fig.data] == ['A: DCA', 'B: Risk-Off']
         rendered = str(metrics)
         assert 'A: DCA' in rendered
         assert 'B: Risk-Off' in rendered
 
-    def test_separate_mode_keeps_basket_labels(self):
+    def test_same_strategy_still_prefixed_by_basket_letter(self):
+        # Even when both baskets run the same strategy, the 'A:'/'B:' prefix keeps
+        # the two curves apart.
         with patch.object(config_module, 'base_url', 'http://x'), \
              patch.object(config_module, 'df', SAMPLE_DF), \
              patch('src.callbacks.backtesting.run_backtest',
@@ -402,7 +414,7 @@ class TestRunBacktestCallback:
             fig, *_ = run_backtest_callback(
                 1, BASKET_A, BASKET_B, _SLIDER_VAL, _DATE_STORE,
                 _STRATEGY_CFG, _STRATEGY_CFG, 'EUR')
-        assert [t.name for t in fig.data] == ['Basket A', 'Basket B']
+        assert [t.name for t in fig.data] == ['A: DCA', 'B: DCA']
 
     def test_only_basket_a_filled_also_succeeds(self):
         with patch.object(config_module, 'base_url', 'http://x'), \
@@ -578,50 +590,71 @@ class TestUpdateDateDisplay:
 class TestRenderBasketList:
     def test_empty_basket_returns_paragraph(self):
         from dash import html
-        result = _render_basket_list([], 'a')
+        result = _render_basket_list([])
         assert isinstance(result, html.P)
 
     def test_basket_with_items_returns_div(self):
         from dash import html
-        result = _render_basket_list([BASKET_ITEM_AAPL], 'a')
+        result = _render_basket_list([BASKET_ITEM_AAPL])
         assert isinstance(result, html.Div)
 
     def test_remove_button_id_contains_filename(self):
-        result = _render_basket_list([BASKET_ITEM_AAPL], 'a')
+        result = _render_basket_list([BASKET_ITEM_AAPL])
         # The remove button now lives inside a per-row controls sub-Div alongside
-        # the weight input, so collect dict-id components recursively.
+        # the weight input and the membership checkboxes, so collect dict-id
+        # components recursively.
         ids = _collect_dict_ids(result)
-        remove_ids = [i for i in ids if i.get('type') == 'bt-remove-a']
+        remove_ids = [i for i in ids if i.get('type') == 'bt-remove']
         assert any(i['index'] == 'aapl.parquet' for i in remove_ids)
 
-    def test_weight_input_and_percent_rendered(self):
-        # Each row carries a weight input and a live percentage label keyed by the
-        # asset's filename; a single asset is 100% of the basket.
-        result = _render_basket_list([BASKET_ITEM_AAPL], 'a', {'aapl.parquet': 1.0})
+    def test_weight_input_membership_checkboxes_and_percents_rendered(self):
+        # Each row carries a shared weight input, two membership checkboxes (A/B)
+        # and a live percentage label per basket keyed by the asset's filename; a
+        # single asset that is a member of both baskets is 100% of each.
+        result = _render_basket_list(
+            [BASKET_ITEM_AAPL], {'aapl.parquet': 1.0},
+            {'aapl.parquet': {'a': True, 'b': True}},
+        )
         ids = _collect_dict_ids(result)
-        assert {'type': 'bt-weight-a', 'index': 'aapl.parquet'} in ids
+        assert {'type': 'bt-weight', 'index': 'aapl.parquet'} in ids
+        assert {'type': 'bt-member-a', 'index': 'aapl.parquet'} in ids
+        assert {'type': 'bt-member-b', 'index': 'aapl.parquet'} in ids
         assert {'type': 'bt-weight-pct-a', 'index': 'aapl.parquet'} in ids
+        assert {'type': 'bt-weight-pct-b', 'index': 'aapl.parquet'} in ids
         assert '100%' in str(result)
 
     def test_weight_percentages_reflect_relative_weights(self):
-        # Two assets weighted 3:1 → 75% / 25%.
+        # Two assets weighted 3:1, both in both baskets → 75% / 25% in each.
         result = _render_basket_list(
-            [BASKET_ITEM_AAPL, BASKET_ITEM_GOOGL], 'a',
+            [BASKET_ITEM_AAPL, BASKET_ITEM_GOOGL],
             {'aapl.parquet': 3.0, 'googl.parquet': 1.0},
         )
         rendered = str(result)
         assert '75%' in rendered
         assert '25%' in rendered
 
+    def test_non_member_shows_em_dash_for_that_basket(self):
+        # AAPL is in A only, GOOGL in B only → each basket has a single 100%
+        # member and an em-dash for the asset it excludes.
+        result = _render_basket_list(
+            [BASKET_ITEM_AAPL, BASKET_ITEM_GOOGL],
+            {'aapl.parquet': 1.0, 'googl.parquet': 1.0},
+            {'aapl.parquet': {'a': True, 'b': False},
+             'googl.parquet': {'a': False, 'b': True}},
+        )
+        rendered = str(result)
+        assert '100%' in rendered
+        assert '—' in rendered
+
     def test_symbol_and_name_appear_in_output(self):
-        result = _render_basket_list([BASKET_ITEM_AAPL], 'a')
+        result = _render_basket_list([BASKET_ITEM_AAPL])
         rendered = str(result)
         assert 'AAPL' in rendered
         assert 'Apple Inc' in rendered
 
     def test_currency_tag_appears_when_present(self):
         item = {**BASKET_ITEM_AAPL, 'currency': 'USD'}
-        assert 'AAPL — Apple Inc (USD)' in str(_render_basket_list([item], 'a'))
+        assert 'AAPL — Apple Inc (USD)' in str(_render_basket_list([item]))
 
     def test_blank_currency_gets_no_tag(self):
         # Blank/placeholder currency → no parenthesised tag, just symbol — name.
@@ -859,149 +892,165 @@ class TestWeightPercentages:
         assert _weight_percentages({'a': 5.0}) == {'a': '100%'}
 
 
-class TestSyncWeights:
-    def _meta(self, basket_id, filenames, kind):
-        return [{'id': {'type': f'bt-{kind}-{basket_id}', 'index': fn}} for fn in filenames]
+class TestBasketMembershipPcts:
+    def test_per_basket_shares(self):
+        basket = [BASKET_ITEM_AAPL, BASKET_ITEM_GOOGL]
+        weights = {'aapl.parquet': 3.0, 'googl.parquet': 1.0}
+        # AAPL in A only, GOOGL in both.
+        membership = {'aapl.parquet': {'a': True, 'b': False},
+                      'googl.parquet': {'a': True, 'b': True}}
+        pct_a, pct_b = _basket_membership_pcts(basket, weights, membership)
+        # Basket A has both (3:1 → 75/25); Basket B has GOOGL only (100%).
+        assert pct_a == {'aapl.parquet': '75%', 'googl.parquet': '25%'}
+        assert pct_b == {'aapl.parquet': '—', 'googl.parquet': '100%'}
 
-    def test_builds_weights_and_percentages(self):
+    def test_missing_membership_counts_as_member(self):
+        pct_a, pct_b = _basket_membership_pcts([BASKET_ITEM_AAPL], {}, {})
+        assert pct_a == {'aapl.parquet': '100%'}
+        assert pct_b == {'aapl.parquet': '100%'}
+
+
+class TestSyncWeights:
+    def _wmeta(self, filenames):
+        return [{'id': {'type': 'bt-weight', 'index': fn}} for fn in filenames]
+
+    def _pmeta(self, basket_id, filenames):
+        return [{'id': {'type': f'bt-weight-pct-{basket_id}', 'index': fn}} for fn in filenames]
+
+    def test_builds_weights_and_per_basket_percentages(self):
         files = ['aapl.parquet', 'googl.parquet']
-        weights, pct = _sync_weights(
-            [3.0, 1.0],
-            self._meta('a', files, 'weight'),
-            self._meta('a', files, 'weight-pct'),
+        membership = {'aapl.parquet': {'a': True, 'b': True},
+                      'googl.parquet': {'a': True, 'b': True}}
+        weights, pct_a, pct_b = _sync_weights(
+            [3.0, 1.0], self._wmeta(files),
+            self._pmeta('a', files), self._pmeta('b', files), membership,
         )
         assert weights == {'aapl.parquet': 3.0, 'googl.parquet': 1.0}
-        assert pct == ['75%', '25%']
+        assert pct_a == ['75%', '25%']
+        assert pct_b == ['75%', '25%']
+
+    def test_non_member_percentage_is_em_dash(self):
+        files = ['aapl.parquet', 'googl.parquet']
+        # AAPL only in B; GOOGL only in A.
+        membership = {'aapl.parquet': {'a': False, 'b': True},
+                      'googl.parquet': {'a': True, 'b': False}}
+        weights, pct_a, pct_b = _sync_weights(
+            [1.0, 1.0], self._wmeta(files),
+            self._pmeta('a', files), self._pmeta('b', files), membership,
+        )
+        assert pct_a == ['—', '100%']   # A: AAPL excluded, GOOGL sole member
+        assert pct_b == ['100%', '—']   # B: AAPL sole member, GOOGL excluded
 
     def test_cleared_input_falls_back_to_default_weight(self):
         files = ['aapl.parquet', 'googl.parquet']
-        weights, _ = _sync_weights(
-            [None, 2.0],
-            self._meta('a', files, 'weight'),
-            self._meta('a', files, 'weight-pct'),
+        weights, *_ = _sync_weights(
+            [None, 2.0], self._wmeta(files),
+            self._pmeta('a', files), self._pmeta('b', files), {},
         )
         # A cleared field defaults back to 1.0 rather than zeroing the asset.
         assert weights == {'aapl.parquet': 1.0, 'googl.parquet': 2.0}
 
     def test_negative_input_clamped_to_zero(self):
-        weights, _ = _sync_weights(
-            [-5.0], self._meta('a', ['aapl.parquet'], 'weight'),
-            self._meta('a', ['aapl.parquet'], 'weight-pct'),
+        files = ['aapl.parquet']
+        weights, *_ = _sync_weights(
+            [-5.0], self._wmeta(files),
+            self._pmeta('a', files), self._pmeta('b', files), {},
         )
         assert weights == {'aapl.parquet': 0.0}
 
-
-class TestSyncWeightsGuards:
-    """The sync_weights callbacks must not clobber a store they do not own."""
-
-    def _ctx(self, basket_id, filenames):
+    def test_callback_guard_leaves_store_untouched_when_no_inputs(self):
+        # When the last weight input disappears the ALL pattern fires with no
+        # inputs; writing {} would wipe the shared store, so leave it untouched.
         ctx = MagicMock()
-        ctx.inputs_list = [
-            [{'id': {'type': f'bt-weight-{basket_id}', 'index': fn}} for fn in filenames]
-        ]
-        ctx.outputs_list = [
-            None,
-            [{'id': {'type': f'bt-weight-pct-{basket_id}', 'index': fn}} for fn in filenames],
-        ]
-        return ctx
-
-    def test_no_weight_inputs_leaves_store_a_untouched(self):
-        # When the last weight input disappears (basket emptied / list replaced)
-        # the ALL pattern fires with no inputs; writing {} would wipe the store.
-        with patch('dash.callback_context', self._ctx('a', [])):
-            store, pct = sync_weights_a([])
+        ctx.inputs_list = [[]]
+        ctx.outputs_list = [None, [], []]
+        with patch('dash.callback_context', ctx):
+            store, pct_a, pct_b = sync_weights([], {})
         assert store == no_update
-        assert pct == []
-
-    def test_no_weight_inputs_leaves_store_b_untouched(self):
-        with patch('dash.callback_context', self._ctx('b', [])):
-            store, pct = sync_weights_b([], 'separate')
-        assert store == no_update
-        assert pct == []
-
-    def test_shared_mode_does_not_write_store_b(self):
-        # In shared mode the mirror callback owns Basket B's weights store; the
-        # (hidden) inputs still refresh their percentage labels only.
-        with patch('dash.callback_context', self._ctx('b', ['aapl.parquet'])):
-            store, pct = sync_weights_b([2.0], 'shared')
-        assert store == no_update
-        assert pct == ['100%']
-
-    def test_separate_mode_writes_store_b(self):
-        with patch('dash.callback_context', self._ctx('b', ['aapl.parquet'])):
-            store, _ = sync_weights_b([2.0], 'separate')
-        assert store == {'aapl.parquet': 2.0}
+        assert pct_a == [] and pct_b == []
 
 
 # ---------------------------------------------------------------------------
-# Shared-basket mode (_sync_shared_basket / toggle_basket_mode)
+# Per-asset A/B membership (_sync_membership / sync_membership / _derive_baskets)
 # ---------------------------------------------------------------------------
 
-class TestSyncSharedBasket:
-    def test_shared_mirrors_basket_and_weights_from_a(self):
-        from dash import html
-        store_b, weights_b, list_b = _sync_shared_basket(
-            'shared', [BASKET_ITEM_AAPL], {'aapl.parquet': 2.0},
-            [BASKET_ITEM_GOOGL], {'googl.parquet': 1.0}, 'bt-basket-store-a',
+class TestSyncMembership:
+    def _mmeta(self, basket_id, filenames):
+        return [{'id': {'type': f'bt-member-{basket_id}', 'index': fn}} for fn in filenames]
+
+    def _pmeta(self, basket_id, filenames):
+        return [{'id': {'type': f'bt-weight-pct-{basket_id}', 'index': fn}} for fn in filenames]
+
+    def test_builds_membership_from_checkboxes(self):
+        files = ['aapl.parquet', 'googl.parquet']
+        store, _, _ = _sync_membership(
+            [True, False], [False, True],
+            self._mmeta('a', files), self._mmeta('b', files),
+            [BASKET_ITEM_AAPL, BASKET_ITEM_GOOGL], {}, {},
+            self._pmeta('a', files), self._pmeta('b', files),
         )
-        assert store_b == [BASKET_ITEM_AAPL]
-        assert weights_b == {'aapl.parquet': 2.0}
-        # The (hidden) list is re-rendered from the mirrored data.
-        assert isinstance(list_b, html.Div)
-        assert 'AAPL' in str(list_b)
+        assert store == {'aapl.parquet': {'a': True, 'b': False},
+                         'googl.parquet': {'a': False, 'b': True}}
 
-    def test_shared_with_empty_a_mirrors_empty(self):
-        from dash import html
-        store_b, weights_b, list_b = _sync_shared_basket(
-            'shared', None, None, [BASKET_ITEM_GOOGL], {}, 'bt-basket-mode',
+    def test_unchanged_membership_returns_no_update(self):
+        files = ['aapl.parquet']
+        current = {'aapl.parquet': {'a': True, 'b': True}}
+        store, *_ = _sync_membership(
+            [True], [True],
+            self._mmeta('a', files), self._mmeta('b', files),
+            [BASKET_ITEM_AAPL], {}, current,
+            self._pmeta('a', files), self._pmeta('b', files),
         )
-        assert store_b == []
-        assert weights_b == {}
-        assert isinstance(list_b, html.P)  # 'No assets' placeholder
+        # Re-render right after manage_basket set the same map → no store write.
+        assert store is no_update
 
-    def test_unlink_keeps_bs_copy_and_rerenders_list(self):
-        # Switching shared → separate keeps the mirrored copy as B's editable
-        # starting point: stores untouched, only the visible list re-rendered.
-        store_b, weights_b, list_b = _sync_shared_basket(
-            'separate', [BASKET_ITEM_AAPL], {}, [BASKET_ITEM_AAPL],
-            {'aapl.parquet': 3.0}, 'bt-basket-mode',
+    def test_percentages_follow_membership(self):
+        files = ['aapl.parquet', 'googl.parquet']
+        # AAPL in A only, GOOGL in both; equal weights.
+        store, pct_a, pct_b = _sync_membership(
+            [True, True], [False, True],
+            self._mmeta('a', files), self._mmeta('b', files),
+            [BASKET_ITEM_AAPL, BASKET_ITEM_GOOGL],
+            {'aapl.parquet': 1.0, 'googl.parquet': 1.0}, {},
+            self._pmeta('a', files), self._pmeta('b', files),
         )
-        assert store_b == no_update
-        assert weights_b == no_update
-        assert 'AAPL' in str(list_b)
+        assert pct_a == ['50%', '50%']   # A holds both
+        assert pct_b == ['—', '100%']    # B holds GOOGL only
 
-    def test_separate_mode_ignores_basket_a_changes(self):
-        result = _sync_shared_basket(
-            'separate', [BASKET_ITEM_AAPL], {}, [BASKET_ITEM_GOOGL], {},
-            'bt-basket-store-a',
-        )
-        assert result == (no_update, no_update, no_update)
+    def test_callback_guard_leaves_store_untouched_when_no_checkboxes(self):
+        ctx = MagicMock()
+        ctx.inputs_list = [[], []]
+        ctx.outputs_list = [None, [], []]
+        with patch('dash.callback_context', ctx):
+            store, pct_a, pct_b = sync_membership([], [], [], {}, {})
+        assert store == no_update
+        assert pct_a == [] and pct_b == []
 
 
-class TestToggleBasketMode:
-    def test_shared_hides_panel_b_and_retitles_a(self):
-        panel_style, divider_style, title, tabs = toggle_basket_mode('shared')
-        assert panel_style == {'display': 'none'}
-        assert divider_style == {'display': 'none'}
-        assert title == 'Basket (A & B)'
-        assert [t.label for t in tabs] == ['Strategy A', 'Strategy B']
+class TestDeriveBaskets:
+    def test_both_membership_puts_asset_in_both(self):
+        a, b = _derive_baskets([BASKET_ITEM_AAPL], {'aapl.parquet': {'a': True, 'b': True}})
+        assert a == [BASKET_ITEM_AAPL]
+        assert b == [BASKET_ITEM_AAPL]
 
-    def test_separate_restores_two_panel_layout(self):
-        panel_style, divider_style, title, tabs = toggle_basket_mode('separate')
-        assert panel_style == {'flex': 1, 'minWidth': 0}
-        # 'display' deliberately unset so the responsive CSS keeps hiding the
-        # divider on phones.
-        assert 'display' not in divider_style
-        assert title == 'Basket A'
-        assert [t.label for t in tabs] == ['Basket A', 'Basket B']
+    def test_a_only_and_b_only(self):
+        master = [BASKET_ITEM_AAPL, BASKET_ITEM_GOOGL]
+        membership = {'aapl.parquet': {'a': True, 'b': False},
+                      'googl.parquet': {'a': False, 'b': True}}
+        a, b = _derive_baskets(master, membership)
+        assert [i['filename'] for i in a] == ['aapl.parquet']
+        assert [i['filename'] for i in b] == ['googl.parquet']
 
-    def test_tab_ids_stay_stable_across_modes(self):
-        # The tab_ids drive render_order_table/download_orders; only the labels
-        # may change with the mode.
-        *_, tabs_shared = toggle_basket_mode('shared')
-        *_, tabs_separate = toggle_basket_mode('separate')
-        assert [t.tab_id for t in tabs_shared] == ['a', 'b']
-        assert [t.tab_id for t in tabs_separate] == ['a', 'b']
+    def test_missing_membership_defaults_to_both(self):
+        # A freshly added asset (no membership entry yet) belongs to both baskets.
+        a, b = _derive_baskets([BASKET_ITEM_AAPL], {})
+        assert a == [BASKET_ITEM_AAPL]
+        assert b == [BASKET_ITEM_AAPL]
+
+    def test_neither_excludes_from_both(self):
+        a, b = _derive_baskets([BASKET_ITEM_AAPL], {'aapl.parquet': {'a': False, 'b': False}})
+        assert a == []
+        assert b == []
 
 
 class TestSymbolWeights:
@@ -1032,7 +1081,7 @@ class TestRunBacktestForwardsWeights:
              patch('src.callbacks.backtesting.run_backtest', side_effect=_fake):
             run_backtest_callback(
                 1, BASKET_A, [], _SLIDER_VAL, _DATE_STORE, _STRATEGY_CFG, None, 'EUR',
-                {'aapl.parquet': 2.0}, {},
+                {'aapl.parquet': 2.0},
             )
         # Basket A's filename weight is translated to its symbol for the engine.
         assert {'AAPL': 2.0} in captured

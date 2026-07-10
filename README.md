@@ -4,18 +4,17 @@ A Plotly Dash web application for backtesting across user-defined asset baskets.
 
 ## Features
 
-- Build two asset baskets (Basket A and Basket B) from any combination of assets
-- **Shared-basket mode**: a "Baskets" switch above the panels toggles between *2 separate baskets* and *1 shared basket
-  for both strategies*. In shared mode the assets and their weights are configured only **once** (in the single
-  full-width basket panel) and both strategies run on that same basket — ideal for comparing two strategies on identical
-  holdings without maintaining the basket twice. The chart traces, metric columns and order-table tabs are then labelled
-  by strategy (e.g. "A: DCA" vs "B: Risk-Off") instead of "Basket A/B". Switching back to separate mode keeps the shared
-  assets as Basket B's editable starting point
-- **Per-asset weighting**: each asset in a basket has an editable *relative* weight (default 1.0) shown next to its live
-  allocation **percentage**. Doing nothing keeps the basket equal-weighted, and adding an asset automatically re-weights
-  all of them; type a number to over- or under-weight an asset (set it to 0 to exclude it). The weights drive how capital
-  is split across the basket in every strategy (the lump-sum deployment, each DCA contribution, every Risk-Off rebalance,
-  and the basket index behind the Risk-Off signals and the Buy & Hold benchmark)
+- **One shared asset list, two baskets**: assemble a single list of assets from any combination, then per asset tick the
+  **Basket A** and/or **Basket B** checkbox to decide which basket(s) it belongs to. A newly added asset starts in **both**
+  baskets; untick one to exclude it there. The dropdown and the list appear only **once** — no need to configure assets
+  twice to compare two strategies on the same (or overlapping) holdings. The chart traces and metric columns are labelled
+  by both the basket letter and its strategy (e.g. "A: Buy & Hold" vs "B: DCA")
+- **Per-asset weighting**: each asset in the list has one editable *relative* weight (default 1.0) shared by both baskets,
+  shown next to its live allocation **percentage** *within each basket it belongs to* (renormalised over that basket's
+  members; "—" for a basket the asset is not in). Doing nothing keeps a basket equal-weighted, and adding an asset
+  automatically re-weights all of that basket's members; type a number to over- or under-weight an asset (set it to 0 to
+  exclude it). The weights drive how capital is split across the basket in every strategy (the lump-sum deployment, each
+  DCA contribution, every Risk-Off rebalance, and the basket index behind the Risk-Off signals and the Buy & Hold benchmark)
 - **Multi-currency support**: pick a reporting (base) currency from a dropdown (default EUR); every asset's prices are
   converted from its quote currency into that base currency using daily FX rates before the backtest, so baskets mixing
   USD/GBP/EUR/… assets are compared on a common basis (the standard *unhedged* approach). Currency pairs can themselves

@@ -28,22 +28,29 @@ curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8050/   # 200 when up
 - `pip install playwright` only — Chromium is pre-installed; launch with
   `p.chromium.launch(executable_path='/opt/pw-browsers/chromium', headless=True)`.
 - **Dash 4.x `dcc.Dropdown` is Radix-based**: the options render in a portal
-  *outside* the component. Click the dropdown (`#bt-asset-a`), `keyboard.type()`
+  *outside* the component. Click the dropdown (`#bt-asset`), `keyboard.type()`
   the filter, then click `page.locator('[role="option"]', has_text=...)`.
   The old react-select selectors (`.Select-control`, `.VirtualizedSelectOption`)
   do not exist.
 - Dict component ids appear in the DOM as sorted compact JSON; build selectors
   with `json.dumps(id, separators=(',', ':'), sort_keys=True)` wrapped in
   `[id='...']` (single quotes — double quotes break querySelector).
+- **`dbc.Checkbox` puts the id on the `<input>` itself**, so the dict-id selector
+  IS the checkbox — call `.is_checked()` / `.uncheck()` on it directly (no
+  ` input` descendant).
 - Wait for a run via `#bt-status` containing `complete`, then read
   `#bt-metrics`, `#bt-orders-content`, and the chart legend from page content.
 
 ## Flows worth driving
 
-- Add assets (asset-class radio → search dropdown → ＋), edit per-row weights,
-  check the live allocation % labels.
-- Basket mode switch (`bt-basket-mode`): shared hides `#bt-asset-panel-b`,
-  retitles `#bt-basket-title-a`, mirrors basket+weights A→B; switching back
-  keeps the copy editable in B.
-- Run backtest and check metric column labels (Basket A/B vs strategy names in
-  shared mode) and both order tabs.
+- One shared asset list: add assets (asset-class radio → `#bt-asset` search
+  dropdown → ＋), edit per-row weights, check the live per-basket allocation %
+  labels (`{'type':'bt-weight-pct-a'|'bt-weight-pct-b','index':fn}`).
+- Per-asset A/B membership: each row has two `dbc.Checkbox`es
+  (`{'type':'bt-member-a'|'bt-member-b','index':fn}`), both checked by default.
+  Uncheck one → that asset leaves that basket (its % becomes `—`, the basket
+  renormalises over its remaining members); the derived `bt-basket-store-a/b`
+  and the date slider react.
+- Run backtest and check the chart legend + metric column labels are
+  `A: <strategy>` / `B: <strategy>`, and that each order tab lists exactly its
+  basket's members.
