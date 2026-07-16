@@ -7,32 +7,38 @@
 	"remoteUser": "vscode",
 	"containerUser": "vscode",
 	"features": {
-		"ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {},
-		"ghcr.io/devcontainers/features/node:1": {},
-		"ghcr.io/anthropics/devcontainer-features/claude-code:1": {}
+		"ghcr.io/devcontainers/features/node:1": {}
 	},
 	"runArgs": [
 		"--cap-drop=ALL",
 		"--security-opt=no-new-privileges"
 	],
-  	"mounts": [
-		"source=claude-code-config,target=/home/vscode/.claude,type=volume",
+	"mounts": [
 		"source=${localWorkspaceFolder},target=/workspace,type=bind",
-  		"source=${localEnv:HOME}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,consistency=cached"
+		"source=${localEnv:HOME}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,consistency=cached"
 	],
 	"postCreateCommand": {
-		//"fix-ownership": "sudo chown -R vscode:vscode /home/vscode/.claude",
-		"pip-install": "pip install --break-system-packages -e '.[dev]'"
+		"pip-install": "pip install --break-system-packages -e '.[dev]'",
+		"vibe-install": "pip install --break-system-packages mistral-vibe",
+		"vibe-config": "mkdir -p /home/vscode/.vibe && cat > /home/vscode/.vibe/config.toml << 'EOF'
+include_project_context = true
+include_workdir = true
+exit_plan_mode = true
+EOF"
 	},
 	"remoteEnv": {
 		"DATA_URL": "${localEnv:DATA_URL}",
 		"BASE_URL": "${localEnv:BASE_URL}",
-		"DASH_DEBUG": "true"
+		"DASH_DEBUG": "true",
+		"MISTRAL_API_KEY": "${localEnv:MISTRAL_API_KEY}"
 	},
 	"customizations": {
 		"vscode": {
 			"extensions": [
-				"actboy168.tasks"
+				"actboy168.tasks",
+				"mistralai.mistral-vibe-code",
+				"ms-azuretools.vscode-containers",
+				"mechatroner.rainbow-csv"
 			]
 		}
 	},
