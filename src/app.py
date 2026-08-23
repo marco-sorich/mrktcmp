@@ -182,6 +182,12 @@ def _log_request(response):
 # HTTP 200 when both checks pass; 503 when any check fails.
 # ---------------------------------------------------------------------------
 
+@server.route('/health')
+def _health():
+    """Health check alias for PaaS providers that expect /health."""
+    return _healthz()
+
+
 @server.route('/healthz')
 def _healthz():
     """Return application health status as JSON."""
@@ -221,4 +227,5 @@ if __name__ == '__main__':
     # debug=True enables hot-reload (auto-restarts on file changes) and shows
     # an error overlay in the browser for Python exceptions.
     # In production, use gunicorn with the 'server' variable instead.
-    app.run(debug=True)
+    port = int(os.getenv("PORT", "8050"))
+    app.run(debug=True, port=port)
