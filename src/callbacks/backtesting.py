@@ -2,22 +2,31 @@
 # callbacks/backtesting.py – Backtesting callbacks
 #
 # This module contains all Dash callbacks and helper functions that power
-# the main page, where users build two asset baskets and compare how a
-# chosen strategy would have performed over a selected date range.
+# the main page.  Users build ONE shared asset list; each asset's two
+# membership checkboxes (Basket A / Basket B) decide which basket(s) it belongs
+# to, and the two strategy panels compare how their chosen strategies would have
+# performed over a selected date range.
 #
 # The callbacks are grouped by feature:
 #
-#   Asset-class selectors   – bt_assetclass_a / bt_assetclass_b
-#                             Populate each basket's asset dropdown when
-#                             the user picks an asset class radio button.
+#   Asset-class selector    – bt_assetclass
+#                             Populates the shared asset dropdown when the user
+#                             picks an asset class radio button.
 #
-#   Live search             – bt_search_a / bt_search_b
-#                             Refine each basket's dropdown options as the
-#                             user types.
+#   Live search             – bt_search
+#                             Refines the dropdown options as the user types.
 #
-#   Basket management       – manage_basket_a / manage_basket_b
-#                             Handle "＋ add" and "✕ remove" actions for
-#                             each basket's asset list.
+#   Basket management       – manage_basket
+#                             Handles "＋ add" and "✕ remove" actions on the
+#                             shared asset list (master list + membership).
+#
+#   Weights / membership    – sync_weights / sync_membership
+#                             Persist per-asset weights and the A/B checkboxes
+#                             and refresh the live per-basket allocation %s.
+#
+#   Basket derivation       – derive_baskets
+#                             Splits the master list into the per-basket stores
+#                             (bt-basket-store-a/b) every consumer below reads.
 #
 #   Date-range slider       – update_date_range_slider
 #                             Recomputes the intersection of all assets'
@@ -33,8 +42,8 @@
 #                             the metrics comparison table.
 #
 # Shared helper functions (_bt_assetclass_options, _bt_asset_search,
-# _manage_basket, _build_slider_marks) contain the logic that is common to
-# the A/B basket pairs so it is not duplicated.
+# _manage_basket, _sync_weights, _sync_membership, _derive_baskets,
+# _build_slider_marks) hold the reusable logic and are unit-tested directly.
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -102,7 +111,7 @@ from src.utils import log_time
 from src.components import (
     _render_basket_list, _metrics_table, _build_strategy_params_ui,
     _strategy_desc_panel, _order_rows, _order_table_component, _asset_currency_map,
-    _weight_percentages,
+    _basket_membership_pcts,
 )
 
 # The DCA simulation engine. run_backtest orchestrates data loading, the
@@ -177,24 +186,13 @@ def _build_strategy_config(
 # ---------------------------------------------------------------------------
 
 @callback(
-    Output('bt-asset-a', 'options'),
-    Output('bt-asset-a', 'disabled'),
-    Input('bt-assetclass-a', 'value'),
+    Output('bt-asset', 'options'),
+    Output('bt-asset', 'disabled'),
+    Input('bt-assetclass', 'value'),
 )
 @log_time
-def bt_assetclass_a(asset_class):
-    """Populate Basket A's asset dropdown when the user picks an asset class."""
-    return _bt_assetclass_options(asset_class)
-
-
-@callback(
-    Output('bt-asset-b', 'options'),
-    Output('bt-asset-b', 'disabled'),
-    Input('bt-assetclass-b', 'value'),
-)
-@log_time
-def bt_assetclass_b(asset_class):
-    """Populate Basket B's asset dropdown when the user picks an asset class."""
+def bt_assetclass(asset_class):
+    """Populate the shared asset dropdown when the user picks an asset class."""
     return _bt_assetclass_options(asset_class)
 
 
@@ -249,30 +247,17 @@ def _bt_assetclass_options(asset_class):
 # ---------------------------------------------------------------------------
 
 @callback(
-    # allow_duplicate=True: both bt_assetclass_a and bt_search_a write to
-    # bt-asset-a's 'options'. Dash requires explicit permission for that.
-    Output('bt-asset-a', 'options', allow_duplicate=True),
-    Input('bt-asset-a', 'search_value'),
-    State('bt-assetclass-a', 'value'),
-    State('bt-asset-a', 'value'),
+    # allow_duplicate=True: both bt_assetclass and bt_search write to
+    # bt-asset's 'options'. Dash requires explicit permission for that.
+    Output('bt-asset', 'options', allow_duplicate=True),
+    Input('bt-asset', 'search_value'),
+    State('bt-assetclass', 'value'),
+    State('bt-asset', 'value'),
     prevent_initial_call=True,
 )
 @log_time
-def bt_search_a(search_value, asset_class, current_value):
-    """Refine Basket A's dropdown options as the user types a search query."""
-    return _bt_asset_search(search_value, asset_class, current_value)
-
-
-@callback(
-    Output('bt-asset-b', 'options', allow_duplicate=True),
-    Input('bt-asset-b', 'search_value'),
-    State('bt-assetclass-b', 'value'),
-    State('bt-asset-b', 'value'),
-    prevent_initial_call=True,
-)
-@log_time
-def bt_search_b(search_value, asset_class, current_value):
-    """Refine Basket B's dropdown options as the user types a search query."""
+def bt_search(search_value, asset_class, current_value):
+    """Refine the shared dropdown options as the user types a search query."""
     return _bt_asset_search(search_value, asset_class, current_value)
 
 
@@ -350,65 +335,52 @@ def _bt_asset_search(search_value, asset_class, current_value):
 # ---------------------------------------------------------------------------
 
 @callback(
-    Output('bt-basket-store-a', 'data'),     # updated JSON list for basket A
-    Output('bt-basket-list-a', 'children'),  # updated visible list for basket A
-    Input('bt-add-a', 'n_clicks'),           # add button clicked
-    # ALL pattern: fires when *any* remove button for basket A is clicked.
-    # The Input value is a list of n_clicks, one per matching button.
-    Input({'type': 'bt-remove-a', 'index': ALL}, 'n_clicks'),
-    State('bt-asset-a', 'value'),            # currently selected asset filename
-    State('bt-basket-store-a', 'data'),      # current basket contents (list of dicts)
-    State('bt-weights-store-a', 'data'),     # current per-asset weights {filename: weight}
+    Output('bt-basket-store', 'data'),        # updated master asset list
+    Output('bt-membership-store', 'data'),    # updated per-asset A/B membership
+    # Pruned on remove (a removed asset's weight is dropped); allow_duplicate
+    # because sync_weights also writes this store on every weight edit.
+    Output('bt-weights-store', 'data', allow_duplicate=True),
+    Output('bt-basket-list', 'children'),     # refreshed visible list
+    Input('bt-add', 'n_clicks'),              # add button clicked
+    # ALL pattern: fires when *any* remove button is clicked.  The Input value
+    # is a list of n_clicks, one per matching button.
+    Input({'type': 'bt-remove', 'index': ALL}, 'n_clicks'),
+    State('bt-asset', 'value'),               # currently selected asset filename
+    State('bt-basket-store', 'data'),         # current master list (list of dicts)
+    State('bt-weights-store', 'data'),        # current shared weights {filename: weight}
+    State('bt-membership-store', 'data'),     # current membership {filename: {a, b}}
     prevent_initial_call=True,
 )
 @log_time
-def manage_basket_a(add_clicks, remove_clicks, selected_asset, basket_data, weights):
-    """Handle add/remove actions for Basket A."""
-    return _manage_basket('a', remove_clicks, selected_asset, basket_data, weights)
+def manage_basket(add_clicks, remove_clicks, selected_asset, basket_data, weights, membership):
+    """Handle add/remove actions on the shared asset list."""
+    return _manage_basket(remove_clicks, selected_asset, basket_data, weights, membership)
 
 
-@callback(
-    Output('bt-basket-store-b', 'data'),
-    Output('bt-basket-list-b', 'children'),
-    Input('bt-add-b', 'n_clicks'),
-    Input({'type': 'bt-remove-b', 'index': ALL}, 'n_clicks'),
-    State('bt-asset-b', 'value'),
-    State('bt-basket-store-b', 'data'),
-    State('bt-weights-store-b', 'data'),
-    prevent_initial_call=True,
-)
-@log_time
-def manage_basket_b(add_clicks, remove_clicks, selected_asset, basket_data, weights):
-    """Handle add/remove actions for Basket B."""
-    return _manage_basket('b', remove_clicks, selected_asset, basket_data, weights)
-
-
-def _manage_basket(basket_id, remove_clicks, selected_asset, basket_data, weights=None):
-    """Core logic for adding/removing an asset from a basket.
+def _manage_basket(remove_clicks, selected_asset, basket_data, weights=None, membership=None):
+    """Core logic for adding/removing an asset from the shared list.
 
     Inspects dash.callback_context to determine whether the add button or a
-    remove button triggered this callback, then mutates a copy of basket_data
-    accordingly.
+    remove button triggered this callback, then mutates copies of the master
+    list, the membership map, and the weights map accordingly.
 
     Parameters
     ----------
-    basket_id      : str  – 'a' or 'b'.
     remove_clicks  : list – n_clicks for each remove button (may be empty).
     selected_asset : str  – filename of the asset currently selected in the
                             dropdown (or None if nothing is selected).
-    basket_data    : list – current list of asset dicts in the dcc.Store.
-                            Each dict has keys 'filename', 'symbol', 'name'.
-    weights        : dict – current per-asset weights ({filename: weight}); passed
-                            through to _render_basket_list so existing assets keep
-                            their user-set weight across an add/remove (a freshly
-                            added asset is absent here and defaults to 1.0).
+    basket_data    : list – current master list of asset dicts (each with keys
+                            'filename', 'symbol', 'name', 'currency').
+    weights        : dict – current shared per-asset weights ({filename: weight});
+                            an entry is dropped when its asset is removed.
+    membership     : dict – current per-asset A/B membership
+                            ({filename: {'a': bool, 'b': bool}}); a newly added
+                            asset defaults to a member of BOTH baskets.
 
     Returns
     -------
-    (updated_basket, updated_list_component)
-      updated_basket         : list – new basket_data to persist in the Store.
-      updated_list_component : Dash component – refreshed visible item list.
-    or (no_update, no_update) when nothing should change.
+    (basket, membership, weights, list_component) to persist / display,
+    or (no_update, no_update, no_update, no_update) when nothing should change.
     """
     # dash.callback_context provides runtime information about the callback
     # that just fired. Only available inside a callback function.
@@ -417,12 +389,12 @@ def _manage_basket(basket_id, remove_clicks, selected_asset, basket_data, weight
     # ctx.triggered is a list of dicts describing every Input that changed.
     # If it is empty the callback was fired spuriously; do nothing.
     if not ctx.triggered:
-        return no_update, no_update
+        return no_update, no_update, no_update, no_update
 
     # ctx.triggered_id is the id of the single Input that actually caused the
-    # callback to fire. For a plain button it is a string like 'bt-add-a'.
-    # For a pattern-matching button it is a dict like
-    #   {'type': 'bt-remove-a', 'index': 'aapl.parquet'}.
+    # callback to fire. For a plain button it is a string like 'bt-add'.  For a
+    # pattern-matching button it is a dict like
+    #   {'type': 'bt-remove', 'index': 'aapl.parquet'}.
     triggered_id = ctx.triggered_id
 
     # ctx.triggered[0]['value'] is the new property value that changed. For
@@ -431,119 +403,240 @@ def _manage_basket(basket_id, remove_clicks, selected_asset, basket_data, weight
     # n_clicks initialises to 0 – those should NOT trigger a removal.
     triggered_value = ctx.triggered[0].get('value', 0) or 0
 
-    # Copy the basket list so we can mutate it safely. 'or []' handles the
-    # case where basket_data is None (Store initialised but never written).
+    # Copy the stores so we can mutate them safely. 'or …' handles the case
+    # where a store is None (initialised but never written).
     basket = list(basket_data or [])
+    membership = dict(membership or {})
+    weights = dict(weights or {})
 
-    if isinstance(triggered_id, dict) and triggered_id.get('type') == f'bt-remove-{basket_id}':
+    if isinstance(triggered_id, dict) and triggered_id.get('type') == 'bt-remove':
         # A remove button was clicked. The dict-id carries 'index' = filename.
 
         # Guard: newly rendered remove buttons fire the ALL-pattern callback
         # with n_clicks=0 when added to the layout. Skipping those prevents
-        # a phantom removal every time a new asset is added to the basket.
+        # a phantom removal every time a new asset is added to the list.
         if triggered_value > 0:
             filename = triggered_id['index']
-            # Keep all items except the one whose filename matches.
+            # Keep all items except the one whose filename matches, and drop its
+            # membership + weight so the stores do not accumulate stale entries.
             basket = [item for item in basket if item['filename'] != filename]
+            membership.pop(filename, None)
+            weights.pop(filename, None)
 
-    elif triggered_id == f'bt-add-{basket_id}' and selected_asset and _config.df is not None:
+    elif triggered_id == 'bt-add' and selected_asset and _config.df is not None:
         # The add button was clicked and the dropdown has a selection.
 
         # Prevent duplicate entries: only add if the asset is not already in
-        # the basket. any() returns True as soon as one match is found.
+        # the list. any() returns True as soon as one match is found.
         if not any(item['filename'] == selected_asset for item in basket):
             meta = _config.df[_config.df['filename'] == selected_asset]
             if not meta.empty:
                 row = meta.iloc[0]
                 # Append a minimal dict: filename, symbol, display name and the
-                # trading currency (blank when absent/unknown) so the basket list
-                # can tag each asset with its currency.
+                # trading currency (blank when absent/unknown) so the list can
+                # tag each asset with its currency.
                 ccy = ''
                 if 'currency' in row.index and pd.notna(row.get('currency')):
                     ccy = str(row['currency']).strip()
                 basket.append({'filename': selected_asset, 'symbol': row['symbol'],
                                'name': row['name'], 'currency': ccy})
+                # A newly added asset starts as a member of BOTH baskets so it is
+                # immediately comparable under both strategies; the user unticks a
+                # checkbox to exclude it from one basket.
+                membership[selected_asset] = {'a': True, 'b': True}
 
     else:
         # The callback fired for some other reason (e.g. the remove button
         # list was updated with new buttons that all report n_clicks=0, or
         # the add button was clicked without an asset selected). Do nothing.
-        return no_update, no_update
+        return no_update, no_update, no_update, no_update
 
-    # Return the new basket data (written to dcc.Store) and the refreshed
-    # visible list component (written to the basket-list Div's children).  The
-    # weights map keeps each surviving asset's user-set weight; the new asset is
-    # absent from it and so renders at the default weight of 1.0.
-    return basket, _render_basket_list(basket, basket_id, weights)
+    # Return the new master list, membership and weights (written to their
+    # dcc.Stores) plus the refreshed visible list component.  The weights /
+    # membership maps keep each surviving asset's user-set values across the
+    # add/remove; a freshly added asset defaults to weight 1.0 and both baskets.
+    return basket, membership, weights, _render_basket_list(basket, weights, membership)
 
 
 # ---------------------------------------------------------------------------
 # Callbacks: per-asset weights (persist edits + live allocation percentages)
 # ---------------------------------------------------------------------------
 
-def _sync_weights(values: list, inputs_meta: list, pct_meta: list) -> tuple[dict, list]:
-    """Persist the current weight inputs and recompute their allocation %.
+def _sync_weights(values, inputs_meta, pct_a_meta, pct_b_meta, membership):
+    """Persist the shared weight inputs and recompute the per-basket allocation %.
 
     Builds the ``{filename: weight}`` map from the live weight inputs (a cleared or
     invalid field falls back to the default weight 1.0; negatives are clamped to
-    0), then renders each input's share-of-total percentage aligned to the order
-    of the percentage-label outputs.
+    0), then renders each asset's share-of-basket percentage for **both** baskets,
+    each aligned to the order of its percentage-label outputs.  A single weight is
+    shared by both baskets; only the renormalisation subset (each basket's members)
+    differs, so the A and B percentages can differ.
 
     Parameters
     ----------
     values      – current value of every weight input (ALL pattern order).
     inputs_meta – callback_context.inputs_list entry for the weight inputs; each
                   element's ``id['index']`` is the asset's filename.
-    pct_meta    – callback_context.outputs_list entry for the percentage labels;
-                  the returned children list is aligned to this order.
+    pct_a_meta  – outputs_list entry for the Basket A percentage labels.
+    pct_b_meta  – outputs_list entry for the Basket B percentage labels.
+    membership  – the {filename: {'a', 'b'}} membership map (State), to know which
+                  assets each basket's allocation renormalises over.
 
     Returns
     -------
-    (weights_store, pct_children)
-      weights_store – the {filename: weight} dict to persist.
-      pct_children  – percentage strings, one per percentage-label output.
+    (weights_store, pct_a_children, pct_b_children)
+      weights_store  – the {filename: weight} dict to persist.
+      pct_a_children – Basket A percentage strings, one per A label output.
+      pct_b_children – Basket B percentage strings, one per B label output.
     """
     weights: dict = {}
     for i, meta in enumerate(inputs_meta):
         filename = meta['id']['index']
         val = values[i] if i < len(values) else None
         try:
-            weight = 1.0 if val is None else max(float(val), 0.0)
+            weights[filename] = 1.0 if val is None else max(float(val), 0.0)
         except (TypeError, ValueError):
-            weight = 1.0
-        weights[filename] = weight
+            weights[filename] = 1.0
 
-    pct = _weight_percentages(weights)
-    pct_children = [pct.get(meta['id']['index'], '—') for meta in pct_meta]
-    return weights, pct_children
-
-
-@callback(
-    # allow_duplicate: the weights store is also (initialised and) read by
-    # manage_basket; here the weight inputs write it back on every edit.
-    Output('bt-weights-store-a', 'data', allow_duplicate=True),
-    Output({'type': 'bt-weight-pct-a', 'index': ALL}, 'children'),
-    Input({'type': 'bt-weight-a', 'index': ALL}, 'value'),
-    prevent_initial_call=True,
-)
-@log_time
-def sync_weights_a(weight_values: list) -> tuple[dict, list]:
-    """Persist Basket A's weight edits and refresh the live allocation %s."""
-    ctx = dash.callback_context
-    return _sync_weights(weight_values, ctx.inputs_list[0], ctx.outputs_list[1])
+    # _basket_membership_pcts only reads each item's 'filename', so a minimal
+    # list built from the weight-input metas is enough to compute the shares.
+    basket = [{'filename': meta['id']['index']} for meta in inputs_meta]
+    pct_a, pct_b = _basket_membership_pcts(basket, weights, membership)
+    a_children = [pct_a.get(meta['id']['index'], '—') for meta in pct_a_meta]
+    b_children = [pct_b.get(meta['id']['index'], '—') for meta in pct_b_meta]
+    return weights, a_children, b_children
 
 
 @callback(
-    Output('bt-weights-store-b', 'data', allow_duplicate=True),
-    Output({'type': 'bt-weight-pct-b', 'index': ALL}, 'children'),
-    Input({'type': 'bt-weight-b', 'index': ALL}, 'value'),
+    # allow_duplicate: the weights store is also written by manage_basket (which
+    # prunes a removed asset); the percentage labels are also written by
+    # sync_membership, so both those outputs need allow_duplicate too.
+    Output('bt-weights-store', 'data', allow_duplicate=True),
+    Output({'type': 'bt-weight-pct-a', 'index': ALL}, 'children', allow_duplicate=True),
+    Output({'type': 'bt-weight-pct-b', 'index': ALL}, 'children', allow_duplicate=True),
+    Input({'type': 'bt-weight', 'index': ALL}, 'value'),
+    State('bt-membership-store', 'data'),
     prevent_initial_call=True,
 )
 @log_time
-def sync_weights_b(weight_values: list) -> tuple[dict, list]:
-    """Persist Basket B's weight edits and refresh the live allocation %s."""
+def sync_weights(weight_values, membership):
+    """Persist shared weight edits and refresh both baskets' live allocation %s."""
     ctx = dash.callback_context
-    return _sync_weights(weight_values, ctx.inputs_list[0], ctx.outputs_list[1])
+    # Guard: when the last weight input disappears (list emptied / replaced), the
+    # ALL pattern fires with no inputs; writing {} would wipe the stored weights
+    # for nothing, so leave the store untouched.
+    if not ctx.inputs_list[0]:
+        return no_update, [], []
+    return _sync_weights(weight_values, ctx.inputs_list[0],
+                         ctx.outputs_list[1], ctx.outputs_list[2], membership)
+
+
+# ---------------------------------------------------------------------------
+# Callbacks: per-asset A/B membership (which basket(s) each asset belongs to)
+# ---------------------------------------------------------------------------
+
+def _sync_membership(member_a, member_b, a_meta, b_meta, basket_data, weights,
+                     membership_state, pct_a_meta, pct_b_meta):
+    """Build the membership map from the A/B checkboxes and refresh the %s.
+
+    Reads the two checkbox groups (Basket A / Basket B), assembles the
+    ``{filename: {'a': bool, 'b': bool}}`` map, and recomputes each basket's
+    allocation percentages under the *new* membership.  The store output is
+    suppressed (``no_update``) when the assembled map already equals the stored
+    one, so a checkbox re-render right after manage_basket does not needlessly
+    re-fire derive_baskets (and the date slider).
+
+    Returns
+    -------
+    (membership_or_no_update, pct_a_children, pct_b_children)
+    """
+    membership: dict = {}
+    for i, meta in enumerate(a_meta):
+        filename = meta['id']['index']
+        membership.setdefault(filename, {})['a'] = bool(member_a[i]) if i < len(member_a) else True
+    for i, meta in enumerate(b_meta):
+        filename = meta['id']['index']
+        membership.setdefault(filename, {})['b'] = bool(member_b[i]) if i < len(member_b) else True
+
+    # Recompute the per-basket allocation %s with the freshly toggled membership.
+    basket = basket_data or [{'filename': meta['id']['index']} for meta in a_meta]
+    pct_a, pct_b = _basket_membership_pcts(basket, weights, membership)
+    a_children = [pct_a.get(meta['id']['index'], '—') for meta in pct_a_meta]
+    b_children = [pct_b.get(meta['id']['index'], '—') for meta in pct_b_meta]
+
+    # No real change (e.g. the checkboxes were just re-rendered by manage_basket,
+    # which already wrote this exact map) → keep the store to avoid a redundant
+    # derive/date-slider round-trip.
+    store_out = no_update if membership == (membership_state or {}) else membership
+    return store_out, a_children, b_children
+
+
+@callback(
+    # allow_duplicate: the membership store is also written by manage_basket (new
+    # asset defaults), and the percentage labels are also written by sync_weights.
+    Output('bt-membership-store', 'data', allow_duplicate=True),
+    Output({'type': 'bt-weight-pct-a', 'index': ALL}, 'children', allow_duplicate=True),
+    Output({'type': 'bt-weight-pct-b', 'index': ALL}, 'children', allow_duplicate=True),
+    Input({'type': 'bt-member-a', 'index': ALL}, 'value'),
+    Input({'type': 'bt-member-b', 'index': ALL}, 'value'),
+    State('bt-basket-store', 'data'),
+    State('bt-weights-store', 'data'),
+    State('bt-membership-store', 'data'),
+    prevent_initial_call=True,
+)
+@log_time
+def sync_membership(member_a, member_b, basket_data, weights, membership_state):
+    """Persist the A/B membership checkboxes and refresh both baskets' %s."""
+    ctx = dash.callback_context
+    a_meta = ctx.inputs_list[0]
+    b_meta = ctx.inputs_list[1]
+    # Guard: no matching checkboxes (list emptied / replaced) → writing {} would
+    # wipe the membership; leave it untouched.
+    if not a_meta and not b_meta:
+        return no_update, [], []
+    return _sync_membership(member_a, member_b, a_meta, b_meta, basket_data, weights,
+                            membership_state, ctx.outputs_list[1], ctx.outputs_list[2])
+
+
+# ---------------------------------------------------------------------------
+# Callbacks: derive the per-basket stores from the master list + membership
+# ---------------------------------------------------------------------------
+
+def _derive_baskets(master, membership):
+    """Split the master asset list into Basket A and Basket B by membership.
+
+    An asset belongs to a basket when its membership flag for that basket is
+    truthy; a **missing** entry (or flag) counts as a member of both baskets, so
+    a freshly added asset is already in both even before sync_membership persists
+    its default — keeping derive_baskets consistent with the add default.
+
+    Parameters
+    ----------
+    master     – the shared asset list ([{filename, symbol, name, currency}, …]).
+    membership – the {filename: {'a': bool, 'b': bool}} map.
+
+    Returns
+    -------
+    (basket_a, basket_b) – the two filtered asset lists.
+    """
+    master = master or []
+    membership = membership or {}
+    basket_a = [item for item in master if membership.get(item['filename'], {}).get('a', True)]
+    basket_b = [item for item in master if membership.get(item['filename'], {}).get('b', True)]
+    return basket_a, basket_b
+
+
+@callback(
+    # Sole writer of the two per-basket stores every downstream callback reads.
+    Output('bt-basket-store-a', 'data'),
+    Output('bt-basket-store-b', 'data'),
+    Input('bt-basket-store', 'data'),        # the master asset list
+    Input('bt-membership-store', 'data'),    # per-asset A/B membership
+)
+@log_time
+def derive_baskets(master, membership):
+    """Fan the master list out into Basket A / Basket B by their membership flags."""
+    return _derive_baskets(master, membership)
 
 
 def _symbol_weights(basket_items: list | None, weights_store: dict | None) -> dict | None:
@@ -922,14 +1015,13 @@ def _downsample_for_plot(series: pd.Series, max_points: int = _MAX_PLOT_POINTS) 
     State('bt-strategy-config-store-a', 'data'),  # selected strategy + params for basket A
     State('bt-strategy-config-store-b', 'data'),  # selected strategy + params for basket B
     State('bt-base-currency', 'value'),           # reporting currency for both baskets
-    State('bt-weights-store-a', 'data'),          # per-asset weights for basket A
-    State('bt-weights-store-b', 'data'),          # per-asset weights for basket B
+    State('bt-weights-store', 'data'),            # shared per-asset weights (both baskets)
     prevent_initial_call=True,  # do not run at page load (no data yet)
 )
 @log_time
 def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store,
                           strategy_config_a, strategy_config_b, base_currency,
-                          weights_a=None, weights_b=None):
+                          weights=None):
     """Execute the DCA simulation for both baskets and update the UI.
 
     Steps:
@@ -953,10 +1045,10 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     strategy_config_b : dict – {'strategy': name, 'params': {...}} for basket B.
     base_currency     : str  – reporting currency both baskets are converted into
                                (every asset's prices, metrics and order log).
-    weights_a         : dict – Basket A's per-asset weights ({filename: weight});
-                               translated to symbol-keyed weights and forwarded to
-                               the simulation (None/all-zero → equal weight).
-    weights_b         : dict – Basket B's per-asset weights, as above.
+    weights           : dict – the shared per-asset weights ({filename: weight});
+                               each basket's subset is translated to symbol-keyed
+                               weights and forwarded to its simulation (None/all-zero
+                               → equal weight).  One weight applies to both baskets.
 
     Returns
     -------
@@ -1009,10 +1101,12 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     params_a = (strategy_config_a or {}).get('params') or {}
     params_b = (strategy_config_b or {}).get('params') or {}
 
-    # Translate each basket's stored (filename-keyed) weights into the symbol-keyed
-    # form the engines expect; None means equal weight (the untouched default).
-    weights_sym_a = _symbol_weights(basket_a, weights_a)
-    weights_sym_b = _symbol_weights(basket_b, weights_b)
+    # Translate the shared (filename-keyed) weights into the symbol-keyed form the
+    # engines expect, once per basket over that basket's assets; None means equal
+    # weight (the untouched default).  The same weights map serves both baskets —
+    # _symbol_weights filters it down to each basket's own symbols.
+    weights_sym_a = _symbol_weights(basket_a, weights)
+    weights_sym_b = _symbol_weights(basket_b, weights)
 
     # Run the simulation for each basket, but skip the call entirely if the
     # basket has no assets (saves an unnecessary function call).
@@ -1048,6 +1142,14 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
                       n_pts_a, n_ord_a, n_pts_b, n_ord_b)
     _t_render = time.perf_counter()
 
+    # Trace / metric-column labels.  Both baskets may hold different asset subsets
+    # AND run different strategies, so label by BOTH the basket letter and the
+    # strategy ('A: Buy & Hold' / 'B: DCA') — unambiguous whether the two baskets
+    # share assets (then the strategy distinguishes them) or not.
+    name_a = (strategy_config_a or {}).get('strategy') or 'DCA'
+    name_b = (strategy_config_b or {}).get('strategy') or 'DCA'
+    label_a, label_b = f'A: {name_a}', f'B: {name_b}'
+
     # Build the portfolio value chart.
     fig = go.Figure()
 
@@ -1059,7 +1161,7 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
         fig.add_trace(go.Scatter(
             x=plot_a.index,       # x-axis: daily dates
             y=plot_a.round(2),    # y-axis: portfolio value in the base currency
-            name='Basket A',
+            name=label_a,
             line=dict(color='#1a56db', width=2),  # blue line, 2px thick
         ))
 
@@ -1068,7 +1170,7 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
         fig.add_trace(go.Scatter(
             x=plot_b.index,
             y=plot_b.round(2),
-            name='Basket B',
+            name=label_b,
             line=dict(color='#c0392b', width=2),  # red line
         ))
 
@@ -1097,7 +1199,7 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     )
 
     # Build the side-by-side metrics table and assemble the status message.
-    metrics_div = _metrics_table(metrics_a, metrics_b)
+    metrics_div = _metrics_table(metrics_a, metrics_b, label_a, label_b)
 
     # Format each basket's order log into display rows (None for an empty/failed
     # basket) and stash both in the store.  render_order_table renders the active
@@ -1115,8 +1217,6 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     _config.log.debug('[perf] build figure+tables: %.1fms',
                       (time.perf_counter() - _t_render) * 1000)
 
-    name_a = (strategy_config_a or {}).get('strategy') or 'DCA'
-    name_b = (strategy_config_b or {}).get('strategy') or 'DCA'
     status = (
         f'Backtest complete – {d0_label} to {d1_label} ({n_months} months). '
         f'Strategy A: {name_a}, Strategy B: {name_b}.'
@@ -1144,21 +1244,23 @@ def run_backtest_callback(n_clicks, basket_a, basket_b, slider_value, date_store
     Input('bt-base-currency', 'value'),
     Input('bt-strategy-config-store-a', 'data'),
     Input('bt-strategy-config-store-b', 'data'),
-    Input('bt-weights-store-a', 'data'),
-    Input('bt-weights-store-b', 'data'),
+    Input('bt-weights-store', 'data'),
     prevent_initial_call=True,
 )
 @log_time
 def reset_results_on_input_change(basket_a, basket_b, base_currency, strategy_a, strategy_b,
-                                  weights_a=None, weights_b=None):
+                                  weights=None):
     """Clear chart, KPIs, and order tables when any backtest input changes.
 
-    Whenever the user modifies a basket, the base currency, the strategy, or a
-    per-asset weight before (or after) running a backtest, the previous results no
-    longer match the current configuration and would be misleading. This callback
-    resets all result areas to the initial page-load state: an empty visible chart
-    and a metrics table filled with — placeholders (matching the state established
-    by the layout on first render).
+    Whenever the user modifies the asset list, an asset's basket membership, the
+    base currency, a strategy, or a per-asset weight before (or after) running a
+    backtest, the previous results no longer match the current configuration and
+    would be misleading. This callback resets all result areas to the initial
+    page-load state: an empty visible chart and a metrics table filled with —
+    placeholders (matching the state established by the layout on first render).
+
+    Membership changes flow in through the derived bt-basket-store-a/b inputs, so
+    ticking/unticking a basket checkbox also clears stale results.
     """
     placeholder_metrics = {k: '—' for k in (
         'Total Return', 'CAGR', 'Sharpe Ratio', 'Max. Drawdown',

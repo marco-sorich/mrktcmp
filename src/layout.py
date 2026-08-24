@@ -34,9 +34,11 @@ import plotly.graph_objects as go
 # Internal imports
 # ---------------------------------------------------------------------------
 
-# _basket_ui builds the full component subtree for a single basket panel
-# (heading, radio buttons, dropdown, add button, item list, and Store).
-from src.components import _basket_ui, _base_currency_options, _metrics_table
+# _asset_panel builds the single shared asset-selection subtree (heading, radio
+# buttons, dropdown, add button, the item list with per-asset A/B membership
+# checkboxes, and the Stores); _strategy_panel builds one strategy-configuration
+# subtree per basket.  There is ONE asset panel feeding both strategies.
+from src.components import _asset_panel, _strategy_panel, _base_currency_options, _metrics_table
 
 # _config provides module-level globals: app_version (from setuptools-scm),
 # and df/assetsClasses (loaded master.parquet).
@@ -105,17 +107,24 @@ def create_layout():
             ),
         ], style={'display': 'flex', 'alignItems': 'center', 'marginTop': '12px'}),
 
-        # Two basket panels. On wide screens they sit side by side; on narrow
-        # screens (phones) they stack vertically so each basket — and its asset
-        # labels — gets the full screen width and stays readable. The responsive
-        # switch lives in the `.baskets-row` rule in assets/layout.css (the
-        # default is the mobile-first stacked column; a min-width media query
-        # turns it into a row). The 24px divider spacer is hidden when stacked.
+        # Single shared asset panel, full width.  One asset list feeds both
+        # strategies; each row's A/B membership checkboxes decide which basket(s)
+        # the asset belongs to (both, one, or neither).
+        html.Div(
+            _asset_panel(),
+            style={'marginTop': '12px'},
+        ),
+
+        # Strategy panels, one per basket, side by side below the shared asset
+        # panel.  On wide screens they sit side by side; on narrow screens
+        # (phones) they stack vertically via the `.baskets-row` rule in
+        # assets/layout.css.  Each strategy panel applies its own strategy to its
+        # basket's asset subset (as chosen by the membership checkboxes above).
         html.Div([
-            _basket_ui('a'),                                         # Basket A controls
+            _strategy_panel('a'),                                    # Strategy for basket A
             html.Div(className='basket-divider', style={'width': '24px'}),  # divider (desktop only)
-            _basket_ui('b'),                                         # Basket B controls
-        ], className='baskets-row', style={'marginTop': '12px'}),
+            _strategy_panel('b'),                                    # Strategy for basket B
+        ], className='baskets-row', style={'marginTop': '16px'}),
 
         # Date-range section: slider + human-readable label + store.
         html.Div([

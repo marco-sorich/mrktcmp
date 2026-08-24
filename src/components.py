@@ -215,37 +215,36 @@ def _build_strategy_params_ui(
     return widgets
 
 
-def _basket_ui(basket_id):
-    """Return the complete HTML/component tree for a single basket panel.
+def _asset_panel():
+    """Return the single shared asset-selection panel that feeds both baskets.
 
-    Each basket panel contains:
-      • A heading ("Basket A" or "Basket B").
+    There is now ONE asset list for the whole page.  Each row carries a shared
+    relative weight and two membership checkboxes (Basket A / Basket B), so a
+    given asset can belong to A, to B, or to both — the fine-grained replacement
+    for the former global basket-mode switch.  The two strategy panels (see
+    ``_strategy_panel``) sit below this panel, each applying its own strategy to
+    its basket's asset subset.
+
+    The panel contains:
+      • A heading ("Assets").
       • Asset-class radio buttons that filter the search dropdown.
       • A searchable asset dropdown + an add (＋) button side by side.
-      • A list area that displays the assets currently in the basket.
-      • An invisible dcc.Store that persists the basket's contents between
-        callbacks (browser-side JSON storage, no server round-trip).
-
-    Parameters
-    ----------
-    basket_id : str – either 'a' or 'b'. Used to build unique component IDs
-                      (e.g. 'bt-assetclass-a', 'bt-add-b') so Dash can
-                      distinguish the two baskets' components.
+      • The list area showing the added assets, each with a weight input and the
+        A/B membership checkboxes (built by ``_render_basket_list``).
+      • Invisible dcc.Stores: the master basket list, the shared per-asset
+        weights, the per-asset A/B membership, and the two *derived* per-basket
+        stores (bt-basket-store-a/b) that every downstream callback still reads.
 
     Returns
     -------
-    html.Div containing all controls for one basket.
+    html.Div containing the shared asset controls.
     """
-    # Map basket_id to a human-readable label for the heading.
-    label = 'A' if basket_id == 'a' else 'B'
-
-    # Outer panel style: flex:1 lets this panel grow equally with its sibling
-    # basket panel in their shared flex row. minWidth:0 prevents a flex child
-    # from overflowing when it contains long text (a common flexbox gotcha).
+    # minWidth:0 prevents this flex child from overflowing when it contains long
+    # asset labels (a common flexbox gotcha); the panel spans the full width.
     return html.Div([
 
-        # Section heading displayed above the basket controls.
-        html.H3(f'Basket {label}', style={'marginBottom': '8px'}),
+        # Section heading displayed above the asset controls.
+        html.H3('Assets', style={'marginBottom': '8px'}),
 
         # dcc.RadioItems renders a group of radio buttons (mutually exclusive
         # choices). Here it lists the asset classes loaded at startup so the
@@ -253,7 +252,7 @@ def _basket_ui(basket_id):
         # inline=True puts the radio buttons on a single horizontal line.
         dcc.RadioItems(
             _config.assetsClasses,            # list of option labels/values
-            id=f'bt-assetclass-{basket_id}',  # unique component ID for callbacks
+            id='bt-assetclass',               # component ID for the class callback
             inline=True,
             style={'marginBottom': '8px'},
         ),
@@ -268,7 +267,7 @@ def _basket_ui(basket_id):
             # style={'flex': 1} – in a flex container, flex:1 means "grow to
             #                     fill all available horizontal space".
             dcc.Dropdown(
-                id=f'bt-asset-{basket_id}',
+                id='bt-asset',
                 placeholder='Search asset…',
                 disabled=True,
                 style={'flex': 1},
@@ -278,28 +277,82 @@ def _basket_ui(basket_id):
             # ** unpacks _BTN_SMALL and the extra keys override on top.
             html.Button(
                 '＋',
-                id=f'bt-add-{basket_id}',
+                id='bt-add',
                 n_clicks=0,
                 style={**_BTN_SMALL, 'fontSize': '16px', 'padding': '2px 12px'},
             ),
         ], style={'display': 'flex', 'gap': '6px', 'alignItems': 'center', 'marginBottom': '8px'}),
 
-        # Container for the list of assets currently in the basket.
-        # Updated by the manage_basket_x callback whenever the user adds or
-        # removes assets. minHeight ensures the panel does not collapse to
-        # zero height when the basket is empty.
-        html.Div(id=f'bt-basket-list-{basket_id}', style={'minHeight': '32px'}),
+        # Container for the list of assets currently added.  Updated by the
+        # manage_basket callback whenever the user adds or removes assets.
+        # minHeight keeps the panel from collapsing to zero height when empty.
+        html.Div(id='bt-basket-list', style={'minHeight': '32px'}),
 
-        # --------------- Strategy selector ----------------------------------
-        # A thin divider separates the asset list from the strategy section.
-        html.Hr(style={'margin': '10px 0', 'borderColor': '#eee'}),
+        # Master stores (the source of truth the user edits):
+        #  • bt-basket-store      – the single asset list [{filename, symbol, …}].
+        #  • bt-weights-store     – one shared per-asset weight {filename: weight};
+        #                           the same weight applies to both baskets.
+        #  • bt-membership-store  – per-asset A/B membership {filename:{a,b}}.
+        # Kept separate from one another so editing a weight or a checkbox writes
+        # only its own store (see the sync_weights / sync_membership callbacks).
+        dcc.Store(id='bt-basket-store', data=[]),
+        dcc.Store(id='bt-weights-store', data={}),
+        dcc.Store(id='bt-membership-store', data={}),
 
-        # Label row: the "Strategy" caption plus a small info (ⓘ) toggle button
-        # that expands/collapses the rich-text description panel below.
+        # Derived per-basket stores, written ONLY by derive_baskets (master list
+        # filtered by each basket's membership).  They are the stable interface
+        # every downstream callback (date slider, run, strategy enable/disable,
+        # reset, orders) already reads, so none of those callbacks change.
+        dcc.Store(id='bt-basket-store-a', data=[]),
+        dcc.Store(id='bt-basket-store-b', data=[]),
+
+    ], style={'minWidth': 0})
+
+
+# ---------------------------------------------------------------------------
+# Helper: build the strategy panel for one basket
+# ---------------------------------------------------------------------------
+
+# Chart trace colours reused as the strategy-panel heading colours so each
+# strategy panel is visually tied to its basket's curve (A = blue, B = red).
+_BASKET_COLOURS = {'a': '#1a56db', 'b': '#c0392b'}
+
+
+def _strategy_panel(basket_id):
+    """Return the strategy-configuration panel for a single basket.
+
+    Split out of the former single basket panel (see ``_asset_panel``) so the
+    layout can render all strategy panels side by side in their own row: in the
+    shared-basket mode Basket B's *asset* panel is hidden while both strategy
+    panels remain visible and independently configurable.
+
+    The panel contains:
+      • A heading ("Strategy A" / "Strategy B") coloured like the basket's
+        chart trace, plus the info (ⓘ) toggle for the description panel.
+      • The strategy dropdown listing every registered strategy.
+      • A collapsible rich-text (Markdown) strategy description.
+      • The strategy-specific parameter inputs.
+      • The invisible dcc.Store holding the resolved strategy config.
+
+    Parameters
+    ----------
+    basket_id : str – either 'a' or 'b'; keys all per-basket component IDs.
+
+    Returns
+    -------
+    html.Div containing the strategy controls for one basket.
+    """
+    label = 'A' if basket_id == 'a' else 'B'
+
+    return html.Div([
+
+        # Heading row: the coloured "Strategy A/B" caption plus a small info (ⓘ)
+        # toggle button that expands/collapses the description panel below.
         html.Div([
-            html.Label(
-                'Strategy',
-                style={'fontSize': '12px', 'fontWeight': 'bold', 'marginBottom': '0', 'display': 'block'},
+            html.H4(
+                f'Strategy {label}',
+                style={'fontSize': '1rem', 'fontWeight': 'bold', 'margin': '0',
+                       'color': _BASKET_COLOURS[basket_id]},
             ),
             html.Button(
                 html.I(className='bi bi-info-circle'),
@@ -353,19 +406,6 @@ def _basket_ui(basket_id):
         # its resolved parameter values.  Read by the main backtest callback.
         dcc.Store(id=f'bt-strategy-config-store-{basket_id}', data=_default_strategy_config()),
 
-        # dcc.Store is an invisible component that holds JSON data in the
-        # browser's memory for the duration of the session. We use it to
-        # persist the list of assets in each basket between callbacks.
-        # data=[] initialises it with an empty list.
-        dcc.Store(id=f'bt-basket-store-{basket_id}', data=[]),
-
-        # Persists the per-asset relative weights as {filename: weight}.  Kept
-        # separate from the basket store so editing a weight does NOT retrigger the
-        # date-range slider (which resets the selected window).  Written by the
-        # sync_weights callback; read by _manage_basket (to keep weights through
-        # add/remove) and by the run callback (to weight the simulation).
-        dcc.Store(id=f'bt-weights-store-{basket_id}', data={}),
-
     ], style={'flex': 1, 'minWidth': 0})
 
 
@@ -397,6 +437,48 @@ def _weight_percentages(weight_by_key: dict) -> dict:
     return {k: f'{max(float(w), 0.0) / total * 100:.0f}%' for k, w in weight_by_key.items()}
 
 
+def _basket_membership_pcts(
+    basket_data: list,
+    weights: dict | None = None,
+    membership: dict | None = None,
+) -> tuple[dict, dict]:
+    """Compute each asset's allocation % *within* basket A and within basket B.
+
+    A basket's allocation is renormalised over only the assets whose membership
+    checkbox for that basket is ticked, so an asset that is in A but not B shows
+    a real percentage for A and an em-dash for B.  Reuses ``_weight_percentages``
+    once per basket over that basket's member subset.
+
+    Parameters
+    ----------
+    basket_data – the shared asset list ([{filename, …}, …]).
+    weights     – shared per-asset weights ({filename: weight}); missing → 1.0.
+    membership  – per-asset A/B membership ({filename: {'a': bool, 'b': bool}});
+                  a missing asset / flag counts as a member of that basket
+                  (matches the default-both rule and derive_baskets).
+
+    Returns
+    -------
+    (pct_a_by_file, pct_b_by_file) – each a {filename: '40%' | '—'} dict covering
+    every asset in *basket_data* ('—' for non-members and zero-sum baskets).
+    """
+    weights = weights or {}
+    membership = membership or {}
+
+    def _pcts_for(key: str) -> dict:
+        # Weights of just this basket's members, renormalised to shares below.
+        member_weights = {
+            item['filename']: max(float(weights.get(item['filename'], 1.0)), 0.0)
+            for item in basket_data
+            if membership.get(item['filename'], {}).get(key, True)
+        }
+        shares = _weight_percentages(member_weights)
+        # Non-members are absent from *shares* → rendered as an em-dash.
+        return {item['filename']: shares.get(item['filename'], '—') for item in basket_data}
+
+    return _pcts_for('a'), _pcts_for('b')
+
+
 def _basket_item_label(item: dict) -> str:
     """Build one basket row's text: "<symbol> — <name>" plus a currency tag.
 
@@ -412,50 +494,77 @@ def _basket_item_label(item: dict) -> str:
     return label
 
 
-def _render_basket_list(basket_data, basket_id, weights=None):
-    """Build the component tree for the basket's item list.
+def _membership_checkbox(basket_id: str, filename: str, checked: bool, pct: str):
+    """Build one basket-membership checkbox plus its live allocation-% label.
 
-    Each item shows the asset's symbol and name, an editable **weight** input with
-    the resulting allocation percentage beside it, and a remove (✕) button.
-    Called by _manage_basket every time an asset is added or removed.
+    The checkbox (dbc.Checkbox) toggles whether the asset belongs to basket
+    *basket_id* ('a'/'b'); its coloured "A"/"B" label matches that basket's chart
+    trace colour.  The adjacent span shows the asset's share of that basket's
+    allocation (updated in place by sync_weights / sync_membership).
+    """
+    label = 'A' if basket_id == 'a' else 'B'
+    return html.Div([
+        dbc.Checkbox(
+            id={'type': f'bt-member-{basket_id}', 'index': filename},
+            value=bool(checked),
+            label=label,
+            style={'marginBottom': 0},
+            label_style={'color': _BASKET_COLOURS[basket_id], 'fontWeight': 'bold',
+                         'fontSize': '12px', 'marginLeft': '2px'},
+        ),
+        html.Span(
+            pct,
+            id={'type': f'bt-weight-pct-{basket_id}', 'index': filename},
+            style={'fontSize': '12px', 'color': '#666',
+                   'minWidth': '34px', 'textAlign': 'right'},
+        ),
+    ], style={'display': 'flex', 'alignItems': 'center', 'gap': '2px'})
 
-    The weights are *relative* numbers (default 1.0, so an untouched basket is
-    equal-weighted and adding an asset automatically re-weights all of them); the
-    percentage shown is each weight's share of the basket total (see
-    ``_weight_percentages``).  Editing a weight is handled by the per-basket
-    sync_weights callback, which persists the value and refreshes the percentage
-    in place without re-rendering this list (so the input keeps focus).
+
+def _render_basket_list(basket_data, weights=None, membership=None):
+    """Build the component tree for the single shared asset list.
+
+    Each row shows the asset's symbol and name, an editable **weight** input, two
+    **membership checkboxes** (Basket A / Basket B) each with the asset's
+    allocation percentage *within that basket* beside it, and a remove (✕)
+    button.  Called by manage_basket every time an asset is added or removed.
+
+    The weight is *relative* (default 1.0) and **shared** by both baskets; the
+    percentage shown next to each checkbox is the weight's share of that basket's
+    membered subset (see ``_basket_membership_pcts``).  Editing a weight or a
+    checkbox is handled by the sync_weights / sync_membership callbacks, which
+    persist the change and refresh the percentages in place without re-rendering
+    this list (so the input keeps focus).
 
     Parameters
     ----------
     basket_data : list of dicts, each with keys 'filename', 'symbol', 'name'.
-    basket_id   : str – 'a' or 'b'. Used to build pattern-matching IDs for the
-                        per-row weight inputs and remove buttons so the callbacks
-                        know which basket a control belongs to.
     weights     : dict or None – filename → relative weight, used to pre-fill each
-                        row's weight input and percentage (missing → default 1.0).
+                        row's weight input (missing → default 1.0).
+    membership  : dict or None – filename → {'a': bool, 'b': bool}; pre-checks the
+                        A/B checkboxes (a missing asset/flag defaults to checked).
 
     Returns
     -------
-    html.P (empty placeholder) or html.Div (list of rows with weight inputs and
-    remove buttons).
+    html.P (empty placeholder) or html.Div (list of rows with the weight input,
+    the two membership checkboxes with allocation %s, and the remove button).
     """
-    # If the basket is empty, show a placeholder message in light grey italic.
+    # If the list is empty, show a placeholder message in light grey italic.
     if not basket_data:
         return html.P('No assets', style={'color': '#aaa', 'fontStyle': 'italic', 'margin': '4px 0'})
 
-    # Resolve each row's weight (default 1.0) and its share-of-total percentage so
-    # the inputs and labels start out consistent with the stored weights.
     weights = weights or {}
-    weight_by_file = {
-        item['filename']: max(float(weights.get(item['filename'], 1.0)), 0.0)
-        for item in basket_data
-    }
-    pct_by_file = _weight_percentages(weight_by_file)
+    membership = membership or {}
+    # Per-basket allocation percentages (renormalised over each basket's members).
+    pct_a, pct_b = _basket_membership_pcts(basket_data, weights, membership)
+
+    def _weight_value(filename):
+        return max(float(weights.get(filename, 1.0)), 0.0)
+
+    def _is_member(filename, key):
+        return bool(membership.get(filename, {}).get(key, True))
 
     # Build one row per asset using a Python list comprehension.
-    # A list comprehension [ expr for item in iterable ] is a concise way to
-    # build a list by applying expr to each element of an iterable.
     return html.Div([
         html.Div([
             # Asset label: "AAPL — Apple Inc (USD)" — the trailing currency tag
@@ -468,18 +577,19 @@ def _render_basket_list(basket_data, basket_id, weights=None):
                       style={'flex': '1 1 140px', 'minWidth': '120px',
                              'wordBreak': 'break-word'}),
 
-            # Right-hand controls: the relative-weight input, its resulting
-            # allocation percentage, and the remove button, grouped together.
-            # flexShrink 0 keeps them at their natural size so they never crush the
-            # label; when the row is too narrow they wrap onto their own line.
+            # Right-hand controls: the shared relative-weight input, the two
+            # membership checkboxes (each with its allocation %), and the remove
+            # button.  flexShrink 0 keeps them at their natural size so they never
+            # crush the label; when the row is too narrow they wrap onto their own
+            # line.
             html.Div([
                 # Editable relative weight (pattern-matching ID carries the
                 # filename).  debounce=True commits on Enter/blur so the sync
                 # callback does not fire on every keystroke.
                 dbc.Input(
-                    id={'type': f'bt-weight-{basket_id}', 'index': item['filename']},
+                    id={'type': 'bt-weight', 'index': item['filename']},
                     type='number',
-                    value=weight_by_file[item['filename']],
+                    value=_weight_value(item['filename']),
                     min=0,
                     step='any',
                     debounce=True,
@@ -489,29 +599,25 @@ def _render_basket_list(basket_data, basket_id, weights=None):
                     inputMode='decimal',
                     style={'width': '58px', 'textAlign': 'right'},
                 ),
-                # Live allocation percentage (= this weight's share of the total),
-                # updated in place by the sync_weights callback.
-                html.Span(
-                    pct_by_file[item['filename']],
-                    id={'type': f'bt-weight-pct-{basket_id}', 'index': item['filename']},
-                    style={'fontSize': '12px', 'color': '#666',
-                           'minWidth': '38px', 'textAlign': 'right'},
-                ),
+                # The two per-basket membership checkboxes, each carrying the
+                # asset's allocation % within that basket.  Ticking/unticking one
+                # adds/removes the asset from that basket only.
+                _membership_checkbox('a', item['filename'],
+                                     _is_member(item['filename'], 'a'), pct_a[item['filename']]),
+                _membership_checkbox('b', item['filename'],
+                                     _is_member(item['filename'], 'b'), pct_b[item['filename']]),
 
                 # Remove button with a *pattern-matching ID*.
-                # Instead of a plain string id, we use a dict id:
-                #   {'type': 'bt-remove-a', 'index': 'aapl.parquet'}
-                # The 'type' key groups all remove buttons for basket 'a' together.
+                #   {'type': 'bt-remove', 'index': 'aapl.parquet'}
                 # The 'index' key carries the filename so the callback knows which
-                # asset was removed. Dash's ALL wildcard in the callback Input
-                # matches every button whose id has type == 'bt-remove-a'.
+                # asset was removed; Dash's ALL wildcard matches every such button.
                 html.Button(
                     '✕',
-                    id={'type': f'bt-remove-{basket_id}', 'index': item['filename']},
+                    id={'type': 'bt-remove', 'index': item['filename']},
                     n_clicks=0,
                     style=_BTN_SMALL,
                 ),
-            ], style={'display': 'flex', 'alignItems': 'center', 'gap': '6px',
+            ], style={'display': 'flex', 'alignItems': 'center', 'gap': '8px',
                       'flexShrink': 0, 'marginLeft': 'auto'}),
         ], style=_BASKET_ITEM_STYLE)
         for item in basket_data
@@ -522,10 +628,10 @@ def _render_basket_list(basket_data, basket_id, weights=None):
 # Helper: build the side-by-side metrics comparison table
 # ---------------------------------------------------------------------------
 
-def _metrics_table(metrics_a, metrics_b):
+def _metrics_table(metrics_a, metrics_b, label_a='Basket A', label_b='Basket B'):
     """Build an HTML table comparing performance metrics for both baskets.
 
-    The table has three columns: Metric | Basket A | Basket B. Basket A values
+    The table has three columns: Metric | <label_a> | <label_b>. Basket A values
     appear in blue, Basket B values in red. If one basket has no results (e.g.
     it was left empty), its column shows '—' for every metric.
 
@@ -534,6 +640,10 @@ def _metrics_table(metrics_a, metrics_b):
     metrics_a : dict or None – metric_name → formatted string for basket A.
                                Example: {'Total Return': '+25.3%', 'CAGR': '8.1%'}
     metrics_b : dict or None – same structure for basket B.
+    label_a   : str – header label for basket A's column (default 'Basket A').
+                      The shared-basket mode passes the strategy names instead
+                      (e.g. 'A: DCA') since both columns then hold the same assets.
+    label_b   : str – header label for basket B's column (default 'Basket B').
 
     Returns
     -------
@@ -552,9 +662,9 @@ def _metrics_table(metrics_a, metrics_b):
     # html.Tr = table row, html.Th = header cell, html.Td = data cell.
     rows = [
         html.Tr([
-            html.Th('Metric',   style={'textAlign': 'left',  'padding': '4px 8px', 'background': '#f0f0f0'}),
-            html.Th('Basket A', style={'textAlign': 'right', 'padding': '4px 8px', 'background': '#e8f0fe'}),
-            html.Th('Basket B', style={'textAlign': 'right', 'padding': '4px 8px', 'background': '#fce8e6'}),
+            html.Th('Metric', style={'textAlign': 'left',  'padding': '4px 8px', 'background': '#f0f0f0'}),
+            html.Th(label_a,  style={'textAlign': 'right', 'padding': '4px 8px', 'background': '#e8f0fe'}),
+            html.Th(label_b,  style={'textAlign': 'right', 'padding': '4px 8px', 'background': '#fce8e6'}),
         ])
     ] + [
         # For each metric key k, look it up in each basket's dict.
