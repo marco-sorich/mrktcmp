@@ -171,7 +171,67 @@ gunicorn --config gunicorn.conf.py src.app:server
 Open `http://127.0.0.1:8050/` in your browser.
 
 
+## Docker Deployment
+
+The repository ships a production `Dockerfile` (Python 3.14 slim, non-root user,
+gunicorn entrypoint). Inside the image the version cannot be derived from git
+metadata, so pass it explicitly at build time:
+
+```bash
+docker build --build-arg APP_VERSION=$(git describe --tags) -t mrktcmp .
+```
+
+The optional `UID`/`GID` build args (both default `1000`) let the container user
+match the host user that owns the mounted parquet data directory.
+
+### Example: integrate into an existing Caddy + Authelia compose stack
+
+The app has no host port mapping; Caddy reaches it over the shared Docker
+network. `BASE_URL` points to the in-container mount of the parquet data
+directory (a local path - no HTTP data host needed).
+
+```yaml
+services:
+  mrktcmp:
+    image: mrktcmp
+    container_name: mrktcmp
+    volumes:
+      - /srv/mrktcmp-data:/app/data:ro   # master.parquet + per-asset files, read-only
+    environment:
+      - BASE_URL=/app/data
+      - BASE_CURRENCY=EUR
+      - LOG_LEVEL=INFO
+      - TZ=Europe/Berlin
+    restart: unless-stopped
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    name: caddy_default     # attach to the network your Caddy container uses
+    external: true
+```
+
+Corresponding Caddy site:
+
+```
+marketcharts.example.com {
+    forward_auth authelia:9091 {
+        uri /api/verify?rd=https://auth.example.com
+    }
+    reverse_proxy mrktcmp:8050
+}
+```
+
+Notes:
+
+- Mount the data directory read-only (`:ro`); only the crawler writes to it.
+- `master.parquet` is loaded once at startup and per-asset files are cached
+  process-wide. After a crawl run, restart the container to pick up new data:
+  `docker restart mrktcmp`.
+
 ## QA Checks
+
 
 All checks require development dependencies, which are installed via `pip install -e ".[dev]"` (this includes **mypy 2.1.0**, the version CI runs — older 1.x releases silently miss some errors):
 
