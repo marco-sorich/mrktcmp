@@ -3,6 +3,11 @@
 # Run:   docker run -e BASE_URL=/data -v /srv/mrktcmp-data:/data:ro -p 8050:8050 mrktcmp
 FROM python:3.14-slim
 
+# tzdata makes the TZ environment variable (e.g. Europe/Berlin) effective;
+# gunicorn logs and application timestamps then use the local timezone.
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
 # setuptools-scm normally derives the version from git metadata, which is not
 # present inside the build context. Pass the version explicitly instead:
 #   docker build --build-arg APP_VERSION=$(git describe --tags) -t mrktcmp .

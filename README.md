@@ -193,7 +193,8 @@ directory (a local path - no HTTP data host needed).
 ```yaml
 services:
   mrktcmp:
-    image: mrktcmp
+    build: ./mrktcmp                      # local checkout of this repository
+    image: mrktcmp:latest
     container_name: mrktcmp
     volumes:
       - /srv/mrktcmp-data:/app/data:ro   # master.parquet + per-asset files, read-only
